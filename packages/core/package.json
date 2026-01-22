@@ -1,0 +1,37 @@
+{
+  "name": "@floruntime/core",
+  "version": "0.1.0",
+  "description": "Flo SDK core - wire protocol, types, and transport-agnostic operations",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/floruntime/flo-js.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/floruntime/flo-js#readme",
+  "bugs": {
+    "url": "https://github.com/floruntime/flo-js/issues"
+  },
+  "author": "Flo Authors",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "flo",
+    "sdk",
+    "core"
+  ],
+  "license": "MIT"
+}

@@ -1,0 +1,41 @@
+{
+  "name": "@floruntime/web",
+  "version": "0.1.0",
+  "description": "Flo SDK for Web - WebSocket transport",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/floruntime/flo-js.git",
+    "directory": "packages/web"
+  },
+  "homepage": "https://github.com/floruntime/flo-js#readme",
+  "bugs": {
+    "url": "https://github.com/floruntime/flo-js/issues"
+  },
+  "author": "Flo Authors",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@floruntime/core": "workspace:*"
+  },
+  "keywords": [
+    "flo",
+    "sdk",
+    "browser",
+    "websocket"
+  ],
+  "license": "MIT"
+}
