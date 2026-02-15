@@ -17,7 +17,7 @@ JavaScript/TypeScript SDK for the Flo distributed systems platform. This monorep
 ```bash
 npm install @floruntime/node
 # or
-pnpm add @floruntime/node
+yarn install @floruntime/node
 ```
 
 ### Browser
@@ -25,7 +25,7 @@ pnpm add @floruntime/node
 ```bash
 npm install @floruntime/web
 # or
-pnpm add @floruntime/web
+yarn add @floruntime/web
 ```
 
 > **Note:** The `@floruntime/web` package requires WebSocket server support on the Flo server. See the Flo documentation for WebSocket endpoint configuration.
@@ -91,9 +91,9 @@ await client.close();
 
 ```typescript
 interface ClientOptions {
-  namespace?: string;    // Default namespace for operations (default: "default")
-  timeoutMs?: number;    // Connection and operation timeout in ms (default: 5000)
-  debug?: boolean;       // Enable debug logging (default: false)
+  namespace?: string;           // Default namespace for operations (default: "default")
+  timeoutMs?: number;           // Connection and operation timeout in ms (default: 5000)
+  logger?: boolean | Logger;    // true = console logging, false = silent, or custom Logger
 }
 ```
 
@@ -272,16 +272,21 @@ const result = await client.stream.append(
 );
 console.log(`Offset: ${result.seq}`);
 
-// Read from stream
+// Read from stream (from beginning)
 const records = await client.stream.read("events", {
-  startMode: StreamStartMode.Tail,
+  offset: 0n,
   limit: 10,
-  blockMs: 5000,
 });
 
 for (const record of records.records) {
   console.log(decoder.decode(record.payload));
 }
+
+// Read from timestamp
+const recentRecords = await client.stream.read("events", {
+  from: Date.now() - 3600_000,  // last hour
+  limit: 100,
+});
 
 // Consumer groups
 await client.stream.groupJoin("events", "processors", "consumer-1");
@@ -343,52 +348,18 @@ try {
 ### Prerequisites
 
 - Node.js >= 18
-- pnpm >= 8
 
 ### Setup
 
 ```bash
 # Install dependencies
-pnpm install
+npm install
 
 # Build all packages
-pnpm build
+npm run build
 
 # Run tests
-pnpm test
-```
-
-### Project Structure
-
-```
-sdks/js/
-├── packages/
-│   ├── core/           # @floruntime/core
-│   │   └── src/
-│   │       ├── types.ts
-│   │       ├── errors.ts
-│   │       ├── wire.ts
-│   │       ├── kv.ts
-│   │       ├── queue.ts
-│   │       └── index.ts
-│   ├── node/           # @floruntime/node
-│   │   └── src/
-│   │       ├── transport.ts
-│   │       ├── client.ts
-│   │       └── index.ts
-│   └── web/            # @floruntime/web
-│       └── src/
-│           ├── transport.ts
-│           ├── client.ts
-│           └── index.ts
-├── tests/
-│   └── wire.test.ts
-├── examples/
-│   ├── node-basic.ts
-│   └── browser-basic.html
-├── package.json
-├── pnpm-workspace.yaml
-└── tsconfig.base.json
+npm run test
 ```
 
 ## License

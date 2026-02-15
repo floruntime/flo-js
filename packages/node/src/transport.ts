@@ -14,6 +14,8 @@ import {
   UnexpectedEOFError,
   computeCRC32,
   parseResponseHeader,
+  type Logger,
+  silentLogger,
 } from "@floruntime/core";
 
 /**
@@ -26,8 +28,8 @@ export interface TcpTransportOptions {
   /** Read/write timeout in milliseconds */
   timeoutMs?: number;
 
-  /** Enable debug logging */
-  debug?: boolean;
+  /** Logger for debug/warning/error messages */
+  logger?: Logger;
 }
 
 /**
@@ -75,7 +77,7 @@ export class TcpTransport implements Transport {
   private readonly port: number;
   private readonly connectTimeoutMs: number;
   private readonly timeoutMs: number;
-  private readonly debug: boolean;
+  private readonly logger: Logger;
 
   constructor(endpoint: string, options?: TcpTransportOptions) {
     const { host, port } = parseEndpoint(endpoint);
@@ -83,7 +85,7 @@ export class TcpTransport implements Transport {
     this.port = port;
     this.connectTimeoutMs = options?.connectTimeoutMs ?? 5000;
     this.timeoutMs = options?.timeoutMs ?? 5000;
-    this.debug = options?.debug ?? false;
+    this.logger = options?.logger ?? silentLogger;
   }
 
   async connect(): Promise<void> {
@@ -106,9 +108,7 @@ export class TcpTransport implements Transport {
         connected = true;
         clearTimeout(timeoutId);
         this.socket = socket;
-        if (this.debug) {
-          console.log(`[flo] Connected to ${this.host}:${this.port}`);
-        }
+        this.logger.debug(`Connected to ${this.host}:${this.port}`);
         resolve();
       });
 
@@ -129,9 +129,7 @@ export class TcpTransport implements Transport {
     if (this.socket) {
       this.socket.destroy();
       this.socket = null;
-      if (this.debug) {
-        console.log("[flo] Disconnected");
-      }
+      this.logger.debug("Disconnected");
     }
   }
 

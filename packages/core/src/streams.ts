@@ -11,16 +11,19 @@ import {
   OptionTag,
   type RawResponse,
   StatusCode,
+  StorageTier,
   type StreamAppendOptions,
   type StreamAppendResult,
   type StreamReadOptions,
   type StreamReadResult,
   type StreamRecord,
+  type StreamInfoResult,
   type StreamSubscribeOptions,
   type StreamEventCallback,
   type StreamSubscription,
   type StreamGroupOptions,
   type StreamAckOptions,
+  type StreamNackOptions,
 } from "./types.js";
 import { OptionsBuilder } from "./wire.js";
 
@@ -51,64 +54,61 @@ export interface StreamRequestSender {
 }
 
 const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
 
 /**
  * Parse stream read response into records.
+ *
+ * Wire format: [count:u32]([sequence:u64][timestamp_ms:i64][tier:u8][partition:u32]
+ *              [key_present:u8][payload_len:u32][payload][header_count:u32])*
  */
 export function parseStreamReadResponse(data: Uint8Array): StreamReadResult {
-  if (data.length === 0) {
-    return { records: [], hasMore: false };
+  if (data.length < 4) {
+    return { records: [] };
   }
 
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   let offset = 0;
 
-  const records: StreamRecord[] = [];
-
-  // Response format: count (u32), then for each record:
-  // - seq (u64)
-  // - timestamp (u64)
-  // - key_len (u16), key (bytes)
-  // - header_len (u32), header (bytes)
-  // - payload_len (u32), payload (bytes)
-
-  if (data.length < 4) {
-    return { records: [], hasMore: false };
-  }
-
   const count = view.getUint32(offset, true);
   offset += 4;
 
+  const records: StreamRecord[] = [];
+
   for (let i = 0; i < count && offset < data.length; i++) {
-    if (offset + 16 > data.length) break;
-
-    const seq = view.getBigUint64(offset, true);
+    // sequence (u64 LE)
+    if (offset + 8 > data.length) break;
+    const sequence = view.getBigUint64(offset, true);
     offset += 8;
 
-    const timestamp = view.getBigUint64(offset, true);
+    // timestamp_ms (i64 LE)
+    if (offset + 8 > data.length) break;
+    const timestampMs = view.getBigInt64(offset, true);
     offset += 8;
 
-    // Key
-    if (offset + 2 > data.length) break;
-    const keyLen = view.getUint16(offset, true);
-    offset += 2;
+    // tier (u8)
+    if (offset + 1 > data.length) break;
+    const tier = data[offset] as StorageTier;
+    offset += 1;
 
-    if (offset + keyLen > data.length) break;
-    const keyBytes = data.subarray(offset, offset + keyLen);
-    const key = textDecoder.decode(keyBytes);
-    offset += keyLen;
-
-    // Header
+    // partition (u32) — skip
     if (offset + 4 > data.length) break;
-    const headerLen = view.getUint32(offset, true);
     offset += 4;
 
-    if (offset + headerLen > data.length) break;
-    const header = new Uint8Array(data.subarray(offset, offset + headerLen));
-    offset += headerLen;
+    // key_present (u8)
+    if (offset + 1 > data.length) break;
+    const keyPresent = data[offset];
+    offset += 1;
 
-    // Payload
+    // skip key if present
+    if (keyPresent !== 0) {
+      if (offset + 4 > data.length) break;
+      const keyLen = view.getUint32(offset, true);
+      offset += 4;
+      if (offset + keyLen > data.length) break;
+      offset += keyLen;
+    }
+
+    // payload_len (u32) + payload
     if (offset + 4 > data.length) break;
     const payloadLen = view.getUint32(offset, true);
     offset += 4;
@@ -117,42 +117,59 @@ export function parseStreamReadResponse(data: Uint8Array): StreamReadResult {
     const payload = new Uint8Array(data.subarray(offset, offset + payloadLen));
     offset += payloadLen;
 
+    // header_count (u32) — skip for now
+    if (offset + 4 > data.length) break;
+    offset += 4;
+
     records.push({
-      seq,
-      key,
-      header,
+      sequence,
+      timestampMs,
+      tier,
       payload,
-      timestamp,
+      headers: null,
     });
   }
 
-  // Check if there are more records (hasMore flag at end)
-  let hasMore = false;
-  if (offset < data.length) {
-    hasMore = data[offset] === 1;
-  }
-
-  // Extract next offset from last record
-  const lastRecord = records[records.length - 1];
-  const nextOffset = lastRecord !== undefined ? lastRecord.seq + 1n : undefined;
-
-  return { records, nextOffset, hasMore };
+  return { records };
 }
 
 /**
  * Parse stream append response.
+ *
+ * Wire format: [sequence:u64][timestamp_ms:i64]
  */
 export function parseStreamAppendResponse(data: Uint8Array): StreamAppendResult {
-  if (data.length < 12) {
+  if (data.length < 16) {
     throw new Error("Invalid append response: too short");
   }
 
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 
-  const partition = view.getUint32(0, true);
-  const seq = view.getBigUint64(4, true);
+  const sequence = view.getBigUint64(0, true);
+  const timestampMs = view.getBigInt64(8, true);
 
-  return { partition, seq };
+  return { sequence, timestampMs };
+}
+
+/**
+ * Parse stream info response.
+ *
+ * Wire format: [first_seq:u64][last_seq:u64][count:u64][bytes:u64][partition_count:u32]
+ */
+export function parseStreamInfoResponse(data: Uint8Array): StreamInfoResult {
+  if (data.length < 36) {
+    throw new Error("Invalid stream info response: too short");
+  }
+
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+
+  return {
+    firstSeq: view.getBigUint64(0, true),
+    lastSeq: view.getBigUint64(8, true),
+    count: view.getBigUint64(16, true),
+    bytes: view.getBigUint64(24, true),
+    partitionCount: view.getUint32(32, true),
+  };
 }
 
 /**
@@ -381,6 +398,30 @@ export class StreamOperations {
     };
   }
   /**
+   * Get stream metadata.
+   *
+   * @param stream - Stream name
+   * @param opts - Optional namespace override
+   */
+  async info(stream: string, opts?: { namespace?: string }): Promise<StreamInfoResult> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+
+    const resp = await this.sender.sendRequest(
+      OpCode.StreamInfo,
+      namespace,
+      textEncoder.encode(stream),
+      new Uint8Array(0),
+      new Uint8Array(0)
+    );
+
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+
+    return parseStreamInfoResponse(resp.data);
+  }
+
+  /**
    * Read records as part of a consumer group.
    *
    * Consumer groups enable load balancing across multiple consumers.
@@ -433,11 +474,97 @@ export class StreamOperations {
   }
 
   /**
+   * Join a consumer group.
+   *
+   * @param stream - Stream name
+   * @param group - Consumer group name
+   * @param consumer - Consumer ID (unique within the group)
+   * @param opts - Optional namespace override
+   */
+  async groupJoin(
+    stream: string,
+    group: string,
+    consumer: string,
+    opts?: { namespace?: string }
+  ): Promise<void> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+
+    const groupBytes = textEncoder.encode(group);
+    const consumerBytes = textEncoder.encode(consumer);
+    const value = new Uint8Array(2 + groupBytes.length + 2 + consumerBytes.length);
+    const valueView = new DataView(value.buffer);
+
+    let offset = 0;
+    valueView.setUint16(offset, groupBytes.length, true);
+    offset += 2;
+    value.set(groupBytes, offset);
+    offset += groupBytes.length;
+    valueView.setUint16(offset, consumerBytes.length, true);
+    offset += 2;
+    value.set(consumerBytes, offset);
+
+    const resp = await this.sender.sendRequest(
+      OpCode.StreamGroupJoin,
+      namespace,
+      textEncoder.encode(stream),
+      value,
+      new Uint8Array(0)
+    );
+
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+  }
+
+  /**
+   * Leave a consumer group.
+   *
+   * @param stream - Stream name
+   * @param group - Consumer group name
+   * @param consumer - Consumer ID
+   * @param opts - Optional namespace override
+   */
+  async groupLeave(
+    stream: string,
+    group: string,
+    consumer: string,
+    opts?: { namespace?: string }
+  ): Promise<void> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+
+    const groupBytes = textEncoder.encode(group);
+    const consumerBytes = textEncoder.encode(consumer);
+    const value = new Uint8Array(2 + groupBytes.length + 2 + consumerBytes.length);
+    const valueView = new DataView(value.buffer);
+
+    let offset = 0;
+    valueView.setUint16(offset, groupBytes.length, true);
+    offset += 2;
+    value.set(groupBytes, offset);
+    offset += groupBytes.length;
+    valueView.setUint16(offset, consumerBytes.length, true);
+    offset += 2;
+    value.set(consumerBytes, offset);
+
+    const resp = await this.sender.sendRequest(
+      OpCode.StreamGroupLeave,
+      namespace,
+      textEncoder.encode(stream),
+      value,
+      new Uint8Array(0)
+    );
+
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+  }
+
+  /**
    * Acknowledge records in a consumer group.
    *
    * @param stream - Stream name
    * @param seqs - Sequence numbers to acknowledge
-   * @param opts - Ack options
+   * @param opts - Ack options (group, consumer)
    */
   async groupAck(stream: string, seqs: bigint[], opts: StreamAckOptions): Promise<void> {
     if (seqs.length === 0) {
@@ -446,9 +573,12 @@ export class StreamOperations {
 
     const namespace = this.sender.getNamespace(opts.namespace);
 
-    // Wire format: [group_len:u16][group][count:u32][seq:u64]*
+    // Wire format: [group_len:u16][group][consumer_len:u16][consumer][count:u32][seq:u64]*
     const groupBytes = textEncoder.encode(opts.group);
-    const value = new Uint8Array(2 + groupBytes.length + 4 + seqs.length * 8);
+    const consumerBytes = textEncoder.encode(opts.consumer);
+    const value = new Uint8Array(
+      2 + groupBytes.length + 2 + consumerBytes.length + 4 + seqs.length * 8
+    );
     const view = new DataView(value.buffer);
 
     let offset = 0;
@@ -456,6 +586,10 @@ export class StreamOperations {
     offset += 2;
     value.set(groupBytes, offset);
     offset += groupBytes.length;
+    view.setUint16(offset, consumerBytes.length, true);
+    offset += 2;
+    value.set(consumerBytes, offset);
+    offset += consumerBytes.length;
     view.setUint32(offset, seqs.length, true);
     offset += 4;
     for (const seq of seqs) {
@@ -469,6 +603,64 @@ export class StreamOperations {
       textEncoder.encode(stream),
       value,
       new Uint8Array(0)
+    );
+
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+  }
+
+  /**
+   * Negatively acknowledge records in a consumer group.
+   * Records will be redelivered after the redelivery delay.
+   *
+   * @param stream - Stream name
+   * @param seqs - Sequence numbers to nack
+   * @param opts - Nack options (group, consumer, redeliveryDelayMs)
+   */
+  async groupNack(stream: string, seqs: bigint[], opts: StreamNackOptions): Promise<void> {
+    if (seqs.length === 0) {
+      return;
+    }
+
+    const namespace = this.sender.getNamespace(opts.namespace);
+
+    // Wire format: [group_len:u16][group][consumer_len:u16][consumer][count:u32][seq:u64]*
+    const groupBytes = textEncoder.encode(opts.group);
+    const consumerBytes = textEncoder.encode(opts.consumer);
+    const value = new Uint8Array(
+      2 + groupBytes.length + 2 + consumerBytes.length + 4 + seqs.length * 8
+    );
+    const view = new DataView(value.buffer);
+
+    let offset = 0;
+    view.setUint16(offset, groupBytes.length, true);
+    offset += 2;
+    value.set(groupBytes, offset);
+    offset += groupBytes.length;
+    view.setUint16(offset, consumerBytes.length, true);
+    offset += 2;
+    value.set(consumerBytes, offset);
+    offset += consumerBytes.length;
+    view.setUint32(offset, seqs.length, true);
+    offset += 4;
+    for (const seq of seqs) {
+      view.setBigUint64(offset, seq, true);
+      offset += 8;
+    }
+
+    // Add redelivery delay via TLV options
+    const builder = new OptionsBuilder();
+    if (opts.redeliveryDelayMs !== undefined) {
+      builder.addU32(OptionTag.RedeliveryDelayMS, opts.redeliveryDelayMs);
+    }
+
+    const resp = await this.sender.sendRequest(
+      OpCode.StreamGroupNack,
+      namespace,
+      textEncoder.encode(stream),
+      value,
+      builder.build()
     );
 
     if (resp.status !== StatusCode.OK) {

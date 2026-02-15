@@ -5,6 +5,9 @@
 import {
   ActionOperations,
   type ClientOptions,
+  type Logger,
+  consoleLogger,
+  silentLogger,
   HEADER_SIZE,
   KVOperations,
   type OpCode,
@@ -24,7 +27,7 @@ import { TcpTransport, type TcpTransportOptions } from "./transport.js";
 export class FloClient {
   private readonly transport: Transport;
   private readonly defaultNamespace: string;
-  private readonly debug: boolean;
+  private readonly logger: Logger;
   private requestId: bigint = 0n;
 
   /** KV operations */
@@ -50,12 +53,20 @@ export class FloClient {
    */
   constructor(endpoint: string, options?: ClientOptions) {
     this.defaultNamespace = options?.namespace ?? "default";
-    this.debug = options?.debug ?? false;
+    
+    // Resolve logger: explicit logger option > debug flag > silent
+    if (options?.logger === true) {
+      this.logger = consoleLogger;
+    } else if (options?.logger && typeof options.logger === "object") {
+      this.logger = options.logger;
+    } else {
+      this.logger = silentLogger;
+    }
 
     const transportOpts: TcpTransportOptions = {
       connectTimeoutMs: options?.timeoutMs ?? 5000,
       timeoutMs: options?.timeoutMs ?? 5000,
-      debug: this.debug,
+      logger: this.logger,
     };
 
     this.transport = new TcpTransport(endpoint, transportOpts);
@@ -120,12 +131,8 @@ export class FloClient {
     const textEncoder = new TextEncoder();
     const namespaceBytes = textEncoder.encode(namespace);
 
-    if (this.debug) {
-      const textDecoder = new TextDecoder();
-      console.log(
-        `[flo] -> ${opCode} ns=${namespace} key=${textDecoder.decode(key)}`
-      );
-    }
+    const textDecoder = new TextDecoder();
+    this.logger.debug(`-> ${opCode} ns=${namespace} key=${textDecoder.decode(key)}`);
 
     const request = serializeRequest(
       requestId,
@@ -143,9 +150,7 @@ export class FloClient {
 
     const rawResponse = parseRawResponse(header, data);
 
-    if (this.debug) {
-      console.log(`[flo] <- ${rawResponse.status} ${data.length} bytes`);
-    }
+    this.logger.debug(`<- ${rawResponse.status} ${data.length} bytes`);
 
     return rawResponse;
   }

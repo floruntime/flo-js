@@ -4,18 +4,19 @@
  * This package provides a Flo client optimized for real-time browser applications:
  * - **Streams**: Subscribe to and publish real-time events (pub/sub)
  * - **KV (read-only)**: Access configuration, feature flags, user preferences
- * - **Authentication**: Token-based auth (TODO: server-side not yet implemented)
+ * - **Authentication**: JWT/API key auth during WebSocket upgrade
  *
  * For full KV mutations (put, delete) and queue operations, use @floruntime/node
  * on the backend.
  *
  * @example
  * ```typescript
- * import { FloWebClient } from "@floruntime/web";
+ * import { FloClient } from "@floruntime/web";
  *
- * const client = new FloWebClient("wss://flo.example.com/ws", {
+ * const client = new FloClient("wss://flo.example.com/ws", {
  *   namespace: "myapp",
  *   authToken: "user-jwt-token",
+ *   onAuthRequired: async () => await refreshToken(),
  * });
  *
  * await client.connect();
@@ -61,11 +62,15 @@ export {
   type ScanResult,
   // Client options
   type WebClientOptions,
+  // Logger
+  type Logger,
+  consoleLogger,
+  silentLogger,
   // Error type guards
   isNotFound,
   isUnauthorized,
 } from "@floruntime/core";
 
 // Web-specific exports
-export { FloWebClient, FloClient } from "./client.js";
-export { WebSocketTransport, type WebSocketTransportOptions, type StreamEventHandler } from "./transport.js";
+export { FloClient, type AuthResult } from "./client.js";
+export { WebSocketTransport, AuthenticationError, type WebSocketTransportOptions, type StreamEventHandler } from "./transport.js";

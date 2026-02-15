@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@floruntime/core": ["./packages/core/src"],
+      "@floruntime/node": ["./packages/node/src"],
+      "@floruntime/web": ["./packages/web/src"]
+    }
+  },
+  "include": ["examples/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -4,7 +4,7 @@
  * Designed for real-time web applications with:
  * - Stream operations (pub/sub for real-time events)
  * - Read-only KV access (for config, feature flags, preferences)
- * - Authentication support (TODO: server-side not yet implemented)
+ * - Authentication support (JWT/API key via WebSocket upgrade)
  *
  * Note: Queue operations and KV mutations are not exposed in the web client.
  * Use the Node.js client (@floruntime/node) for backend operations.
@@ -12,16 +12,30 @@
 
 import {
   type WebClientOptions,
+  type Logger,
+  consoleLogger,
+  silentLogger,
   HEADER_SIZE,
-  type OpCode,
+  OpCode,
+  StatusCode,
   type RawResponse,
-  type StreamRecord,
   StreamOperations,
   KVReadOnlyOperations,
   parseRawResponse,
   serializeRequest,
+  UnauthorizedError,
 } from "@floruntime/core";
 import { WebSocketTransport, type WebSocketTransportOptions } from "./transport.js";
+
+/**
+ * Authentication result from OpCode.Auth request.
+ */
+export interface AuthResult {
+  /** User ID from the validated token (if present) */
+  userId: string | null;
+  /** Locked namespace from the token (if present) */
+  namespace: string | null;
+}
 
 /**
  * Flo client for browser environments using WebSocket transport.
@@ -34,11 +48,15 @@ import { WebSocketTransport, type WebSocketTransportOptions } from "./transport.
  *
  * @example
  * ```typescript
- * import { FloWebClient } from "@floruntime/web";
+ * import { FloClient } from "@floruntime/web";
  *
- * const client = new FloWebClient("wss://flo.example.com/ws", {
+ * const client = new FloClient("wss://flo.example.com/ws", {
  *   namespace: "myapp",
- *   authToken: "user-jwt-token", // TODO: auth not yet implemented
+ *   authToken: "user-jwt-token",
+ *   onAuthRequired: async () => {
+ *     // Called if auth fails - return a fresh token
+ *     return await refreshAuthToken();
+ *   },
  * });
  *
  * await client.connect();
@@ -57,14 +75,17 @@ import { WebSocketTransport, type WebSocketTransportOptions } from "./transport.
  * const config = await client.kv.get("config:feature-flags");
  * ```
  */
-export class FloWebClient {
+export class FloClient {
   private readonly transport: WebSocketTransport;
   private readonly defaultNamespace: string;
-  private readonly debug: boolean;
+  private readonly logger: Logger;
   private requestId: bigint = 0n;
 
-  // Stream event handlers for forwarding to StreamOperations
-  private streamEventCallbacks: Set<(streamName: string, record: StreamRecord) => void> = new Set();
+  // Subscription push handlers for forwarding to StreamOperations
+  private subscriptionPushCallbacks: Set<(subscriptionId: number, data: Uint8Array) => void> = new Set();
+
+  // Disconnect handlers
+  private disconnectCallbacks: Set<(reason?: string) => void> = new Set();
 
   /** Stream operations (pub/sub for real-time events) */
   readonly streams: StreamOperations;
@@ -80,22 +101,37 @@ export class FloWebClient {
    */
   constructor(url: string, options?: WebClientOptions) {
     this.defaultNamespace = options?.namespace ?? "default";
-    this.debug = options?.debug ?? false;
+    
+    // Resolve logger: explicit logger option > debug flag > silent
+    if (options?.logger === true) {
+      this.logger = consoleLogger;
+    } else if (options?.logger && typeof options.logger === "object") {
+      this.logger = options.logger;
+    } else {
+      this.logger = silentLogger;
+    }
 
     const transportOpts: WebSocketTransportOptions = {
       connectTimeoutMs: options?.timeoutMs ?? 5000,
       timeoutMs: options?.timeoutMs ?? 5000,
-      debug: this.debug,
+      logger: this.logger,
       authToken: options?.authToken,
       onAuthRequired: options?.onAuthRequired,
     };
 
     this.transport = new WebSocketTransport(url, transportOpts);
 
-    // Set up stream event forwarding from transport
-    this.transport.onStreamEvent((streamName, record) => {
-      for (const callback of this.streamEventCallbacks) {
-        callback(streamName, record);
+    // Set up subscription push forwarding from transport
+    this.transport.onPushMessage((subscriptionId, data) => {
+      for (const callback of this.subscriptionPushCallbacks) {
+        callback(subscriptionId, data);
+      }
+    });
+
+    // Set up disconnect forwarding from transport
+    this.transport.onDisconnect((reason) => {
+      for (const callback of this.disconnectCallbacks) {
+        callback(reason);
       }
     });
 
@@ -103,11 +139,8 @@ export class FloWebClient {
     const sender = {
       sendRequest: this.sendRequest.bind(this),
       getNamespace: this.getNamespace.bind(this),
-      onStreamEvent: (callback: (streamName: string, record: StreamRecord) => void) => {
-        this.streamEventCallbacks.add(callback);
-      },
-      offStreamEvent: (callback: (streamName: string, record: StreamRecord) => void) => {
-        this.streamEventCallbacks.delete(callback);
+      onSubscriptionPush: (callback: (subscriptionId: number, data: Uint8Array) => void) => {
+        this.subscriptionPushCallbacks.add(callback);
       },
     };
 
@@ -118,9 +151,10 @@ export class FloWebClient {
   /**
    * Connect to the server.
    *
-   * If an auth token was provided, authentication will be performed
-   * after the WebSocket connection is established.
-   * TODO: Server-side auth not yet implemented.
+   * If an auth token was provided, it will be sent during the WebSocket
+   * upgrade handshake. The server validates the token before establishing
+   * the connection. If auth fails and onAuthRequired was provided, it will
+   * be called to obtain a new token for retry.
    */
   async connect(): Promise<void> {
     await this.transport.connect();
@@ -138,6 +172,16 @@ export class FloWebClient {
    */
   isConnected(): boolean {
     return this.transport.isConnected();
+  }
+
+  /**
+   * Register a callback for disconnect events.
+   * Called when the connection is closed (by server or network).
+   * Returns a cleanup function to unregister the callback.
+   */
+  onDisconnect(callback: (reason?: string) => void): () => void {
+    this.disconnectCallbacks.add(callback);
+    return () => this.disconnectCallbacks.delete(callback);
   }
 
   /**
@@ -171,12 +215,8 @@ export class FloWebClient {
     const textEncoder = new TextEncoder();
     const namespaceBytes = textEncoder.encode(namespace);
 
-    if (this.debug) {
-      const textDecoder = new TextDecoder();
-      console.log(
-        `[flo] -> ${opCode} ns=${namespace} key=${textDecoder.decode(key)}`
-      );
-    }
+    const textDecoder = new TextDecoder();
+    this.logger.debug(`-> ${opCode} ns=${namespace} key=${textDecoder.decode(key)}`);
 
     const request = serializeRequest(
       requestId,
@@ -194,16 +234,91 @@ export class FloWebClient {
 
     const rawResponse = parseRawResponse(header, data);
 
-    if (this.debug) {
-      console.log(`[flo] <- ${rawResponse.status} ${data.length} bytes`);
-    }
+    this.logger.debug(`<- ${rawResponse.status} ${data.length} bytes`);
 
     return rawResponse;
   }
-}
 
-// Re-export the old name for backwards compatibility, but mark as deprecated
-/**
- * @deprecated Use FloWebClient instead. FloClient will be removed in a future version.
- */
-export const FloClient = FloWebClient;
+  /**
+   * Authenticate with the server using a token (JWT or API key).
+   *
+   * This method sends an OpCode.Auth request to the server to validate
+   * the token and update the connection's authentication state. Use this
+   * for token refresh scenarios where you need to update auth without
+   * reconnecting.
+   *
+   * Note: Initial auth is typically handled during WebSocket upgrade via
+   * the `authToken` option. This method is for post-connection auth updates.
+   *
+   * @param token - The authentication token (JWT or API key)
+   * @returns Authentication result with user ID and namespace (if present)
+   * @throws {UnauthorizedError} If the token is invalid
+   *
+   * @example
+   * ```typescript
+   * // Refresh auth token after expiry
+   * const newToken = await refreshTokenFromAuthServer();
+   * const authResult = await client.authenticate(newToken);
+   * console.log("Authenticated as:", authResult.userId);
+   * ```
+   */
+  async authenticate(token: string): Promise<AuthResult> {
+    const textEncoder = new TextEncoder();
+    const tokenBytes = textEncoder.encode(token);
+
+    const response = await this.sendRequest(
+      OpCode.Auth,
+      "", // No namespace for auth
+      tokenBytes, // Token goes in key field
+      new Uint8Array(0), // No value
+      new Uint8Array(0) // No options
+    );
+
+    if (response.status !== StatusCode.OK) {
+      throw new UnauthorizedError("Authentication failed: invalid token");
+    }
+
+    // Parse auth response: [has_user_id:u8] [user_id_len:u32 user_id:bytes]? [has_namespace:u8] [namespace_len:u32 namespace:bytes]?
+    const data = response.data;
+    const textDecoder = new TextDecoder();
+    let offset = 0;
+
+    let userId: string | null = null;
+    let namespace: string | null = null;
+
+    if (data.length > offset) {
+      const hasUserId = data[offset];
+      offset += 1;
+      if (hasUserId === 1 && data.length >= offset + 4) {
+        const view = new DataView(data.buffer, data.byteOffset + offset, 4);
+        const userIdLen = view.getUint32(0, true);
+        offset += 4;
+        if (data.length >= offset + userIdLen) {
+          userId = textDecoder.decode(data.subarray(offset, offset + userIdLen));
+          offset += userIdLen;
+        }
+      }
+    }
+
+    if (data.length > offset) {
+      const hasNamespace = data[offset];
+      offset += 1;
+      if (hasNamespace === 1 && data.length >= offset + 4) {
+        const view = new DataView(data.buffer, data.byteOffset + offset, 4);
+        const namespaceLen = view.getUint32(0, true);
+        offset += 4;
+        if (data.length >= offset + namespaceLen) {
+          namespace = textDecoder.decode(data.subarray(offset, offset + namespaceLen));
+          offset += namespaceLen;
+        }
+      }
+    }
+
+    // Update transport's auth token for future reconnections
+    this.transport.setAuthToken(token);
+
+    this.logger.debug(`Authenticated: userId=${userId}, namespace=${namespace}`);
+
+    return { userId, namespace };
+  }
+}

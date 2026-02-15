@@ -7,13 +7,13 @@ import {
   HEADER_SIZE,
   InvalidChecksumError,
   NotConnectedError,
-  OpCode,
   TimeoutError,
   type Transport,
   UnexpectedEOFError,
   computeCRC32,
   parseResponseHeader,
-  parseStreamReadResponse,
+  type Logger,
+  silentLogger,
 } from "@floruntime/core";
 
 import type { StreamRecord } from "@floruntime/core";
@@ -22,6 +22,16 @@ import type { StreamRecord } from "@floruntime/core";
  * Callback for server-pushed stream events.
  */
 export type StreamEventHandler = (streamName: string, record: StreamRecord) => void;
+
+/**
+ * Callback for server-pushed messages (subscriptions).
+ */
+export type PushMessageHandler = (subscriptionId: number, data: Uint8Array) => void;
+
+/**
+ * Callback for disconnect events.
+ */
+export type DisconnectHandler = (reason?: string) => void;
 
 /**
  * WebSocket transport options.
@@ -33,19 +43,20 @@ export interface WebSocketTransportOptions {
   /** Request timeout in milliseconds */
   timeoutMs?: number;
 
-  /** Enable debug logging */
-  debug?: boolean;
+  /** Logger for debug/warning/error messages */
+  logger?: Logger;
 
   /**
-   * Authentication token to send after connection.
-   * TODO: Server-side auth not yet implemented - this is a placeholder.
+   * Authentication token (JWT or API key).
+   * Sent as query parameter during WebSocket upgrade handshake.
+   * Server validates token before establishing connection.
    */
   authToken?: string;
 
   /**
-   * Callback invoked when authentication is required or fails.
-   * Should return a new auth token.
-   * TODO: Server-side auth not yet implemented.
+   * Callback invoked when authentication fails.
+   * Should return a new auth token for retry.
+   * If not provided, auth failures will throw an error.
    */
   onAuthRequired?: () => Promise<string>;
 }
@@ -57,13 +68,24 @@ export interface WebSocketTransportOptions {
  * The WebSocket connection sends and receives the same binary protocol
  * messages as the TCP transport, just wrapped in WebSocket binary frames.
  */
+/**
+ * Authentication error thrown when server rejects credentials.
+ */
+export class AuthenticationError extends Error {
+  constructor(message: string = "Authentication failed") {
+    super(message);
+    this.name = "AuthenticationError";
+  }
+}
+
 export class WebSocketTransport implements Transport {
   private ws: WebSocket | null = null;
-  private readonly url: string;
+  private readonly baseUrl: string;
   private readonly connectTimeoutMs: number;
   private readonly timeoutMs: number;
-  private readonly debug: boolean;
-  private readonly authToken?: string;
+  private readonly logger: Logger;
+  private authToken?: string;
+  private readonly onAuthRequired?: () => Promise<string>;
 
   // Pending requests waiting for responses
   private pendingRequests: Map<
@@ -77,6 +99,12 @@ export class WebSocketTransport implements Transport {
   // Stream event handlers for server-push notifications
   private streamEventHandlers: Set<StreamEventHandler> = new Set();
 
+  // Push message handler for subscription notifications
+  private pushMessageHandler: PushMessageHandler | null = null;
+
+  // Disconnect handler
+  private disconnectHandler: DisconnectHandler | null = null;
+
   constructor(url: string, options?: WebSocketTransportOptions) {
     // Validate URL format
     if (!url.startsWith("ws://") && !url.startsWith("wss://")) {
@@ -84,12 +112,32 @@ export class WebSocketTransport implements Transport {
         "WebSocket URL must start with ws:// or wss://"
       );
     }
-    this.url = url;
+    this.baseUrl = url;
     this.connectTimeoutMs = options?.connectTimeoutMs ?? 5000;
     this.timeoutMs = options?.timeoutMs ?? 5000;
-    this.debug = options?.debug ?? false;
+    this.logger = options?.logger ?? silentLogger;
     this.authToken = options?.authToken;
-    // TODO: options?.onAuthRequired will be used when server-side auth is implemented
+    this.onAuthRequired = options?.onAuthRequired;
+  }
+
+  /**
+   * Build the WebSocket URL with authentication token if provided.
+   * Token is passed as query parameter for browser compatibility.
+   */
+  private buildUrl(): string {
+    if (!this.authToken) {
+      return this.baseUrl;
+    }
+    const separator = this.baseUrl.includes("?") ? "&" : "?";
+    return `${this.baseUrl}${separator}token=${encodeURIComponent(this.authToken)}`;
+  }
+
+  /**
+   * Update the authentication token.
+   * Call this after onAuthRequired returns a new token.
+   */
+  setAuthToken(token: string): void {
+    this.authToken = token;
   }
 
   /**
@@ -106,13 +154,37 @@ export class WebSocketTransport implements Transport {
     this.streamEventHandlers.delete(handler);
   }
 
+  /**
+   * Register a handler for push messages (subscription notifications).
+   * The handler receives the subscription ID and raw data payload.
+   */
+  onPushMessage(handler: PushMessageHandler): void {
+    this.pushMessageHandler = handler;
+  }
+
+  /**
+   * Register a handler for disconnect events.
+   */
+  onDisconnect(handler: DisconnectHandler): void {
+    this.disconnectHandler = handler;
+  }
+
   async connect(): Promise<void> {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       return;
     }
 
+    return this.attemptConnect();
+  }
+
+  /**
+   * Attempt to connect, handling auth failures with retry via onAuthRequired.
+   */
+  private async attemptConnect(isRetry: boolean = false): Promise<void> {
+    const url = this.buildUrl();
+
     return new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(this.url);
+      const ws = new WebSocket(url, "flo-proto");
       ws.binaryType = "arraybuffer";
 
       const timeoutId = setTimeout(() => {
@@ -125,31 +197,43 @@ export class WebSocketTransport implements Transport {
         this.ws = ws;
         this.setupMessageHandler();
 
-        // TODO: Send auth token after connection when server-side auth is implemented
-        // if (this.authToken) {
-        //   await this.sendAuthRequest(this.authToken);
-        // }
-        // The auth flow would use OpCode.Auth (0x03) to send the token
-        // and handle Unauthorized responses by calling onAuthRequired
-
-        if (this.debug) {
-          console.log(`[flo] Connected to ${this.url}`);
-          if (this.authToken) {
-            console.log(`[flo] Auth token provided (auth not yet implemented on server)`);
-          }
+        this.logger.debug(`Connected to ${this.baseUrl}`);
+        if (this.authToken) {
+          this.logger.debug(`Authenticated successfully`);
         }
         resolve();
       };
 
       ws.onerror = () => {
         clearTimeout(timeoutId);
-        reject(new ConnectionError(this.url, new Error("WebSocket error")));
+        reject(new ConnectionError(this.baseUrl, new Error("WebSocket error")));
       };
 
-      ws.onclose = () => {
+      ws.onclose = async (event) => {
         clearTimeout(timeoutId);
+
+        // HTTP 401 Unauthorized - server rejected auth during upgrade
+        // WebSocket close code 1002 (protocol error) or immediate close may indicate auth failure
+        if (event.code === 1002 || (event.code === 1006 && this.authToken)) {
+          if (!isRetry && this.onAuthRequired) {
+            try {
+              this.logger.debug(`Auth failed, requesting new token...`);
+              const newToken = await this.onAuthRequired();
+              this.setAuthToken(newToken);
+              // Retry connection with new token
+              resolve(this.attemptConnect(true));
+              return;
+            } catch (authErr) {
+              reject(new AuthenticationError("Failed to obtain new auth token"));
+              return;
+            }
+          }
+          reject(new AuthenticationError("Server rejected authentication"));
+          return;
+        }
+
         if (!this.ws) {
-          reject(new ConnectionError(this.url, new Error("Connection closed")));
+          reject(new ConnectionError(this.baseUrl, new Error("Connection closed")));
         }
       };
     });
@@ -160,10 +244,13 @@ export class WebSocketTransport implements Transport {
 
     this.ws.onmessage = (event) => {
       if (!(event.data instanceof ArrayBuffer)) {
+        this.logger.warn("Received non-binary message:", event.data);
         return;
       }
 
       const data = new Uint8Array(event.data);
+
+      this.logger.debug(`WebSocket frame received: ${data.length} bytes, first bytes:`, Array.from(data.slice(0, 32)).map(b => b.toString(16).padStart(2, '0')).join(' '));
 
       // Append to receive buffer
       const newBuffer = new Uint8Array(this.receiveBuffer.length + data.length);
@@ -175,7 +262,7 @@ export class WebSocketTransport implements Transport {
       this.processReceiveBuffer();
     };
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (event) => {
       // Reject all pending requests
       for (const [, { reject }] of this.pendingRequests) {
         reject(new UnexpectedEOFError("connection closed"));
@@ -183,8 +270,12 @@ export class WebSocketTransport implements Transport {
       this.pendingRequests.clear();
       this.ws = null;
 
-      if (this.debug) {
-        console.log("[flo] Disconnected");
+      this.logger.debug("Disconnected");
+
+      // Notify disconnect handler
+      if (this.disconnectHandler) {
+        const reason = event.reason || (event.code === 1000 ? "normal closure" : `code ${event.code}`);
+        this.disconnectHandler(reason);
       }
     };
 
@@ -205,11 +296,9 @@ export class WebSocketTransport implements Transport {
       let dataLen: number;
       let requestId: bigint;
       let expectedCRC: number;
-      let opCode: number;
 
       try {
-        const [op, len, reqId, crc] = parseResponseHeader(header);
-        opCode = op;
+        const [, len, reqId, crc] = parseResponseHeader(header);
         dataLen = len;
         requestId = reqId;
         expectedCRC = crc;
@@ -237,81 +326,37 @@ export class WebSocketTransport implements Transport {
       const payload = message.subarray(HEADER_SIZE);
       const computedCRC = computeCRC32(header, payload);
 
-      if (expectedCRC !== computedCRC) {
-        // CRC mismatch - if it was a pending request, reject it
-        const pending = this.pendingRequests.get(requestId);
-        if (pending) {
-          this.pendingRequests.delete(requestId);
-          pending.reject(new InvalidChecksumError(expectedCRC, computedCRC));
-        }
-        continue;
-      }
+      // Header byte 21 is status code for responses
+      const status = header[21];
 
-      // Check if this is a server-push stream event (OpCode 0x16)
-      if (opCode === OpCode.StreamEvent) {
-        this.handleStreamEvent(payload);
-        continue;
-      }
+      this.logger.debug(`Received message: status=0x${status?.toString(16)} reqId=${requestId} dataLen=${dataLen}`);
 
-      // Handle as regular request/response
       const pending = this.pendingRequests.get(requestId);
       if (pending) {
+        // This is a response to our request
         this.pendingRequests.delete(requestId);
-        // Make a copy of the message data
-        const result = new Uint8Array(message.length);
-        result.set(message);
-        pending.resolve(result);
-      }
-    }
-  }
 
-  /**
-   * Handle server-push stream events.
-   * 
-   * Stream event payload format:
-   * [stream_name_len: u16][stream_name: bytes][record_data...]
-   * 
-   * The record data is parsed using parseStreamReadResponse.
-   */
-  private handleStreamEvent(payload: Uint8Array): void {
-    if (payload.length < 2) {
-      if (this.debug) {
-        console.warn("[flo] Invalid stream event: payload too short");
-      }
-      return;
-    }
-
-    const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-    const streamNameLen = view.getUint16(0, true);
-    
-    if (payload.length < 2 + streamNameLen) {
-      if (this.debug) {
-        console.warn("[flo] Invalid stream event: stream name truncated");
-      }
-      return;
-    }
-
-    const textDecoder = new TextDecoder();
-    const streamName = textDecoder.decode(payload.subarray(2, 2 + streamNameLen));
-    const recordData = payload.subarray(2 + streamNameLen);
-
-    // Parse the record data (same format as stream read response)
-    try {
-      const result = parseStreamReadResponse(recordData);
-      for (const record of result.records) {
-        for (const handler of this.streamEventHandlers) {
-          try {
-            handler(streamName, record);
-          } catch (err) {
-            if (this.debug) {
-              console.error("[flo] Stream event handler error:", err);
-            }
-          }
+        if (expectedCRC !== computedCRC) {
+          pending.reject(new InvalidChecksumError(expectedCRC, computedCRC));
+        } else {
+          // Make a copy of the message data
+          const result = new Uint8Array(message.length);
+          result.set(message);
+          pending.resolve(result);
         }
-      }
-    } catch (err) {
-      if (this.debug) {
-        console.warn("[flo] Failed to parse stream event:", err);
+      } else if (this.pushMessageHandler) {
+        // No pending request - this is a server-pushed message (subscription)
+        // The request_id field contains the subscription_id
+        this.logger.debug(`Push received for subscription ${requestId}, crcMatch=${expectedCRC === computedCRC}`);
+        if (expectedCRC === computedCRC) {
+          const subscriptionId = Number(requestId);
+          // Make a copy of the payload
+          const payloadCopy = new Uint8Array(payload.length);
+          payloadCopy.set(payload);
+          this.pushMessageHandler(subscriptionId, payloadCopy);
+        } else {
+          this.logger.warn(`Push CRC mismatch for subscription ${requestId}`);
+        }
       }
     }
   }

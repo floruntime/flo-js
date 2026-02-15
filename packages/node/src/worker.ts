@@ -26,7 +26,7 @@
  * ```
  */
 
-import { ActionType } from "@floruntime/core";
+import { ActionType, Logger, consoleLogger, silentLogger } from "@floruntime/core";
 import { FloClient } from "./client.js";
 import crypto from "crypto";
 import os from "os";
@@ -56,8 +56,13 @@ export interface WorkerConfig {
   /** Timeout for blocking dequeue in milliseconds (default: 30000) */
   blockMs?: number;
 
-  /** Enable debug logging (default: false) */
-  debug?: boolean;
+  /**
+   * Logger for worker messages.
+   * - `true`: use console logger
+   * - `false` or omitted: silent (no logging)
+   * - Logger object: use custom logger implementation
+   */
+  logger?: boolean | Logger;
 }
 
 /**
@@ -208,7 +213,8 @@ export class ActionContext {
  * ```
  */
 export class Worker {
-  private readonly config: Required<WorkerConfig>;
+  private readonly config: Required<Omit<WorkerConfig, 'logger'>>;
+  private readonly logger: Logger;
   private client: FloClient | null = null;
   private readonly handlers: Map<string, ActionHandler> = new Map();
   private running = false;
@@ -230,8 +236,16 @@ export class Worker {
       concurrency: config.concurrency ?? 10,
       actionTimeoutMs: config.actionTimeoutMs ?? 300000,
       blockMs: config.blockMs ?? 30000,
-      debug: config.debug ?? false,
     };
+
+    // Setup logger
+    if (config.logger === true) {
+      this.logger = consoleLogger;
+    } else if (config.logger === false || config.logger === undefined) {
+      this.logger = silentLogger;
+    } else {
+      this.logger = config.logger;
+    }
   }
 
   private generateWorkerId(): string {
@@ -241,9 +255,7 @@ export class Worker {
   }
 
   private log(message: string, ...args: unknown[]): void {
-    if (this.config.debug) {
-      console.log(`[flo-worker] ${message}`, ...args);
-    }
+    this.logger.debug(message, ...args);
   }
 
   /**
@@ -282,7 +294,7 @@ export class Worker {
     // Connect to server
     this.client = new FloClient(this.config.endpoint, {
       namespace: this.config.namespace,
-      debug: this.config.debug,
+      logger: this.logger,
     });
     await this.client.connect();
 

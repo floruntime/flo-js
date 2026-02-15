@@ -5,19 +5,24 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Flo Browser SDK Example</title>
   <style>
+    * { box-sizing: border-box; }
     body {
       font-family: system-ui, -apple-system, sans-serif;
-      max-width: 800px;
+      max-width: 900px;
       margin: 40px auto;
       padding: 0 20px;
+      background: #fafafa;
     }
-    h1 { color: #333; }
+    h1 { color: #333; margin-bottom: 10px; }
+    .subtitle { color: #666; margin-bottom: 30px; }
     .section {
-      background: #f5f5f5;
+      background: white;
       padding: 20px;
       margin: 20px 0;
       border-radius: 8px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
+    .section h2 { margin-top: 0; color: #444; }
     button {
       background: #0066cc;
       color: white;
@@ -26,269 +31,352 @@
       border-radius: 4px;
       cursor: pointer;
       margin-right: 10px;
+      margin-bottom: 10px;
     }
     button:hover { background: #0055aa; }
     button:disabled { background: #999; cursor: not-allowed; }
+    button.danger { background: #cc3333; }
+    button.danger:hover { background: #aa2222; }
+    button.success { background: #22aa44; }
+    button.success:hover { background: #119933; }
     #log {
       background: #1a1a1a;
       color: #00ff00;
       padding: 20px;
-      font-family: monospace;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 13px;
       white-space: pre-wrap;
       max-height: 400px;
       overflow-y: auto;
       border-radius: 8px;
     }
     input {
-      padding: 8px;
+      padding: 10px;
       margin-right: 10px;
+      margin-bottom: 10px;
       border: 1px solid #ccc;
       border-radius: 4px;
+      font-size: 14px;
+      width: 200px;
     }
+    .input-row { margin-bottom: 15px; }
+    .status {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .status.connected { background: #d4edda; color: #155724; }
+    .status.disconnected { background: #f8d7da; color: #721c24; }
+    .controls { margin-top: 15px; }
     .info-box {
       background: #e7f3ff;
-      border: 1px solid #0066cc;
+      border: 1px solid #b6d4fe;
       padding: 15px;
       border-radius: 8px;
       margin-bottom: 20px;
     }
+    .info-box code {
+      background: #f1f1f1;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
   </style>
 </head>
 <body>
-  <h1>Flo Browser SDK Example</h1>
+  <h1>🌊 Flo Browser SDK Example</h1>
+  <p class="subtitle">Real-time streams and KV access from the browser</p>
 
   <div class="info-box">
+    <strong>To run this demo:</strong><br>
+    1. Start the Flo server: <code>cd zflo && zig build run -- --port 9000</code><br>
+    2. Serve this file: <code>cd sdks/js && python3 -m http.server 8080</code><br>
+    3. Open <code>http://localhost:8080/examples/browser-basic.html</code>
+    <br><br>
     <strong>Note:</strong> The @floruntime/web package is optimized for real-time browser applications:
-    <ul>
+    <ul style="margin-bottom: 0;">
       <li><strong>Streams</strong>: Subscribe to and publish real-time events (pub/sub)</li>
       <li><strong>KV (read-only)</strong>: Access configuration, feature flags, user preferences</li>
     </ul>
-    For full KV mutations and queue operations, use @floruntime/node on the backend.
   </div>
 
   <div class="section">
     <h2>Connection</h2>
-    <input type="text" id="endpoint" value="ws://localhost:9090/ws" placeholder="WebSocket URL">
-    <input type="text" id="authToken" value="" placeholder="Auth Token (optional)">
-    <button id="connectBtn" onclick="connect()">Connect</button>
-    <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
+    <div class="input-row">
+      <input type="text" id="endpoint" value="ws://localhost:9000" placeholder="WebSocket URL">
+      <input type="text" id="namespace" value="default" placeholder="Namespace">
+      <input type="text" id="authToken" value="" placeholder="Auth Token (optional)">
+    </div>
+    <div class="controls">
+      <button id="connectBtn" class="success">Connect</button>
+      <button id="disconnectBtn" class="danger" disabled>Disconnect</button>
+      <span id="status" class="status disconnected">Disconnected</span>
+    </div>
   </div>
 
   <div class="section">
     <h2>Stream Operations (Real-time Events)</h2>
-    <div style="margin-bottom: 10px;">
-      <input type="text" id="streamName" placeholder="Stream name" value="chat:room-123">
+    <div class="input-row">
+      <input type="text" id="streamName" placeholder="Stream name" value="chat">
       <input type="text" id="streamPayload" placeholder="Message" value="Hello from browser!">
     </div>
-    <button onclick="streamSubscribe()" disabled class="stream-btn">Subscribe</button>
-    <button onclick="streamUnsubscribe()" disabled class="stream-btn" id="unsubBtn">Unsubscribe</button>
-    <button onclick="streamPublish()" disabled class="stream-btn">Publish</button>
-    <button onclick="streamRead()" disabled class="stream-btn">Read History</button>
+    <div class="controls">
+      <button id="subscribeBtn" disabled>Subscribe</button>
+      <button id="unsubscribeBtn" disabled>Unsubscribe</button>
+      <button id="publishBtn" disabled>Publish</button>
+      <button id="readBtn" disabled>Read History</button>
+    </div>
   </div>
 
   <div class="section">
     <h2>KV Operations (Read-Only)</h2>
-    <div style="margin-bottom: 10px;">
+    <div class="input-row">
       <input type="text" id="kvKey" placeholder="Key" value="config:feature-flags">
     </div>
-    <button onclick="kvGet()" disabled class="kv-btn">Get</button>
-    <button onclick="kvScan()" disabled class="kv-btn">Scan</button>
+    <div class="controls">
+      <button id="getBtn" disabled>Get</button>
+      <button id="scanBtn" disabled>Scan</button>
+    </div>
   </div>
 
   <div class="section">
-    <h2>Log</h2>
+    <h2>Event Log</h2>
+    <button id="clearBtn">Clear Log</button>
     <div id="log"></div>
   </div>
 
-  <script type="module">
-    // Note: In a real application, you would import from the built package:
-    // import { FloWebClient } from '@floruntime/web';
-    //
-    // For this example, we'll simulate the client since we can't import
-    // directly from TypeScript in the browser without a build step.
+  <!-- Import map for ES modules -->
+  <script type="importmap">
+  {
+    "imports": {
+      "@floruntime/core": "../packages/core/dist/index.js",
+      "@floruntime/web": "../packages/web/dist/index.js"
+    }
+  }
+  </script>
 
+  <script type="module">
+    import { FloClient } from '@floruntime/web';
+
+    // State
     let client = null;
     let subscription = null;
-    const log = document.getElementById('log');
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
 
-    function appendLog(message) {
+    // DOM elements
+    const log = document.getElementById('log');
+    const status = document.getElementById('status');
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const subscribeBtn = document.getElementById('subscribeBtn');
+    const unsubscribeBtn = document.getElementById('unsubscribeBtn');
+    const publishBtn = document.getElementById('publishBtn');
+    const readBtn = document.getElementById('readBtn');
+    const getBtn = document.getElementById('getBtn');
+    const scanBtn = document.getElementById('scanBtn');
+    const clearBtn = document.getElementById('clearBtn');
+
+    // Helpers
+    function appendLog(message, type = 'info') {
       const timestamp = new Date().toISOString().split('T')[1].slice(0, -1);
-      log.textContent += `[${timestamp}] ${message}\n`;
+      const prefix = type === 'error' ? '❌' : type === 'success' ? '✅' : type === 'event' ? '📩' : '→';
+      log.textContent += `[${timestamp}] ${prefix} ${message}\n`;
       log.scrollTop = log.scrollHeight;
     }
 
-    window.connect = async function() {
+    function setConnected(connected) {
+      status.textContent = connected ? 'Connected' : 'Disconnected';
+      status.className = `status ${connected ? 'connected' : 'disconnected'}`;
+      connectBtn.disabled = connected;
+      disconnectBtn.disabled = !connected;
+      subscribeBtn.disabled = !connected;
+      unsubscribeBtn.disabled = !connected || !subscription;
+      publishBtn.disabled = !connected;
+      readBtn.disabled = !connected;
+      getBtn.disabled = !connected;
+      scanBtn.disabled = !connected;
+    }
+
+    // Event handlers
+    connectBtn.addEventListener('click', async () => {
       const endpoint = document.getElementById('endpoint').value;
+      const namespace = document.getElementById('namespace').value;
       const authToken = document.getElementById('authToken').value;
+
       appendLog(`Connecting to ${endpoint}...`);
 
       try {
-        // In a real app with bundled code:
-        // client = new FloWebClient(endpoint, {
-        //   namespace: 'browser-example',
-        //   debug: true,
-        //   authToken: authToken || undefined,
-        // });
-        // await client.connect();
+        client = new FloClient(endpoint, {
+          namespace: namespace,
+          logger: true,
+          authToken: authToken || undefined,
+        });
 
-        // For this example, we show what the code would look like:
-        appendLog('Note: WebSocket server support required on Flo server.');
-        appendLog('');
-        appendLog('Example code:');
-        appendLog('  import { FloWebClient } from "@floruntime/web";');
-        appendLog('  const client = new FloWebClient("ws://localhost:9090/ws", {');
-        appendLog('    namespace: "myapp",');
-        if (authToken) {
-          appendLog('    authToken: "' + authToken + '",');
-        }
-        appendLog('  });');
-        appendLog('  await client.connect();');
-        appendLog('');
-        appendLog('Simulating connected state for demo...');
+        // Register disconnect handler to update UI
+        client.onDisconnect((reason) => {
+          appendLog(`Connection lost: ${reason || 'unknown reason'}`, 'error');
+          setConnected(false);
+          subscription = null;
+        });
 
-        // Simulate connection for demo purposes
-        document.getElementById('connectBtn').disabled = true;
-        document.getElementById('disconnectBtn').disabled = false;
-        document.querySelectorAll('.stream-btn, .kv-btn').forEach(btn => btn.disabled = false);
-        appendLog('Connected (simulated)');
+        await client.connect();
+        setConnected(true);
+        appendLog(`Connected to ${endpoint}`, 'success');
       } catch (err) {
-        appendLog(`Error: ${err.message}`);
+        appendLog(`Connection failed: ${err.message}`, 'error');
+        client = null;
       }
-    };
+    });
 
-    window.disconnect = async function() {
+    disconnectBtn.addEventListener('click', async () => {
+      if (!client) return;
+      
       appendLog('Disconnecting...');
       try {
-        // await client.close();
+        if (subscription) {
+          await subscription.unsubscribe();
+          subscription = null;
+        }
+        await client.close();
         client = null;
+        setConnected(false);
+        appendLog('Disconnected', 'success');
+      } catch (err) {
+        appendLog(`Disconnect error: ${err.message}`, 'error');
+      }
+    });
+
+    subscribeBtn.addEventListener('click', async () => {
+      if (!client) return;
+      
+      const stream = document.getElementById('streamName').value;
+      appendLog(`Subscribing to stream: ${stream}...`);
+
+      try {
+        subscription = await client.streams.subscribe(stream, (record) => {
+          const payload = decoder.decode(record.payload);
+          appendLog(`[seq=${record.seq}] ${payload}`, 'event');
+        });
+        // Options: { offset: 100n } or { from: Date.now() - 3600_000 } or { offset: 0n } for beginning
+
+        appendLog(`Subscribed! subscription_id=${subscription.subscriptionId}`, 'success');
+        unsubscribeBtn.disabled = false;
+      } catch (err) {
+        appendLog(`Subscribe failed: ${err.message}`, 'error');
+      }
+    });
+
+    unsubscribeBtn.addEventListener('click', async () => {
+      if (!subscription) return;
+
+      appendLog(`Unsubscribing from subscription ${subscription.subscriptionId}...`);
+      try {
+        await subscription.unsubscribe();
+        appendLog('Unsubscribed', 'success');
         subscription = null;
-        document.getElementById('connectBtn').disabled = false;
-        document.getElementById('disconnectBtn').disabled = true;
-        document.querySelectorAll('.stream-btn, .kv-btn').forEach(btn => btn.disabled = true);
-        appendLog('Disconnected');
+        unsubscribeBtn.disabled = true;
       } catch (err) {
-        appendLog(`Error: ${err.message}`);
+        appendLog(`Unsubscribe failed: ${err.message}`, 'error');
       }
-    };
+    });
 
-    window.streamSubscribe = async function() {
+    publishBtn.addEventListener('click', async () => {
+      if (!client) return;
+
       const stream = document.getElementById('streamName').value;
-      appendLog(`STREAM SUBSCRIBE: ${stream}`);
-      try {
-        // API usage:
-        // subscription = await client.streams.subscribe(stream, (record) => {
-        //   appendLog(`  <- [seq=${record.seq}] ${new TextDecoder().decode(record.payload)}`);
-        // }, {
-        //   startMode: 'tail',  // 'tail' | 'offset' | 'timestamp'
-        //   // offset: 0n,      // For 'offset' mode
-        //   // timestampMs: Date.now() - 3600000,  // For 'timestamp' mode
-        // });
-        // 
-        // Later, to unsubscribe:
-        // await subscription.unsubscribe();
-        
-        appendLog('  -> Subscribed! Server will push StreamEvent for new records');
-        appendLog('  -> subscription.subscriptionId can be used to track/unsubscribe');
-        appendLog('  (simulated - connect to real Flo server to test)');
-        subscription = { subscriptionId: 1, unsubscribe: async () => {} }; // Simulated
-      } catch (err) {
-        appendLog(`  -> Error: ${err.message}`);
-      }
-    };
+      const message = document.getElementById('streamPayload').value;
 
-    window.streamUnsubscribe = async function() {
-      if (!subscription) {
-        appendLog('STREAM UNSUBSCRIBE: No active subscription');
-        return;
-      }
-      appendLog(`STREAM UNSUBSCRIBE: subscription_id=${subscription.subscriptionId}`);
+      appendLog(`Publishing to ${stream}: "${message}"`);
       try {
-        // await subscription.unsubscribe();
-        appendLog('  -> Unsubscribed! Server stops pushing StreamEvent');
-        subscription = null;
+        const result = await client.streams.append(stream, encoder.encode(message));
+        appendLog(`Published! partition=${result.partition}, seq=${result.seq}`, 'success');
       } catch (err) {
-        appendLog(`  -> Error: ${err.message}`);
+        appendLog(`Publish failed: ${err.message}`, 'error');
       }
-    };
+    });
 
-    window.streamPublish = async function() {
+    readBtn.addEventListener('click', async () => {
+      if (!client) return;
+
       const stream = document.getElementById('streamName').value;
-      const payload = document.getElementById('streamPayload').value;
-      appendLog(`STREAM PUBLISH: ${stream} <- ${payload}`);
-      try {
-        // const result = await client.streams.append(stream, new TextEncoder().encode(payload), {
-        //   partitionKey: "browser-user",
-        // });
-        // appendLog(`  -> partition=${result.partition}, seq=${result.seq}`);
-        appendLog('  -> partition=0, seq=1 (simulated)');
-      } catch (err) {
-        appendLog(`  -> Error: ${err.message}`);
-      }
-    };
+      appendLog(`Reading from stream: ${stream}...`);
 
-    window.streamRead = async function() {
-      const stream = document.getElementById('streamName').value;
-      appendLog(`STREAM READ: ${stream}`);
       try {
-        // const result = await client.streams.read(stream, { limit: 10 });
-        // for (const record of result.records) {
-        //   appendLog(`  [${record.seq}] ${new TextDecoder().decode(record.payload)}`);
-        // }
-        // appendLog(`  -> ${result.records.length} records, hasMore=${result.hasMore}`);
-        appendLog('  -> [1] Hello from browser! (simulated)');
-        appendLog('  -> 1 records, hasMore=false');
-      } catch (err) {
-        appendLog(`  -> Error: ${err.message}`);
-      }
-    };
+        const result = await client.streams.read(stream, { 
+          limit: 10,
+          fromBeginning: true,
+        });
 
-    window.kvGet = async function() {
+        if (result.records.length === 0) {
+          appendLog('No records found');
+        } else {
+          for (const record of result.records) {
+            const payload = decoder.decode(record.payload);
+            appendLog(`  [seq=${record.seq}] ${payload}`);
+          }
+          appendLog(`Read ${result.records.length} records, hasMore=${result.hasMore}`, 'success');
+        }
+      } catch (err) {
+        appendLog(`Read failed: ${err.message}`, 'error');
+      }
+    });
+
+    getBtn.addEventListener('click', async () => {
+      if (!client) return;
+
       const key = document.getElementById('kvKey').value;
-      appendLog(`KV GET: ${key}`);
-      try {
-        // const value = await client.kv.get(key);
-        // appendLog(`  -> ${value ? new TextDecoder().decode(value) : 'null'}`);
-        appendLog('  -> {"darkMode": true, "betaFeatures": false} (simulated)');
-      } catch (err) {
-        appendLog(`  -> Error: ${err.message}`);
-      }
-    };
+      appendLog(`Getting key: ${key}...`);
 
-    window.kvScan = async function() {
+      try {
+        const value = await client.kv.get(key);
+        if (value === null) {
+          appendLog(`Key not found: ${key}`);
+        } else {
+          appendLog(`Value: ${decoder.decode(value)}`, 'success');
+        }
+      } catch (err) {
+        appendLog(`Get failed: ${err.message}`, 'error');
+      }
+    });
+
+    scanBtn.addEventListener('click', async () => {
+      if (!client) return;
+
       const prefix = document.getElementById('kvKey').value;
-      appendLog(`KV SCAN: ${prefix}*`);
-      try {
-        // const result = await client.kv.scan(prefix, { limit: 10 });
-        // for (const entry of result.entries) {
-        //   appendLog(`  ${new TextDecoder().decode(entry.key)}`);
-        // }
-        appendLog('  -> config:feature-flags (simulated)');
-        appendLog('  -> config:theme (simulated)');
-      } catch (err) {
-        appendLog(`  -> Error: ${err.message}`);
-      }
-    };
+      appendLog(`Scanning prefix: ${prefix}*...`);
 
-    appendLog('Flo Browser SDK Example');
-    appendLog('========================');
+      try {
+        const result = await client.kv.scan(prefix, { limit: 10 });
+        if (result.entries.length === 0) {
+          appendLog('No keys found');
+        } else {
+          for (const entry of result.entries) {
+            const key = decoder.decode(entry.key);
+            const value = entry.value ? decoder.decode(entry.value) : '(no value)';
+            appendLog(`  ${key} = ${value}`);
+          }
+          appendLog(`Found ${result.entries.length} keys`, 'success');
+        }
+      } catch (err) {
+        appendLog(`Scan failed: ${err.message}`, 'error');
+      }
+    });
+
+    clearBtn.addEventListener('click', () => {
+      log.textContent = '';
+    });
+
+    // Initial state
+    appendLog('Flo Browser SDK Example ready');
     appendLog('');
-    appendLog('This example demonstrates the @floruntime/web package API.');
-    appendLog('');
-    appendLog('Web SDK provides:');
-    appendLog('  - client.streams.subscribe() - Real-time push subscriptions (WebSocket)');
-    appendLog('  - client.streams.append()    - Publish events to streams');
-    appendLog('  - client.streams.read()      - Read historical events');
-    appendLog('  - client.kv.get()            - Read configuration/state');
-    appendLog('  - client.kv.scan()           - Scan keys by prefix');
-    appendLog('');
-    appendLog('Subscription Protocol:');
-    appendLog('  1. Client sends StreamSubscribe with subscription_id');
-    appendLog('  2. Server responds with StreamSubscribed');
-    appendLog('  3. Server pushes StreamEvent for each new record');
-    appendLog('  4. Client sends StreamUnsubscribe to stop');
-    appendLog('');
-    appendLog('Note: KV mutations (put/delete) and queues are only');
-    appendLog('available in @floruntime/node for backend use.');
+    appendLog('Using @floruntime/web for WebSocket communication');
+    appendLog('Available operations:');
+    appendLog('  • Subscribe: Real-time push via StreamSubscribe');
+    appendLog('  • Publish: Append events to streams');
+    appendLog('  • Read: Pull historical events');
+    appendLog('  • KV Get/Scan: Read-only key-value access');
     appendLog('');
   </script>
 </body>

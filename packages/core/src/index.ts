@@ -27,10 +27,11 @@ export {
   type Message,
   type DequeueResult,
   // Stream types (for real-time applications)
-  StreamID,
+  StorageTier,
   type StreamRecord,
   type StreamAppendResult,
   type StreamReadResult,
+  type StreamInfoResult,
   type StreamAppendOptions,
   type StreamReadOptions,
   type StreamSubscribeOptions,
@@ -38,6 +39,7 @@ export {
   type StreamSubscription,
   type StreamGroupOptions,
   type StreamAckOptions,
+  type StreamNackOptions,
   // KV Option types
   type GetOptions,
   type PutOptions,
@@ -80,6 +82,10 @@ export {
   type Transport,
   type ClientOptions,
   type WebClientOptions,
+  // Logger
+  type Logger,
+  consoleLogger,
+  silentLogger,
 } from "./types.js";
 
 // Errors
@@ -136,6 +142,7 @@ export {
   KVReadOnlyOperations,
   parseStreamReadResponse,
   parseStreamAppendResponse,
+  parseStreamInfoResponse,
   type StreamRequestSender,
 } from "./streams.js";
 export {

@@ -329,29 +329,41 @@ export interface DequeueResult {
 // ============================================================================
 
 /**
+ * Storage tier of a stream record.
+ */
+export const StorageTier = {
+  Hot: 0,
+  Pending: 1,
+  Warm: 2,
+  Cold: 3,
+} as const;
+
+export type StorageTier = (typeof StorageTier)[keyof typeof StorageTier];
+
+/**
  * A single stream record/event.
  */
 export interface StreamRecord {
   /** Sequence number within the partition */
-  seq: bigint;
-  /** Partition key (used for routing) */
-  key: string;
-  /** Optional header/metadata */
-  header: Uint8Array;
+  sequence: bigint;
+  /** Timestamp in milliseconds when the record was written */
+  timestampMs: bigint;
+  /** Storage tier (hot, pending, warm, cold) */
+  tier: StorageTier;
   /** Event payload */
   payload: Uint8Array;
-  /** Timestamp when the record was written */
-  timestamp?: bigint;
+  /** Optional headers (key-value pairs) */
+  headers: Record<string, string> | null;
 }
 
 /**
  * Result of appending a record to a stream.
  */
 export interface StreamAppendResult {
-  /** Partition the record was written to */
-  partition: number;
   /** Sequence number assigned to the record */
-  seq: bigint;
+  sequence: bigint;
+  /** Timestamp in milliseconds assigned to the record */
+  timestampMs: bigint;
 }
 
 /**
@@ -360,10 +372,17 @@ export interface StreamAppendResult {
 export interface StreamReadResult {
   /** Records read from the stream */
   records: StreamRecord[];
-  /** Continuation token for pagination */
-  nextOffset?: bigint;
-  /** Whether there are more records available */
-  hasMore: boolean;
+}
+
+/**
+ * Result of a stream info query.
+ */
+export interface StreamInfoResult {
+  firstSeq: bigint;
+  lastSeq: bigint;
+  count: bigint;
+  bytes: bigint;
+  partitionCount: number;
 }
 
 /**
@@ -500,6 +519,21 @@ export interface StreamAckOptions {
   namespace?: string;
   /** Consumer group name */
   group: string;
+  /** Consumer ID (required for correct ack matching in multi-consumer groups) */
+  consumer: string;
+}
+
+/**
+ * Options for negatively acknowledging stream records in a consumer group.
+ */
+export interface StreamNackOptions {
+  namespace?: string;
+  /** Consumer group name */
+  group: string;
+  /** Consumer ID (required for correct nack matching in multi-consumer groups) */
+  consumer: string;
+  /** Delay in milliseconds before message becomes visible again */
+  redeliveryDelayMs?: number;
 }
 
 /**
@@ -646,6 +680,34 @@ export interface Transport {
 }
 
 /**
+ * Logger interface for Flo SDK.
+ * Implement this to integrate with your logging system.
+ */
+export interface Logger {
+  debug(message: string, ...args: unknown[]): void;
+  warn(message: string, ...args: unknown[]): void;
+  error(message: string, ...args: unknown[]): void;
+}
+
+/**
+ * Console-based logger implementation.
+ */
+export const consoleLogger: Logger = {
+  debug: (message, ...args) => console.log(`[flo] ${message}`, ...args),
+  warn: (message, ...args) => console.warn(`[flo] ${message}`, ...args),
+  error: (message, ...args) => console.error(`[flo] ${message}`, ...args),
+};
+
+/**
+ * Silent logger (no-op).
+ */
+export const silentLogger: Logger = {
+  debug: () => {},
+  warn: () => {},
+  error: () => {},
+};
+
+/**
  * Client options for Flo client.
  */
 export interface ClientOptions {
@@ -655,8 +717,13 @@ export interface ClientOptions {
   /** Connection and operation timeout in milliseconds */
   timeoutMs?: number;
 
-  /** Enable debug logging */
-  debug?: boolean;
+  /**
+   * Logger for SDK messages.
+   * - `true`: use console logger
+   * - `false` or omitted: silent (no logging)
+   * - Logger object: use custom logger implementation
+   */
+  logger?: boolean | Logger;
 }
 
 /**
@@ -665,14 +732,16 @@ export interface ClientOptions {
  */
 export interface WebClientOptions extends ClientOptions {
   /**
-   * Authentication token for the connection.
-   * TODO: Server-side auth not yet implemented - this is a placeholder.
+   * Authentication token (JWT or API key) for the connection.
+   * Sent as query parameter during WebSocket upgrade handshake.
+   * Server validates token before establishing connection.
    */
   authToken?: string;
 
   /**
-   * Callback invoked when authentication is required or fails.
-   * TODO: Server-side auth not yet implemented.
+   * Callback invoked when authentication fails.
+   * Should return a new auth token for retry.
+   * If not provided, auth failures will throw an error.
    */
   onAuthRequired?: () => Promise<string>;
 }

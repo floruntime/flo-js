@@ -159,7 +159,7 @@ async function main() {
     namespace: process.env.FLO_NAMESPACE || "myapp",
     concurrency: 5,
     actionTimeoutMs: 300000, // 5 minutes
-    debug: process.env.FLO_DEBUG === "1" || process.env.FLO_DEBUG === "true",
+    logger: process.env.FLO_DEBUG === "1" || process.env.FLO_DEBUG === "true",
   });
 
   // Register action handlers

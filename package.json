@@ -2,26 +2,21 @@
   "name": "flo-js",
   "private": true,
   "description": "Flo JavaScript SDK Monorepo",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/floruntime/flo-js.git"
-  },
-  "homepage": "https://github.com/floruntime/flo-js#readme",
-  "bugs": {
-    "url": "https://github.com/floruntime/flo-js/issues"
-  },
-  "author": "Flo Authors",
-  "license": "MIT",
   "scripts": {
     "build": "pnpm -r build",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint packages/*/src/**/*.ts",
-    "clean": "pnpm -r clean"
+    "clean": "pnpm -r clean",
+    "example:node": "tsx examples/node-basic.ts",
+    "example:worker": "tsx examples/worker.ts",
+    "publish:dev": "pnpm -r publish --access public --tag dev --no-git-checks",
+    "publish:release": "pnpm -r publish --access public"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
     "eslint": "^8.55.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.3.0",
     "vitest": "^1.0.0"
   },

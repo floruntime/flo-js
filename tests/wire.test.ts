@@ -191,6 +191,7 @@ describe("Wire Protocol", () => {
 
   describe("parseScanResponse", () => {
     it("should parse empty scan response", () => {
+      // Wire format: [has_more:u8] [cursor_len:u32] [cursor:bytes]? [count:u32] [entries...]
       const data = new Uint8Array(9);
       const view = new DataView(data.buffer);
 
@@ -206,6 +207,7 @@ describe("Wire Protocol", () => {
     });
 
     it("should parse scan response with entries", () => {
+      // Wire format: [has_more:u8] [cursor_len:u32] [cursor:bytes]? [count:u32] ([key_len:u16][key][value_len:u32][value])*
       // Build response: hasMore=true, cursor="cur", count=1, entry: key="k", value="v"
       const data = new Uint8Array(22);
       const view = new DataView(data.buffer);
