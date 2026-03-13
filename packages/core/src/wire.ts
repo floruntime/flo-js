@@ -595,35 +595,93 @@ export function serializeActionListValue(limit: number = 100): Uint8Array {
 }
 
 /**
- * Serialize worker register value.
- * Format: [count:u32][task_type_len:u16][task_type]...[has_caps:u8]
+ * Serialize worker register value
+ * Format: [type:u8][max_concurrency:u32][process_count:u16]
+ *         ([name_len:u16][name][kind:u8])*
+ *         [has_metadata:u8][metadata_len:u16][metadata]?
+ *         [has_machine_id:u8][machine_id_len:u16][machine_id]?
  */
-export function serializeWorkerRegisterValue(taskTypes: string[]): Uint8Array {
+export function serializeWorkerRegisterValue(
+  taskTypes: string[],
+  opts?: {
+    workerType?: number;
+    maxConcurrency?: number;
+    processes?: Array<{ name: string; kind: number }>;
+    metadata?: string;
+    machineId?: string;
+  }
+): Uint8Array {
+  const workerType = opts?.workerType ?? 0; // default: action
+  const maxConcurrency = opts?.maxConcurrency ?? 10;
+  const metadata = opts?.metadata;
+  const machineId = opts?.machineId;
+
+  // Build process list: use explicit processes or legacy taskTypes
+  let processes = opts?.processes;
+  if (!processes || processes.length === 0) {
+    processes = taskTypes.map((name) => ({ name, kind: 0 })); // kind=0 = action
+  }
+
   // Calculate size
-  let size = 4 + 1; // count + has_caps
-  for (const tt of taskTypes) {
-    size += 2 + textEncoder.encode(tt).length;
+  let size = 1 + 4 + 2; // type + max_concurrency + process_count
+  for (const p of processes) {
+    size += 2 + textEncoder.encode(p.name).length + 1; // name_len + name + kind
+  }
+  size += 1; // has_metadata
+  if (metadata) {
+    size += 2 + textEncoder.encode(metadata).length;
+  }
+  size += 1; // has_machine_id
+  if (machineId) {
+    size += 2 + textEncoder.encode(machineId).length;
   }
 
   const buf = new Uint8Array(size);
   const view = new DataView(buf.buffer);
   let offset = 0;
 
-  // count
-  view.setUint32(offset, taskTypes.length, true);
+  // type
+  buf[offset++] = workerType;
+
+  // max_concurrency
+  view.setUint32(offset, maxConcurrency, true);
   offset += 4;
 
-  // task types
-  for (const tt of taskTypes) {
-    const ttBytes = textEncoder.encode(tt);
-    view.setUint16(offset, ttBytes.length, true);
+  // process list
+  view.setUint16(offset, processes.length, true);
+  offset += 2;
+  for (const p of processes) {
+    const nameBytes = textEncoder.encode(p.name);
+    view.setUint16(offset, nameBytes.length, true);
     offset += 2;
-    buf.set(ttBytes, offset);
-    offset += ttBytes.length;
+    buf.set(nameBytes, offset);
+    offset += nameBytes.length;
+    buf[offset++] = p.kind;
   }
 
-  // capabilities (none)
-  buf[offset++] = 0;
+  // metadata
+  if (metadata) {
+    buf[offset++] = 1;
+    const metaBytes = textEncoder.encode(metadata);
+    view.setUint16(offset, metaBytes.length, true);
+    offset += 2;
+    buf.set(metaBytes, offset);
+    offset += metaBytes.length;
+  } else {
+    buf[offset++] = 0;
+  }
+
+  // machine_id
+  if (machineId) {
+    buf[offset++] = 1;
+    const machBytes = textEncoder.encode(machineId);
+    view.setUint16(offset, machBytes.length, true);
+    offset += 2;
+    buf.set(machBytes, offset);
+    offset += machBytes.length;
+  } else {
+    buf[offset++] = 0;
+  }
 
   return buf.subarray(0, offset);
 }
@@ -808,4 +866,15 @@ export function parseTaskAssignment(data: Uint8Array): import("./types.js").Task
     createdAt,
     attempt,
   };
+}
+
+/**
+ * Serialize worker heartbeat value.
+ * Format: [current_load:u32]
+ */
+export function serializeWorkerHeartbeatValue(currentLoad: number): Uint8Array {
+  const buf = new Uint8Array(4);
+  const view = new DataView(buf.buffer);
+  view.setUint32(0, currentLoad, true);
+  return buf;
 }

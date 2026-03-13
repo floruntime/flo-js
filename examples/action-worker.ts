@@ -1,7 +1,7 @@
 /**
- * Example: High-level Worker API usage with the Flo Node.js SDK
+ * Example: High-level ActionWorker API usage with the Flo Node.js SDK
  *
- * This example demonstrates how to use the Worker class to process actions.
+ * This example demonstrates how to use the ActionWorker class to process actions.
  *
  * Usage:
  *   npx tsx examples/worker.ts
@@ -11,7 +11,7 @@
  *   - pnpm install && pnpm build
  */
 
-import { Worker, ActionContext } from "@floruntime/node";
+import { ActionWorker, ActionContext } from "@floruntime/node";
 
 // =============================================================================
 // Data Types
@@ -153,8 +153,8 @@ async function healthCheck(ctx: ActionContext): Promise<Uint8Array> {
 // =============================================================================
 
 async function main() {
-  // Create worker with configuration
-  const worker = new Worker({
+  // Create action worker with configuration
+  const worker = new ActionWorker({
     endpoint: process.env.FLO_ENDPOINT || "localhost:9000",
     namespace: process.env.FLO_NAMESPACE || "myapp",
     concurrency: 5,

@@ -106,48 +106,57 @@ export const OpCode = {
   QueueTouchResponse: 0x55,
   QueueBatchEnqueueResponse: 0x56,
   QueuePurgeResponse: 0x57,
+  QueueList: 0x58, // List all queues in namespace
+  QueueListResponse: 0x59,
 
-  // Actions (0x60 - 0x68)
+  // Actions (0x60 - 0x6D)
   ActionRegister: 0x60,
   ActionInvoke: 0x61,
   ActionStatus: 0x62,
   ActionList: 0x63,
   ActionDelete: 0x64,
-  ActionRegisterResponse: 0x65,
-  ActionInvokeResponse: 0x66,
-  ActionStatusResponse: 0x67,
-  ActionListResponse: 0x68,
+  ActionAwait: 0x65,
+  ActionComplete: 0x66,
+  ActionFail: 0x67,
+  ActionTouch: 0x68,
+  ActionRegisterResponse: 0x69,
+  ActionInvokeResponse: 0x6a,
+  ActionStatusResponse: 0x6b,
+  ActionListResponse: 0x6c,
+  ActionTaskAssignment: 0x6d,
 
-  // Workers (0x69 - 0x7F)
-  WorkerRegister: 0x69,
-  WorkerTouch: 0x6a,
-  WorkerAwait: 0x6b,
-  WorkerComplete: 0x6c,
-  WorkerFail: 0x6d,
-  WorkerList: 0x6e,
-  WorkerRegisterResponse: 0x70,
-  WorkerTaskAssignment: 0x71,
-  WorkerListResponse: 0x72,
+  // Workers (0x70 - 0x78)
+  WorkerRegister: 0x70,
+  WorkerHeartbeat: 0x71,
+  WorkerDeregister: 0x72,
+  WorkerList: 0x73,
+  WorkerInfo: 0x74,
+  WorkerRegisterResponse: 0x75,
+  WorkerListResponse: 0x76,
+  WorkerInfoResponse: 0x77,
+  WorkerDrain: 0x78,
 
-  // Workflows (0x80 - 0x8F)
-  WorkflowStart: 0x80,
-  WorkflowSignal: 0x81,
-  WorkflowQuery: 0x82,
-  WorkflowCancel: 0x83,
-  WorkflowStatus: 0x84,
-  WorkflowStartResponse: 0x85,
-  WorkflowQueryResponse: 0x86,
-  WorkflowStatusResponse: 0x87,
-
-  // Circuit Breakers (0x90 - 0x9F)
-  CircuitExecute: 0x90,
-  CircuitGetState: 0x91,
-  CircuitGetMetrics: 0x92,
-  CircuitReset: 0x93,
-  CircuitConfigure: 0x94,
-  CircuitStateResponse: 0x95,
-  CircuitExecuteResponse: 0x96,
-  CircuitMetricsResponse: 0x97,
+  // Workflows (0x80 - 0x93)
+  WorkflowCreate: 0x80, // Create workflow from YAML definition
+  WorkflowStart: 0x81, // Start a workflow run
+  WorkflowSignal: 0x82, // Send signal to running workflow
+  WorkflowCancel: 0x83, // Cancel a workflow run
+  WorkflowStatus: 0x84, // Get workflow run status
+  WorkflowHistory: 0x85, // Get workflow run history
+  WorkflowListRuns: 0x86, // List workflow runs
+  WorkflowGetDefinition: 0x87, // Get workflow definition
+  WorkflowCreateResponse: 0x88,
+  WorkflowStartResponse: 0x89,
+  WorkflowStatusResponse: 0x8a,
+  WorkflowHistoryResponse: 0x8b,
+  WorkflowListRunsResponse: 0x8c,
+  WorkflowGetDefinitionResponse: 0x8d,
+  WorkflowDisable: 0x8e,
+  WorkflowEnable: 0x8f,
+  WorkflowDisableResponse: 0x90,
+  WorkflowEnableResponse: 0x91,
+  WorkflowListDefinitions: 0x92,
+  WorkflowListDefinitionsResponse: 0x93,
 
   // Cluster Management (0xA0 - 0xAF)
   ClusterStatus: 0xa0, // Get cluster status (leader, term, health)
@@ -160,6 +169,54 @@ export const OpCode = {
   ClusterStatusResponse: 0xa8,
   ClusterMembersResponse: 0xa9,
   ClusterJoinResponse: 0xaa,
+
+  // Namespace Management (0xB0 - 0xBF)
+  NamespaceCreate: 0xb0, // Create a new namespace
+  NamespaceDelete: 0xb1, // Delete an existing namespace
+  NamespaceList: 0xb2, // List all namespaces
+  NamespaceInfo: 0xb3, // Get namespace info/config
+  NamespaceCreateResponse: 0xb4,
+  NamespaceDeleteResponse: 0xb5,
+  NamespaceListResponse: 0xb6,
+  NamespaceInfoResponse: 0xb7,
+  NamespaceConfigSet: 0xb8,
+  NamespaceConfigGet: 0xb9,
+  NamespaceConfigSetResponse: 0xba,
+  NamespaceConfigGetResponse: 0xbb,
+
+  // Processing / Stream Processing (0xC0 - 0xD1)
+  ProcessingSubmit: 0xc0, // Submit a processing job
+  ProcessingStop: 0xc1, // Gracefully stop a processing job
+  ProcessingCancel: 0xc2, // Force cancel a processing job
+  ProcessingStatus: 0xc3, // Get processing job status
+  ProcessingList: 0xc4, // List processing jobs
+  ProcessingSavepoint: 0xc6, // Trigger a savepoint
+  ProcessingRestore: 0xc7, // Restore from a savepoint
+  ProcessingRescale: 0xc8, // Rescale job parallelism
+  ProcessingSubmitResponse: 0xc9,
+  ProcessingStopResponse: 0xca,
+  ProcessingCancelResponse: 0xcb,
+  ProcessingStatusResponse: 0xcc,
+  ProcessingListResponse: 0xcd,
+  ProcessingSavepointResponse: 0xcf,
+  ProcessingRestoreResponse: 0xd0,
+  ProcessingRescaleResponse: 0xd1,
+
+  // Time-Series Operations (0xE0 - 0xED)
+  TSWrite: 0xe0, // Write data point(s) to a time-series
+  TSRead: 0xe1, // Read raw data points from a time-series
+  TSQuery: 0xe2, // Aggregated query over a time range
+  TSFloQL: 0xe3, // FloQL query string
+  TSList: 0xe4, // List measurements or series
+  TSDelete: 0xe5, // Delete a series and its metadata
+  TSRetention: 0xe6, // Configure retention / downsampling policy
+  TSWriteResponse: 0xe7,
+  TSReadResponse: 0xe8,
+  TSQueryResponse: 0xe9,
+  TSFloQLResponse: 0xea,
+  TSListResponse: 0xeb,
+  TSDeleteResponse: 0xec,
+  TSRetentionResponse: 0xed,
 } as const;
 
 export type OpCode = (typeof OpCode)[keyof typeof OpCode];
@@ -230,6 +287,7 @@ export const OptionTag = {
   Limit: 0x05, // u32: Maximum number of results for scan/list operations
   KeysOnly: 0x06, // u8: Skip values in scan response (0/1)
   Cursor: 0x07, // bytes: Pagination cursor (ShardWalker format)
+  RoutingKey: 0x08, // string: Explicit routing key for shard co-location
 
   // Queue Options (0x10 - 0x1F)
   Priority: 0x10, // u8: Message priority (0-255, higher = more urgent)
@@ -240,6 +298,7 @@ export const OptionTag = {
   Count: 0x15, // u32: Number of messages to dequeue
   SendToDLQ: 0x16, // u8: Whether to send failed messages to DLQ (0/1)
   BlockMS: 0x17, // u32: Blocking timeout for dequeue (0 = infinite, default = 0)
+  WaitMS: 0x18, // u32: Watch timeout - wait for NEXT version change (0=forever)
 
   // Stream Options (0x20 - 0x2F) - StreamID-native ONLY
   // 0x20 reserved
@@ -279,6 +338,19 @@ export const OptionTag = {
   RetryPolicy: 0x51, // bytes: Serialized retry policy
   CorrelationID: 0x52, // string: Correlation ID for tracing
   SubscriptionID: 0x53, // u64: Subscription ID for stream subscriptions
+
+  // Time-Series Options (0x60 - 0x6F)
+  TSFromMS: 0x60, // i64: Start of time range (inclusive, unix ms)
+  TSToMS: 0x61, // i64: End of time range (inclusive, 0 = now)
+  TSWindowMS: 0x62, // i64: Aggregation window size (ms)
+  TSAggregation: 0x63, // string: Aggregation function name (avg, sum, count, min, max)
+  TSField: 0x64, // string: Field name filter (empty = "value")
+  TSTags: 0x65, // string: Comma-separated tag filters "key=val,key2=val2"
+  TSPrecision: 0x66, // u8: Timestamp precision (0=ns, 1=us, 2=ms, 3=s)
+  TSTimestamp: 0x67, // i64: Explicit timestamp for write (0 = server-assigned)
+  TSRawTTL: 0x68, // string: Raw data TTL (e.g., "7d")
+  TSDownsample: 0x69, // string: Downsample rule (e.g., "1m:avg:30d")
+  TSBatch: 0x6a, // void: Flag indicating batch/line-protocol mode
 } as const;
 
 export type OptionTag = (typeof OptionTag)[keyof typeof OptionTag];
@@ -344,10 +416,8 @@ export type StorageTier = (typeof StorageTier)[keyof typeof StorageTier];
  * A single stream record/event.
  */
 export interface StreamRecord {
-  /** Sequence number within the partition */
-  sequence: bigint;
-  /** Timestamp in milliseconds when the record was written */
-  timestampMs: bigint;
+  /** Full StreamID (timestamp_ms + sequence) */
+  id: StreamID;
   /** Storage tier (hot, pending, warm, cold) */
   tier: StorageTier;
   /** Event payload */
@@ -360,10 +430,8 @@ export interface StreamRecord {
  * Result of appending a record to a stream.
  */
 export interface StreamAppendResult {
-  /** Sequence number assigned to the record */
-  sequence: bigint;
-  /** Timestamp in milliseconds assigned to the record */
-  timestampMs: bigint;
+  /** StreamID assigned to the record */
+  id: StreamID;
 }
 
 /**
@@ -378,8 +446,8 @@ export interface StreamReadResult {
  * Result of a stream info query.
  */
 export interface StreamInfoResult {
-  firstSeq: bigint;
-  lastSeq: bigint;
+  firstId: StreamID;
+  lastId: StreamID;
   count: bigint;
   bytes: bigint;
   partitionCount: number;
@@ -412,11 +480,6 @@ export class StreamID {
   /** Create a StreamID from timestamp only (sequence = 0). */
   static fromTimestamp(timestampMs: bigint): StreamID {
     return new StreamID(timestampMs, 0n);
-  }
-
-  /** Create a StreamID from sequence only (timestamp = 0). */
-  static fromSeq(seq: bigint): StreamID {
-    return new StreamID(0n, seq);
   }
 
   /** Parse a 16-byte big-endian binary StreamID. */
@@ -846,6 +909,50 @@ export interface ActionDeleteOptions {
 // ============================================================================
 
 /**
+ * Worker type identifies the kind of worker.
+ */
+export const WorkerType = {
+  /** Processes action tasks */
+  Action: 0,
+  /** Processes stream records */
+  Stream: 1,
+} as const;
+
+export type WorkerType = (typeof WorkerType)[keyof typeof WorkerType];
+
+/**
+ * Worker health status.
+ */
+export const WorkerStatus = {
+  Active: 0,
+  Idle: 1,
+  Draining: 2,
+  Unhealthy: 3,
+} as const;
+
+export type WorkerStatus = (typeof WorkerStatus)[keyof typeof WorkerStatus];
+
+/**
+ * Process kind identifies what a registered process does.
+ */
+export const ProcessKind = {
+  /** Handles an action */
+  Action: 0,
+  /** Consumes a stream */
+  StreamConsumer: 1,
+} as const;
+
+export type ProcessKind = (typeof ProcessKind)[keyof typeof ProcessKind];
+
+/**
+ * A process entry describing what a worker handles.
+ */
+export interface ProcessEntry {
+  name: string;
+  kind: ProcessKind;
+}
+
+/**
  * A task assigned to a worker.
  */
 export interface TaskAssignment {
@@ -868,8 +975,17 @@ export interface WorkerAwaitResult {
  * Information about a registered worker.
  */
 export interface WorkerInfo {
-  workerId: string;
-  taskTypes: string[];
+  id: string;
+  type: WorkerType;
+  status: WorkerStatus;
+  metadata?: string;
+  machineId?: string;
+  tasksCompleted: number;
+  tasksFailed: number;
+  currentLoad: number;
+  maxConcurrency: number;
+  registeredAtMs: bigint;
+  lastHeartbeat: bigint;
 }
 
 /**
@@ -880,10 +996,20 @@ export interface WorkerListResult {
 }
 
 /**
- * Options for registering a worker.
+ * Options for registering a worker in the worker registry.
  */
 export interface WorkerRegisterOptions {
   namespace?: string;
+  /** Worker type (action or stream) */
+  workerType?: WorkerType;
+  /** Maximum concurrent tasks (default: 10) */
+  maxConcurrency?: number;
+  /** Actions/streams this worker handles */
+  processes?: ProcessEntry[];
+  /** Optional JSON metadata */
+  metadata?: string;
+  /** Machine/host identifier */
+  machineId?: string;
 }
 
 /**
@@ -926,4 +1052,25 @@ export interface WorkerFailOptions {
 export interface WorkerListOptions {
   namespace?: string;
   limit?: number;
+}
+
+/**
+ * Options for worker heartbeat.
+ */
+export interface WorkerHeartbeatOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for worker deregistration.
+ */
+export interface WorkerDeregisterOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for draining a worker.
+ */
+export interface WorkerDrainOptions {
+  namespace?: string;
 }

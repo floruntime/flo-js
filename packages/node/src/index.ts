@@ -11,9 +11,17 @@ export * from "@floruntime/core";
 export { FloClient } from "./client.js";
 export { TcpTransport, parseEndpoint, type TcpTransportOptions } from "./transport.js";
 export {
-  Worker,
+  ActionWorker,
   ActionContext,
   TimeoutError,
+  Worker,
+  type ActionWorkerConfig,
   type WorkerConfig,
   type ActionHandler,
-} from "./worker.js";
+} from "./action-worker.js";
+export {
+  StreamWorker,
+  StreamContext,
+  type StreamWorkerConfig,
+  type StreamRecordHandler,
+} from "./stream-worker.js";

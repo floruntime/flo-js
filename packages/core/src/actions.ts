@@ -20,10 +20,14 @@ import {
   type WorkerAwaitOptions,
   type WorkerAwaitResult,
   type WorkerCompleteOptions,
+  type WorkerDeregisterOptions,
+  type WorkerDrainOptions,
   type WorkerFailOptions,
+  type WorkerHeartbeatOptions,
   type WorkerListOptions,
   type WorkerListResult,
   type WorkerRegisterOptions,
+  type WorkerStatus,
   type WorkerTouchOptions,
 } from "./types.js";
 import {
@@ -35,6 +39,7 @@ import {
   serializeWorkerAwaitValue,
   serializeWorkerCompleteValue,
   serializeWorkerFailValue,
+  serializeWorkerHeartbeatValue,
   serializeWorkerListValue,
   serializeWorkerRegisterValue,
   serializeWorkerTouchValue,
@@ -218,16 +223,18 @@ export class ActionOperations {
 
 /**
  * Worker operations for the Flo client.
+ * Handles both worker registry (register/heartbeat/deregister/drain)
+ * and task dispatch (await/touch/complete/fail).
  */
 export class WorkerOperations {
   constructor(private readonly sender: RequestSender) {}
 
   /**
-   * Register a worker.
+   * Register a worker in the worker registry.
    *
    * @param workerId - Unique worker identifier
    * @param taskTypes - List of task types this worker can handle
-   * @param opts - Registration options
+   * @param opts - Registration options (workerType, maxConcurrency, processes, metadata, machineId)
    */
   async register(
     workerId: string,
@@ -236,13 +243,107 @@ export class WorkerOperations {
   ): Promise<void> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
-    const value = serializeWorkerRegisterValue(taskTypes);
+    const value = serializeWorkerRegisterValue(taskTypes, {
+      workerType: opts?.workerType,
+      maxConcurrency: opts?.maxConcurrency,
+      processes: opts?.processes,
+      metadata: opts?.metadata,
+      machineId: opts?.machineId,
+    });
 
     const resp = await this.sender.sendRequest(
       OpCode.WorkerRegister,
       namespace,
       textEncoder.encode(workerId),
       value,
+      new Uint8Array(0)
+    );
+
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+  }
+
+  /**
+   * Send a heartbeat to the worker registry.
+   * Returns the worker's current status (e.g. draining).
+   *
+   * @param workerId - Worker identifier
+   * @param currentLoad - Current number of active tasks
+   * @param opts - Heartbeat options
+   * @returns WorkerStatus from the server
+   */
+  async heartbeat(
+    workerId: string,
+    currentLoad: number,
+    opts?: WorkerHeartbeatOptions
+  ): Promise<WorkerStatus> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+
+    const value = serializeWorkerHeartbeatValue(currentLoad);
+
+    const resp = await this.sender.sendRequest(
+      OpCode.WorkerHeartbeat,
+      namespace,
+      textEncoder.encode(workerId),
+      value,
+      new Uint8Array(0)
+    );
+
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+
+    // Server responds with [status:u8]
+    if (resp.data.length >= 1) {
+      return resp.data[0] as WorkerStatus;
+    }
+    return 0 as WorkerStatus; // Active
+  }
+
+  /**
+   * Remove the worker from the registry.
+   *
+   * @param workerId - Worker identifier
+   * @param opts - Deregister options
+   */
+  async deregister(
+    workerId: string,
+    opts?: WorkerDeregisterOptions
+  ): Promise<void> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+
+    const resp = await this.sender.sendRequest(
+      OpCode.WorkerDeregister,
+      namespace,
+      textEncoder.encode(workerId),
+      new Uint8Array(0),
+      new Uint8Array(0)
+    );
+
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+  }
+
+  /**
+   * Mark the worker as draining — no new tasks will be assigned.
+   * In-flight tasks continue to completion.
+   *
+   * @param workerId - Worker identifier
+   * @param opts - Drain options
+   */
+  async drain(
+    workerId: string,
+    opts?: WorkerDrainOptions
+  ): Promise<void> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+
+    const resp = await this.sender.sendRequest(
+      OpCode.WorkerDrain,
+      namespace,
+      textEncoder.encode(workerId),
+      new Uint8Array(0),
       new Uint8Array(0)
     );
 
@@ -278,7 +379,7 @@ export class WorkerOperations {
     }
 
     const resp = await this.sender.sendRequest(
-      OpCode.WorkerAwait,
+      OpCode.ActionAwait,
       namespace,
       textEncoder.encode(workerId),
       value,
@@ -315,7 +416,7 @@ export class WorkerOperations {
     const value = serializeWorkerTouchValue(taskId, opts?.extendMs ?? 30000);
 
     const resp = await this.sender.sendRequest(
-      OpCode.WorkerTouch,
+      OpCode.ActionTouch,
       namespace,
       textEncoder.encode(workerId),
       value,
@@ -346,7 +447,7 @@ export class WorkerOperations {
     const value = serializeWorkerCompleteValue(taskId, result);
 
     const resp = await this.sender.sendRequest(
-      OpCode.WorkerComplete,
+      OpCode.ActionComplete,
       namespace,
       textEncoder.encode(workerId),
       value,
@@ -377,7 +478,7 @@ export class WorkerOperations {
     const value = serializeWorkerFailValue(taskId, errorMessage, opts?.retry ?? true);
 
     const resp = await this.sender.sendRequest(
-      OpCode.WorkerFail,
+      OpCode.ActionFail,
       namespace,
       textEncoder.encode(workerId),
       value,

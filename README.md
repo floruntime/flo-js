@@ -259,7 +259,7 @@ Streams are append-only logs for event sourcing and real-time data.
 | `read` | `read(stream, opts?) → Promise<StreamReadResult>` | Read from stream |
 | `groupJoin` | `groupJoin(stream, group, consumer, opts?) → Promise<void>` | Join consumer group |
 | `groupRead` | `groupRead(stream, opts) → Promise<StreamReadResult>` | Read from group |
-| `groupAck` | `groupAck(stream, seqs, opts) → Promise<void>` | Ack in group |
+| `groupAck` | `groupAck(stream, ids, opts) → Promise<void>` | Ack in group |
 
 #### Stream Example
 
@@ -270,7 +270,7 @@ const result = await client.stream.append(
   encoder.encode(JSON.stringify({ event: "click", userId: "123" })),
   { partitionKey: "user-123" }
 );
-console.log(`Offset: ${result.seq}`);
+console.log(`ID: ${result.id.timestampMs}-${result.id.sequence}`);
 
 // Read from stream (from beginning)
 const records = await client.stream.read("events", {
@@ -295,7 +295,7 @@ const groupRecords = await client.stream.groupRead("events", {
   consumer: "consumer-1",
   limit: 10,
 });
-await client.stream.groupAck("events", groupRecords.records.map(r => r.seq), {
+await client.stream.groupAck("events", groupRecords.records.map(r => r.id), {
   group: "processors",
 });
 ```

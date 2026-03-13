@@ -28,6 +28,7 @@ export {
   type DequeueResult,
   // Stream types (for real-time applications)
   StorageTier,
+  StreamID,
   type StreamRecord,
   type StreamAppendResult,
   type StreamReadResult,
@@ -67,6 +68,10 @@ export {
   type ActionListOptions,
   type ActionDeleteOptions,
   // Worker types
+  WorkerType,
+  WorkerStatus,
+  ProcessKind,
+  type ProcessEntry,
   type TaskAssignment,
   type WorkerAwaitResult,
   type WorkerInfo,
@@ -77,6 +82,9 @@ export {
   type WorkerCompleteOptions,
   type WorkerFailOptions,
   type WorkerListOptions,
+  type WorkerHeartbeatOptions,
+  type WorkerDeregisterOptions,
+  type WorkerDrainOptions,
   // Internal types
   type RawResponse,
   type Transport,

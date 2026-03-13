@@ -12,6 +12,7 @@ import {
   type RawResponse,
   StatusCode,
   StorageTier,
+  StreamID,
   type StreamAppendOptions,
   type StreamAppendResult,
   type StreamReadOptions,
@@ -122,8 +123,7 @@ export function parseStreamReadResponse(data: Uint8Array): StreamReadResult {
     offset += 4;
 
     records.push({
-      sequence,
-      timestampMs,
+      id: new StreamID(BigInt(timestampMs < 0n ? 0n : timestampMs), sequence),
       tier,
       payload,
       headers: null,
@@ -148,27 +148,27 @@ export function parseStreamAppendResponse(data: Uint8Array): StreamAppendResult 
   const sequence = view.getBigUint64(0, true);
   const timestampMs = view.getBigInt64(8, true);
 
-  return { sequence, timestampMs };
+  return { id: new StreamID(BigInt(timestampMs < 0n ? 0n : timestampMs), sequence) };
 }
 
 /**
  * Parse stream info response.
  *
- * Wire format: [first_seq:u64][last_seq:u64][count:u64][bytes:u64][partition_count:u32]
+ * Wire format: [first_ts:u64][first_seq:u64][last_ts:u64][last_seq:u64][count:u64][bytes:u64][partition_count:u32]
  */
 export function parseStreamInfoResponse(data: Uint8Array): StreamInfoResult {
-  if (data.length < 36) {
+  if (data.length < 52) {
     throw new Error("Invalid stream info response: too short");
   }
 
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
 
   return {
-    firstSeq: view.getBigUint64(0, true),
-    lastSeq: view.getBigUint64(8, true),
-    count: view.getBigUint64(16, true),
-    bytes: view.getBigUint64(24, true),
-    partitionCount: view.getUint32(32, true),
+    firstId: new StreamID(view.getBigUint64(0, true), view.getBigUint64(8, true)),
+    lastId: new StreamID(view.getBigUint64(16, true), view.getBigUint64(24, true)),
+    count: view.getBigUint64(32, true),
+    bytes: view.getBigUint64(40, true),
+    partitionCount: view.getUint32(48, true),
   };
 }
 
@@ -563,21 +563,21 @@ export class StreamOperations {
    * Acknowledge records in a consumer group.
    *
    * @param stream - Stream name
-   * @param seqs - Sequence numbers to acknowledge
+   * @param ids - StreamIDs to acknowledge
    * @param opts - Ack options (group, consumer)
    */
-  async groupAck(stream: string, seqs: bigint[], opts: StreamAckOptions): Promise<void> {
-    if (seqs.length === 0) {
+  async groupAck(stream: string, ids: StreamID[], opts: StreamAckOptions): Promise<void> {
+    if (ids.length === 0) {
       return;
     }
 
     const namespace = this.sender.getNamespace(opts.namespace);
 
-    // Wire format: [group_len:u16][group][consumer_len:u16][consumer][count:u32][seq:u64]*
+    // Wire format: [group_len:u16][group][consumer_len:u16][consumer][count:u32][timestamp_ms:u64][sequence:u64]*
     const groupBytes = textEncoder.encode(opts.group);
     const consumerBytes = textEncoder.encode(opts.consumer);
     const value = new Uint8Array(
-      2 + groupBytes.length + 2 + consumerBytes.length + 4 + seqs.length * 8
+      2 + groupBytes.length + 2 + consumerBytes.length + 4 + ids.length * 16
     );
     const view = new DataView(value.buffer);
 
@@ -590,10 +590,12 @@ export class StreamOperations {
     offset += 2;
     value.set(consumerBytes, offset);
     offset += consumerBytes.length;
-    view.setUint32(offset, seqs.length, true);
+    view.setUint32(offset, ids.length, true);
     offset += 4;
-    for (const seq of seqs) {
-      view.setBigUint64(offset, seq, true);
+    for (const id of ids) {
+      view.setBigUint64(offset, id.timestampMs, true);
+      offset += 8;
+      view.setBigUint64(offset, id.sequence, true);
       offset += 8;
     }
 
@@ -615,21 +617,21 @@ export class StreamOperations {
    * Records will be redelivered after the redelivery delay.
    *
    * @param stream - Stream name
-   * @param seqs - Sequence numbers to nack
+   * @param ids - StreamIDs to nack
    * @param opts - Nack options (group, consumer, redeliveryDelayMs)
    */
-  async groupNack(stream: string, seqs: bigint[], opts: StreamNackOptions): Promise<void> {
-    if (seqs.length === 0) {
+  async groupNack(stream: string, ids: StreamID[], opts: StreamNackOptions): Promise<void> {
+    if (ids.length === 0) {
       return;
     }
 
     const namespace = this.sender.getNamespace(opts.namespace);
 
-    // Wire format: [group_len:u16][group][consumer_len:u16][consumer][count:u32][seq:u64]*
+    // Wire format: [group_len:u16][group][consumer_len:u16][consumer][count:u32][timestamp_ms:u64][sequence:u64]*
     const groupBytes = textEncoder.encode(opts.group);
     const consumerBytes = textEncoder.encode(opts.consumer);
     const value = new Uint8Array(
-      2 + groupBytes.length + 2 + consumerBytes.length + 4 + seqs.length * 8
+      2 + groupBytes.length + 2 + consumerBytes.length + 4 + ids.length * 16
     );
     const view = new DataView(value.buffer);
 
@@ -642,10 +644,12 @@ export class StreamOperations {
     offset += 2;
     value.set(consumerBytes, offset);
     offset += consumerBytes.length;
-    view.setUint32(offset, seqs.length, true);
+    view.setUint32(offset, ids.length, true);
     offset += 4;
-    for (const seq of seqs) {
-      view.setBigUint64(offset, seq, true);
+    for (const id of ids) {
+      view.setBigUint64(offset, id.timestampMs, true);
+      offset += 8;
+      view.setBigUint64(offset, id.sequence, true);
       offset += 8;
     }
 

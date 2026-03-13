@@ -1,17 +1,18 @@
 /**
- * High-level Worker API for Flo.
+ * High-level ActionWorker API for Flo.
  *
- * Provides an easy-to-use Worker class for executing actions with:
+ * Provides an easy-to-use ActionWorker class for executing actions with:
  * - Automatic connection management
  * - Concurrency control
  * - Error handling and retries
- * - Graceful shutdown
+ * - Heartbeat with drain detection
+ * - Graceful shutdown with deregister
  *
  * @example
  * ```typescript
- * import { Worker, ActionContext } from "@floruntime/node";
+ * import { ActionWorker, ActionContext } from "@floruntime/node";
  *
- * const worker = new Worker({
+ * const worker = new ActionWorker({
  *   endpoint: "localhost:9000",
  *   namespace: "myapp",
  * });
@@ -26,7 +27,16 @@
  * ```
  */
 
-import { ActionType, Logger, consoleLogger, silentLogger } from "@floruntime/core";
+import {
+  ActionType,
+  Logger,
+  ProcessKind,
+  WorkerStatus,
+  WorkerType,
+  consoleLogger,
+  silentLogger,
+  type ProcessEntry,
+} from "@floruntime/core";
 import { FloClient } from "./client.js";
 import crypto from "crypto";
 import os from "os";
@@ -35,9 +45,9 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 /**
- * Configuration for a Flo worker.
+ * Configuration for a Flo action worker.
  */
-export interface WorkerConfig {
+export interface ActionWorkerConfig {
   /** Server endpoint in "host:port" format */
   endpoint: string;
 
@@ -55,6 +65,15 @@ export interface WorkerConfig {
 
   /** Timeout for blocking dequeue in milliseconds (default: 30000) */
   blockMs?: number;
+
+  /** Machine ID for grouping workers on the same host (auto-detected if not provided) */
+  machineId?: string;
+
+  /**
+   * Heartbeat interval in milliseconds (default: 30000 = 30 seconds).
+   * Set to 0 to disable heartbeats.
+   */
+  heartbeatIntervalMs?: number;
 
   /**
    * Logger for worker messages.
@@ -95,7 +114,7 @@ export class ActionContext {
   /** Namespace */
   readonly namespace: string;
 
-  private readonly worker: Worker;
+  private readonly worker: ActionWorker;
   private _cancelled = false;
 
   constructor(
@@ -105,7 +124,7 @@ export class ActionContext {
     attempt: number,
     createdAt: bigint,
     namespace: string,
-    worker: Worker
+    worker: ActionWorker
   ) {
     this.taskId = taskId;
     this.actionName = actionName;
@@ -186,16 +205,18 @@ export class ActionContext {
 }
 
 /**
- * High-level Flo worker for executing actions.
+ * High-level Flo action worker.
  *
- * The Worker class provides a convenient way to process actions:
+ * The ActionWorker class provides a convenient way to process actions:
  * - Register action handlers using `action()` method
  * - Start processing with `start()` which runs until `stop()` is called
  * - Automatic concurrency control and error handling
+ * - Heartbeats with drain detection
+ * - Graceful deregister on shutdown
  *
  * @example
  * ```typescript
- * const worker = new Worker({
+ * const worker = new ActionWorker({
  *   endpoint: "localhost:9000",
  *   namespace: "myapp",
  *   concurrency: 5,
@@ -212,8 +233,8 @@ export class ActionContext {
  * await worker.start();
  * ```
  */
-export class Worker {
-  private readonly config: Required<Omit<WorkerConfig, 'logger'>>;
+export class ActionWorker {
+  private readonly config: Required<Omit<ActionWorkerConfig, 'logger'>>;
   private readonly logger: Logger;
   private client: FloClient | null = null;
   private readonly handlers: Map<string, ActionHandler> = new Map();
@@ -221,8 +242,9 @@ export class Worker {
   private stopRequested = false;
   private activeTaskCount = 0;
   private readonly pendingTasks: Set<Promise<void>> = new Set();
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
-  constructor(config: WorkerConfig) {
+  constructor(config: ActionWorkerConfig) {
     // Validate required fields
     if (!config.endpoint) {
       throw new Error("endpoint is required");
@@ -236,6 +258,8 @@ export class Worker {
       concurrency: config.concurrency ?? 10,
       actionTimeoutMs: config.actionTimeoutMs ?? 300000,
       blockMs: config.blockMs ?? 30000,
+      machineId: config.machineId ?? (os.hostname() || ""),
+      heartbeatIntervalMs: config.heartbeatIntervalMs ?? 30000,
     };
 
     // Setup logger
@@ -306,24 +330,50 @@ export class Worker {
         this.log(`Registered action with server: ${actionName}`);
       }
 
-      // Register worker
-      await this.client.worker.register(this.config.workerId, actionNames);
+      // Build process entries from registered actions
+      const processes: ProcessEntry[] = actionNames.map((name) => ({
+        name,
+        kind: ProcessKind.Action,
+      }));
+
+      // Register worker in worker registry
+      await this.client.worker.register(this.config.workerId, actionNames, {
+        workerType: WorkerType.Action,
+        maxConcurrency: this.config.concurrency,
+        processes,
+        machineId: this.config.machineId || undefined,
+      });
       this.log(`Worker registered with ${actionNames.length} actions`);
 
       // Initialize state
       this.running = true;
       this.stopRequested = false;
 
+      // Start heartbeat interval
+      this.startHeartbeat();
+
       // Main polling loop
       await this.pollLoop(actionNames);
     } finally {
+      // Stop heartbeat
+      this.stopHeartbeat();
+
       // Wait for running tasks
       if (this.pendingTasks.size > 0) {
         this.log(`Waiting for ${this.pendingTasks.size} tasks to complete...`);
         await Promise.allSettled(this.pendingTasks);
       }
 
-      await this.client.close();
+      // Deregister from worker registry
+      if (this.client) {
+        try {
+          await this.client.worker.deregister(this.config.workerId);
+        } catch {
+          // Best-effort deregister
+        }
+      }
+
+      await this.client?.close();
       this.client = null;
       this.running = false;
       this.log("Worker stopped");
@@ -478,6 +528,48 @@ export class Worker {
     }
   }
 
+  /**
+   * Initiate graceful drain — no new tasks will be assigned.
+   * In-flight tasks will continue to completion.
+   */
+  async drain(): Promise<void> {
+    if (!this.client) return;
+    await this.client.worker.drain(this.config.workerId);
+    this.log("Worker drain requested");
+  }
+
+  private startHeartbeat(): void {
+    if (this.config.heartbeatIntervalMs <= 0) return;
+
+    this.heartbeatTimer = setInterval(async () => {
+      if (!this.client || !this.running) return;
+      try {
+        const status = await this.client.worker.heartbeat(
+          this.config.workerId,
+          this.activeTaskCount
+        );
+        if (status === WorkerStatus.Draining) {
+          this.log("Worker is draining, stopping...");
+          this.stop();
+        }
+      } catch {
+        // Heartbeat failures are non-fatal
+      }
+    }, this.config.heartbeatIntervalMs);
+
+    // Don't let the heartbeat timer prevent process exit
+    if (this.heartbeatTimer && typeof this.heartbeatTimer === "object" && "unref" in this.heartbeatTimer) {
+      this.heartbeatTimer.unref();
+    }
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -508,3 +600,8 @@ export class TimeoutError extends Error {
     this.name = "TimeoutError";
   }
 }
+
+/** @deprecated Use `ActionWorker` instead. */
+export const Worker = ActionWorker;
+/** @deprecated Use `ActionWorkerConfig` instead. */
+export type WorkerConfig = ActionWorkerConfig;
