@@ -16,9 +16,15 @@ import {
   StreamOperations,
   type Transport,
   WorkerOperations,
+  WorkflowOperations,
+  type WorkflowSyncOptions,
+  type WorkflowSyncResult,
+  type WorkflowSyncDirFile,
   parseRawResponse,
   serializeRequest,
 } from "@floruntime/core";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { TcpTransport, type TcpTransportOptions } from "./transport.js";
 
 /**
@@ -44,6 +50,9 @@ export class FloClient {
 
   /** Worker operations */
   readonly worker: WorkerOperations;
+
+  /** Workflow operations */
+  readonly workflow: NodeWorkflowOperations;
 
   /**
    * Create a new Flo client.
@@ -77,6 +86,7 @@ export class FloClient {
     this.stream = new StreamOperations(this);
     this.action = new ActionOperations(this);
     this.worker = new WorkerOperations(this);
+    this.workflow = new NodeWorkflowOperations(this);
   }
 
   /**
@@ -154,4 +164,65 @@ export class FloClient {
 
     return rawResponse;
   }
+}
+
+/**
+ * Node.js workflow operations with built-in syncDir support.
+ * Extends the core WorkflowOperations with filesystem access.
+ */
+class NodeWorkflowOperations extends WorkflowOperations {
+  /**
+   * Sync all .yaml/.yml workflow files in a directory.
+   *
+   * Reads every YAML file, extracts the workflow name and version,
+   * compares with the server, and creates/updates as needed.
+   * Safe to call on every boot.
+   *
+   * @param dir - Path to directory containing workflow YAML files
+   * @param opts - Options (namespace)
+   */
+  async syncDir(
+    dir: string,
+    opts?: WorkflowSyncOptions
+  ): Promise<WorkflowSyncResult[]>;
+  /**
+   * Sync all YAML files using a custom directory reader.
+   *
+   * @param readDirFn - Custom function that returns file entries
+   * @param dir - Directory path passed to readDirFn
+   * @param opts - Options (namespace)
+   */
+  async syncDir(
+    readDirFn: (dir: string) => Promise<WorkflowSyncDirFile[]>,
+    dir: string,
+    opts?: WorkflowSyncOptions
+  ): Promise<WorkflowSyncResult[]>;
+  async syncDir(
+    dirOrFn: string | ((dir: string) => Promise<WorkflowSyncDirFile[]>),
+    dirOrOpts?: string | WorkflowSyncOptions,
+    opts?: WorkflowSyncOptions
+  ): Promise<WorkflowSyncResult[]> {
+    if (typeof dirOrFn === "string") {
+      // syncDir(dir, opts?) — use built-in fs
+      return super.syncDir(readYamlDir, dirOrFn, dirOrOpts as WorkflowSyncOptions | undefined);
+    }
+    // syncDir(readDirFn, dir, opts?) — custom reader
+    return super.syncDir(dirOrFn, dirOrOpts as string, opts);
+  }
+}
+
+/**
+ * Read all .yaml/.yml files from a directory using Node.js fs.
+ */
+async function readYamlDir(dir: string): Promise<WorkflowSyncDirFile[]> {
+  const entries = await readdir(dir, { withFileTypes: true });
+  const files: WorkflowSyncDirFile[] = [];
+  for (const entry of entries) {
+    if (entry.isDirectory()) continue;
+    if (/\.ya?ml$/.test(entry.name)) {
+      const content = await readFile(join(dir, entry.name), "utf-8");
+      files.push({ name: entry.name, content });
+    }
+  }
+  return files;
 }

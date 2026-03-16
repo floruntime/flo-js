@@ -85,6 +85,26 @@ export {
   type WorkerHeartbeatOptions,
   type WorkerDeregisterOptions,
   type WorkerDrainOptions,
+  // Workflow types
+  type WorkflowCreateOptions,
+  type WorkflowGetDefinitionOptions,
+  type WorkflowStartOptions,
+  type WorkflowStatusOptions,
+  type WorkflowStatusResult,
+  type WorkflowHistoryOptions,
+  type WorkflowHistoryEvent,
+  type WorkflowListRunsOptions,
+  type WorkflowListRunEntry,
+  type WorkflowSignalOptions,
+  type WorkflowCancelOptions,
+  type WorkflowDisableOptions,
+  type WorkflowEnableOptions,
+  type WorkflowListDefinitionsOptions,
+  type WorkflowDefinitionEntry,
+  type WorkflowSyncOptions,
+  type WorkflowSyncResult,
+  type WorkflowSyncDirFile,
+  type WorkflowSyncDirFn,
   // Internal types
   type RawResponse,
   type Transport,
@@ -158,6 +178,12 @@ export {
   WorkerOperations,
   type RequestSender as ActionRequestSender,
 } from "./actions.js";
+export {
+  WorkflowOperations,
+  extractWorkflowMeta,
+  extractYAMLField,
+  type RequestSender as WorkflowRequestSender,
+} from "./workflows.js";
 
 // Wire protocol - Action/Worker serialization
 export {

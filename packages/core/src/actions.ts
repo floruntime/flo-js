@@ -403,17 +403,19 @@ export class WorkerOperations {
    * Extend task lease (heartbeat).
    *
    * @param workerId - Worker identifier
+   * @param actionName - Action name
    * @param taskId - Task identifier to extend
    * @param opts - Touch options (extendMs)
    */
   async touch(
     workerId: string,
+    actionName: string,
     taskId: string,
     opts?: WorkerTouchOptions
   ): Promise<void> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
-    const value = serializeWorkerTouchValue(taskId, opts?.extendMs ?? 30000);
+    const value = serializeWorkerTouchValue(actionName, taskId, opts?.extendMs ?? 30000);
 
     const resp = await this.sender.sendRequest(
       OpCode.ActionTouch,
@@ -432,19 +434,21 @@ export class WorkerOperations {
    * Complete a task successfully.
    *
    * @param workerId - Worker identifier
+   * @param actionName - Action name
    * @param taskId - Task identifier to complete
    * @param result - Result data from the task
    * @param opts - Complete options
    */
   async complete(
     workerId: string,
+    actionName: string,
     taskId: string,
     result: Uint8Array,
     opts?: WorkerCompleteOptions
   ): Promise<void> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
-    const value = serializeWorkerCompleteValue(taskId, result);
+    const value = serializeWorkerCompleteValue(actionName, taskId, result, opts?.outcome ?? "success");
 
     const resp = await this.sender.sendRequest(
       OpCode.ActionComplete,
@@ -463,19 +467,21 @@ export class WorkerOperations {
    * Fail a task.
    *
    * @param workerId - Worker identifier
+   * @param actionName - Action name
    * @param taskId - Task identifier that failed
    * @param errorMessage - Error message describing the failure
    * @param opts - Fail options (retry flag)
    */
   async fail(
     workerId: string,
+    actionName: string,
     taskId: string,
     errorMessage: string,
     opts?: WorkerFailOptions
   ): Promise<void> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
-    const value = serializeWorkerFailValue(taskId, errorMessage, opts?.retry ?? true);
+    const value = serializeWorkerFailValue(actionName, taskId, errorMessage, opts?.retry ?? true);
 
     const resp = await this.sender.sendRequest(
       OpCode.ActionFail,

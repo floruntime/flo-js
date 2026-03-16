@@ -719,16 +719,24 @@ export function serializeWorkerAwaitValue(taskTypes: string[]): Uint8Array {
 
 /**
  * Serialize worker touch value.
- * Format: [task_id_len:u16][task_id][extend_ms:u32]
+ * Format: [action_name_len:u16][action_name][task_id_len:u16][task_id][extend_ms:u32]
  */
 export function serializeWorkerTouchValue(
+  actionName: string,
   taskId: string,
   extendMs: number = 30000
 ): Uint8Array {
+  const actionNameBytes = textEncoder.encode(actionName);
   const taskIdBytes = textEncoder.encode(taskId);
-  const buf = new Uint8Array(2 + taskIdBytes.length + 4);
+  const buf = new Uint8Array(2 + actionNameBytes.length + 2 + taskIdBytes.length + 4);
   const view = new DataView(buf.buffer);
   let offset = 0;
+
+  // action_name
+  view.setUint16(offset, actionNameBytes.length, true);
+  offset += 2;
+  buf.set(actionNameBytes, offset);
+  offset += actionNameBytes.length;
 
   // task_id
   view.setUint16(offset, taskIdBytes.length, true);
@@ -744,16 +752,31 @@ export function serializeWorkerTouchValue(
 
 /**
  * Serialize worker complete value.
- * Format: [task_id_len:u16][task_id][result...]
+ * Format: [action_name_len:u16][action_name][task_id_len:u16][task_id][outcome_len:u16][outcome][result_len:u16][result]
  */
 export function serializeWorkerCompleteValue(
+  actionName: string,
   taskId: string,
-  result: Uint8Array
+  result: Uint8Array,
+  outcome: string = "success"
 ): Uint8Array {
+  const actionNameBytes = textEncoder.encode(actionName);
   const taskIdBytes = textEncoder.encode(taskId);
-  const buf = new Uint8Array(2 + taskIdBytes.length + result.length);
+  const outcomeBytes = textEncoder.encode(outcome);
+  const buf = new Uint8Array(
+    2 + actionNameBytes.length +
+    2 + taskIdBytes.length +
+    2 + outcomeBytes.length +
+    2 + result.length
+  );
   const view = new DataView(buf.buffer);
   let offset = 0;
+
+  // action_name
+  view.setUint16(offset, actionNameBytes.length, true);
+  offset += 2;
+  buf.set(actionNameBytes, offset);
+  offset += actionNameBytes.length;
 
   // task_id
   view.setUint16(offset, taskIdBytes.length, true);
@@ -761,7 +784,15 @@ export function serializeWorkerCompleteValue(
   buf.set(taskIdBytes, offset);
   offset += taskIdBytes.length;
 
+  // outcome
+  view.setUint16(offset, outcomeBytes.length, true);
+  offset += 2;
+  buf.set(outcomeBytes, offset);
+  offset += outcomeBytes.length;
+
   // result
+  view.setUint16(offset, result.length, true);
+  offset += 2;
   buf.set(result, offset);
 
   return buf;
@@ -769,18 +800,26 @@ export function serializeWorkerCompleteValue(
 
 /**
  * Serialize worker fail value.
- * Format: [task_id_len:u16][task_id][retry:u8][error_message...]
+ * Format: [action_name_len:u16][action_name][task_id_len:u16][task_id][retry:u8][error_message...]
  */
 export function serializeWorkerFailValue(
+  actionName: string,
   taskId: string,
   errorMessage: string,
   retry: boolean = true
 ): Uint8Array {
+  const actionNameBytes = textEncoder.encode(actionName);
   const taskIdBytes = textEncoder.encode(taskId);
   const errorBytes = textEncoder.encode(errorMessage);
-  const buf = new Uint8Array(2 + taskIdBytes.length + 1 + errorBytes.length);
+  const buf = new Uint8Array(2 + actionNameBytes.length + 2 + taskIdBytes.length + 1 + errorBytes.length);
   const view = new DataView(buf.buffer);
   let offset = 0;
+
+  // action_name
+  view.setUint16(offset, actionNameBytes.length, true);
+  offset += 2;
+  buf.set(actionNameBytes, offset);
+  offset += actionNameBytes.length;
 
   // task_id
   view.setUint16(offset, taskIdBytes.length, true);

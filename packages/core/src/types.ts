@@ -1035,6 +1035,8 @@ export interface WorkerTouchOptions {
  */
 export interface WorkerCompleteOptions {
   namespace?: string;
+  /** Named outcome for the action (default: "success"). Used by workflow transitions. */
+  outcome?: string;
 }
 
 /**
@@ -1074,3 +1076,176 @@ export interface WorkerDeregisterOptions {
 export interface WorkerDrainOptions {
   namespace?: string;
 }
+
+// ============================================================================
+// WORKFLOW TYPES
+// ============================================================================
+
+/**
+ * Options for creating a workflow.
+ */
+export interface WorkflowCreateOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for getting a workflow definition.
+ */
+export interface WorkflowGetDefinitionOptions {
+  namespace?: string;
+  /** Specific version to retrieve (optional — latest if omitted) */
+  version?: string;
+}
+
+/**
+ * Options for starting a workflow run.
+ */
+export interface WorkflowStartOptions {
+  namespace?: string;
+  /** Specific version to run (default: "latest") */
+  version?: string;
+  /** Idempotency key — same key returns existing run ID without creating a new one */
+  idempotencyKey?: string;
+  /** Explicit run ID (optional — server generates one if omitted) */
+  runId?: string;
+}
+
+/**
+ * Options for getting workflow run status.
+ */
+export interface WorkflowStatusOptions {
+  namespace?: string;
+}
+
+/**
+ * Result of a workflow status query.
+ */
+export interface WorkflowStatusResult {
+  run_id: string;
+  workflow: string;
+  version: string;
+  status: string;
+  current_step: string;
+  input: Uint8Array;
+  created_at: bigint;
+  started_at?: bigint;
+  completed_at?: bigint;
+  wait_signal?: string;
+}
+
+/**
+ * Options for getting workflow run history.
+ */
+export interface WorkflowHistoryOptions {
+  namespace?: string;
+  /** Maximum number of history events to return (default: 100) */
+  limit?: number;
+}
+
+/**
+ * A single workflow history event.
+ */
+export interface WorkflowHistoryEvent {
+  type: string;
+  detail: string;
+  timestamp: number;
+}
+
+/**
+ * Options for listing workflow runs.
+ */
+export interface WorkflowListRunsOptions {
+  namespace?: string;
+  /** Filter by workflow name (optional) */
+  workflowName?: string;
+  /** Filter by status: "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "timed_out" */
+  statusFilter?: string;
+  /** Maximum number of runs to return (default: 100) */
+  limit?: number;
+}
+
+/**
+ * A single entry in the workflow runs list.
+ */
+export interface WorkflowListRunEntry {
+  run_id: string;
+  workflow: string;
+  status: string;
+  created_at: number;
+}
+
+/**
+ * Options for sending a signal to a workflow.
+ */
+export interface WorkflowSignalOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for cancelling a workflow run.
+ */
+export interface WorkflowCancelOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for disabling a workflow.
+ */
+export interface WorkflowDisableOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for enabling a workflow.
+ */
+export interface WorkflowEnableOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for listing workflow definitions.
+ */
+export interface WorkflowListDefinitionsOptions {
+  namespace?: string;
+}
+
+/**
+ * A single entry in the workflow definitions list.
+ */
+export interface WorkflowDefinitionEntry {
+  name: string;
+  version: string;
+  created_at: number;
+}
+
+/**
+ * Options for syncing workflows.
+ */
+export interface WorkflowSyncOptions {
+  namespace?: string;
+}
+
+/**
+ * Result of a workflow sync operation.
+ */
+export interface WorkflowSyncResult {
+  name: string;
+  version: string;
+  action: "created" | "updated" | "unchanged";
+}
+
+/**
+ * A file entry returned by the directory reader for syncDir.
+ */
+export interface WorkflowSyncDirFile {
+  name: string;
+  content: string;
+}
+
+/**
+ * Function that reads all .yaml/.yml files from a directory.
+ * Injected by the caller to keep core free of Node.js fs dependencies.
+ */
+export type WorkflowSyncDirFn = (
+  dir: string
+) => Promise<WorkflowSyncDirFile[]>;

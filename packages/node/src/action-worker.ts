@@ -86,8 +86,39 @@ export interface ActionWorkerConfig {
 
 /**
  * Action handler function signature.
+ *
+ * Return a plain object (auto-serialized to JSON bytes), `Uint8Array` for
+ * pre-serialized data, or an `ActionResult` for named outcome routing.
  */
-export type ActionHandler = (ctx: ActionContext) => Promise<Uint8Array>;
+export type ActionHandler = (
+  ctx: ActionContext
+) => Promise<Record<string, unknown> | Uint8Array | ActionResult>;
+
+/**
+ * Named outcome result from an action handler.
+ *
+ * Use this when the workflow needs to route based on the action's
+ * business outcome (e.g., "approved", "rejected", "needs_review").
+ *
+ * @example
+ * ```typescript
+ * worker.action("review-order", async (ctx) => {
+ *   const order = ctx.json<{ amount: number }>();
+ *   if (order.amount > 10000) {
+ *     return ctx.result("needs_review", { reason: "high value" });
+ *   }
+ *   return ctx.result("approved", { orderId: order.orderId });
+ * });
+ * ```
+ */
+export class ActionResult {
+  constructor(
+    /** Named outcome string (maps to workflow transition keys) */
+    readonly outcome: string,
+    /** Result payload */
+    readonly data: Uint8Array
+  ) {}
+}
 
 /**
  * Context passed to action handlers.
@@ -169,6 +200,36 @@ export class ActionContext {
   }
 
   /**
+   * Create a named outcome result for workflow routing.
+   *
+   * Use this when the workflow definition has transitions keyed on
+   * custom outcome names (e.g. "approved", "rejected", "needs_review").
+   *
+   * @param outcome - Named outcome string (maps to workflow transition keys)
+   * @param value - Result data (will be JSON-serialized)
+   * @returns ActionResult with the named outcome
+   *
+   * @example
+   * ```typescript
+   * // In workflow YAML:
+   * //   transitions:
+   * //     approved: process_payment
+   * //     rejected: notify_rejection
+   * //     needs_review: manual_review
+   *
+   * worker.action("review-order", async (ctx) => {
+   *   const order = ctx.json<{ amount: number }>();
+   *   if (order.amount > 10000) return ctx.result("needs_review", { reason: "high value" });
+   *   if (order.amount < 0)     return ctx.result("rejected", { reason: "invalid amount" });
+   *   return ctx.result("approved", { orderId: "ORD-123" });
+   * });
+   * ```
+   */
+  result(outcome: string, value: unknown): ActionResult {
+    return new ActionResult(outcome, textEncoder.encode(JSON.stringify(value)));
+  }
+
+  /**
    * Extend the lease on this task.
    *
    * Use this for long-running tasks to prevent timeout.
@@ -177,7 +238,7 @@ export class ActionContext {
    * @param extendMs - How long to extend the lease in milliseconds (default: 30000)
    */
   async touch(extendMs = 30000): Promise<void> {
-    await this.worker._touchTask(this.taskId, extendMs);
+    await this.worker._touchTask(this.actionName, this.taskId, extendMs);
   }
 
   /**
@@ -441,6 +502,7 @@ export class ActionWorker {
         this.log(`No handler registered for action: ${task.taskType}`);
         await this.client!.worker.fail(
           this.config.workerId,
+          task.taskType,
           task.taskId,
           `No handler for: ${task.taskType}`
         );
@@ -465,26 +527,52 @@ export class ActionWorker {
           this.config.actionTimeoutMs
         );
 
-        // Success - complete the task
-        await this.client!.worker.complete(
-          this.config.workerId,
-          task.taskId,
-          result
-        );
-        this.log(`Action completed: ${task.taskType}`);
+        // Normalize result: plain object → JSON bytes, ActionResult → named outcome
+        if (result instanceof ActionResult) {
+          await this.client!.worker.complete(
+            this.config.workerId,
+            task.taskType,
+            task.taskId,
+            result.data,
+            { outcome: result.outcome }
+          );
+          this.log(`Action completed: ${task.taskType} (outcome: ${result.outcome})`);
+        } else {
+          const bytes = result instanceof Uint8Array
+            ? result
+            : textEncoder.encode(JSON.stringify(result));
+          await this.client!.worker.complete(
+            this.config.workerId,
+            task.taskType,
+            task.taskId,
+            bytes
+          );
+          this.log(`Action completed: ${task.taskType}`);
+        }
       } catch (err) {
         if (err instanceof TimeoutError) {
           this.log(`Action timed out: ${task.taskType}`);
           await this.client!.worker.fail(
             this.config.workerId,
+            task.taskType,
             task.taskId,
             "Action timed out",
+            { retry: false }
+          );
+        } else if (err instanceof NonRetryableError) {
+          this.log(`Action failed (non-retryable): ${task.taskType} - ${err}`);
+          await this.client!.worker.fail(
+            this.config.workerId,
+            task.taskType,
+            task.taskId,
+            String(err),
             { retry: false }
           );
         } else {
           this.log(`Action failed: ${task.taskType} - ${err}`);
           await this.client!.worker.fail(
             this.config.workerId,
+            task.taskType,
             task.taskId,
             String(err),
             { retry: true }
@@ -499,11 +587,11 @@ export class ActionWorker {
   /**
    * Extend lease on a task (internal method, called by ActionContext).
    */
-  async _touchTask(taskId: string, extendMs: number): Promise<void> {
+  async _touchTask(actionName: string, taskId: string, extendMs: number): Promise<void> {
     if (!this.client) {
       throw new Error("Worker not connected");
     }
-    await this.client.worker.touch(this.config.workerId, taskId, { extendMs });
+    await this.client.worker.touch(this.config.workerId, actionName, taskId, { extendMs });
   }
 
   /**
@@ -598,6 +686,31 @@ export class TimeoutError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "TimeoutError";
+  }
+}
+
+/**
+ * Error thrown by action handlers for deterministic / business-logic failures
+ * that should NOT be retried (e.g. validation errors, invalid input).
+ *
+ * Throwing a regular `Error` will cause the task to be retried.
+ * Throwing a `NonRetryableError` will mark the task as permanently failed.
+ *
+ * @example
+ * ```typescript
+ * async function validateOrder(ctx: ActionContext): Promise<Uint8Array> {
+ *   const data = ctx.json<{ amount: number }>();
+ *   if (data.amount > 2000) {
+ *     throw new NonRetryableError(`amount $${data.amount} exceeds limit`);
+ *   }
+ *   return ctx.toBytes({ valid: true });
+ * }
+ * ```
+ */
+export class NonRetryableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NonRetryableError";
   }
 }
 

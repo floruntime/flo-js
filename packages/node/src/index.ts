@@ -13,7 +13,9 @@ export { TcpTransport, parseEndpoint, type TcpTransportOptions } from "./transpo
 export {
   ActionWorker,
   ActionContext,
+  ActionResult,
   TimeoutError,
+  NonRetryableError,
   Worker,
   type ActionWorkerConfig,
   type WorkerConfig,
