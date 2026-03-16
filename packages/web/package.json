@@ -1,6 +1,6 @@
 {
   "name": "@floruntime/web",
-  "version": "0.1.0-dev.1",
+  "version": "0.1.0-dev.2",
   "description": "Flo SDK for browsers - WebSocket transport for real-time streams and KV",
   "type": "module",
   "main": "./dist/index.js",

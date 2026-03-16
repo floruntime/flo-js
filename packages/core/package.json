@@ -1,6 +1,6 @@
 {
   "name": "@floruntime/core",
-  "version": "0.1.0-dev.1",
+  "version": "0.1.0-dev.2",
   "description": "Flo SDK core - wire protocol, types, and transport-agnostic operations",
   "type": "module",
   "main": "./dist/index.js",
