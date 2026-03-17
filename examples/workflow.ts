@@ -102,6 +102,42 @@ steps:
       failure: flo.Failed
 `;
 
+// Interval-scheduled workflow: runs every 30 seconds (short for testing)
+const cronScheduledWorkflowYAML = `\
+kind: Workflow
+name: reconcile-accounts
+version: "1.0.0"
+
+schedule:
+  interval: 30000
+  max_concurrent: 1
+  input: '{"mode": "full"}'
+
+start:
+  run: "@actions/generate-report"
+  transitions:
+    success: flo.Completed
+    failure: flo.Failed
+`;
+
+// Interval-scheduled workflow: runs every 3 seconds (short for testing)
+const intervalScheduledWorkflowYAML = `\
+kind: Workflow
+name: health-monitor
+version: "1.0.0"
+
+schedule:
+  interval: 3000
+  max_concurrent: 1
+  input: '{"check": "heartbeat"}'
+
+start:
+  run: "@actions/health-check"
+  transitions:
+    success: flo.Completed
+    failure: flo.Failed
+`;
+
 // Outcome-based routing: review-order returns named outcomes
 // that map to different workflow branches
 const outcomeWorkflowYAML = `\
@@ -182,6 +218,17 @@ async function main() {
     const syncResult5 = await client.workflow.sync(signalTimeoutWorkflowYAML);
     console.log(
       `Synced "${syncResult5.name}" v${syncResult5.version}: ${syncResult5.action}`
+    );
+
+    // Sync scheduled workflows
+    const syncResult6 = await client.workflow.sync(cronScheduledWorkflowYAML);
+    console.log(
+      `Synced "${syncResult6.name}" v${syncResult6.version}: ${syncResult6.action}`
+    );
+
+    const syncResult7 = await client.workflow.sync(intervalScheduledWorkflowYAML);
+    console.log(
+      `Synced "${syncResult7.name}" v${syncResult7.version}: ${syncResult7.action}`
     );
 
     // ============================================================
@@ -439,6 +486,112 @@ async function main() {
     await runOutcomeTest("Small  ($50) ", 50,  "ORD-SMALL", "fulfill");
     await runOutcomeTest("Large  ($750)", 750, "ORD-BIG",   "notify_rejection");
     await runOutcomeTest("Medium ($250)", 250, "ORD-MID",   "manual_review");
+
+    // ============================================================
+    // 12. Scheduling — cron & interval
+    //     Scheduling is declarative via the YAML `schedule:` block.
+    //     The server automatically creates runs on the schedule.
+    //     Disable/enable pauses and resumes the schedule.
+    // ============================================================
+    console.log("\n=== Scheduling ===");
+
+    // ── 12a. Sync interval-scheduled workflow (30s) ──
+    console.log("\n  --- 12a. Interval Schedule (30s) ---");
+
+    const cronSync = await client.workflow.sync(cronScheduledWorkflowYAML);
+    console.log(
+      `  Synced "${cronSync.name}" v${cronSync.version}: ${cronSync.action}`
+    );
+
+    // Verify the definition was registered
+    const cronDef = await client.workflow.getDefinition("reconcile-accounts");
+    if (cronDef) {
+      console.log(`  ✓ Definition stored (${cronDef.length} bytes)`);
+      // Confirm the schedule block is preserved in the YAML
+      if (cronDef.includes("interval: 30000")) {
+        console.log("  ✓ Interval (30s) preserved in definition");
+      }
+      if (cronDef.includes("max_concurrent: 1")) {
+        console.log("  ✓ max_concurrent preserved in definition");
+      }
+    }
+
+    // ── 12b. Sync interval-scheduled workflow ──
+    console.log("\n  --- 12b. Interval Schedule ---");
+
+    const intervalSync = await client.workflow.sync(intervalScheduledWorkflowYAML);
+    console.log(
+      `  Synced "${intervalSync.name}" v${intervalSync.version}: ${intervalSync.action}`
+    );
+
+    // Wait for the scheduler to auto-trigger at least one run (~3s interval)
+    console.log("  Waiting 5s for scheduler to auto-trigger runs...");
+    await delay(5000);
+
+    const scheduledRuns = await client.workflow.listRuns({
+      workflowName: "health-monitor",
+      limit: 10,
+    });
+    console.log(`  Auto-triggered runs: ${scheduledRuns.length}`);
+    for (const run of scheduledRuns) {
+      console.log(
+        `    ${run.run_id} — ${run.status} (${run.created_at})`
+      );
+    }
+    if (scheduledRuns.length > 0) {
+      console.log("  ✓ Scheduler auto-created runs");
+    } else {
+      console.log("  ⚠ No runs yet (scheduler may need more time)");
+    }
+
+    // ── 12c. Disable pauses the schedule ──
+    console.log("\n  --- 12c. Disable Pauses Schedule ---");
+
+    await client.workflow.disable("health-monitor");
+    console.log("  Disabled health-monitor");
+
+    const countBefore = (
+      await client.workflow.listRuns({ workflowName: "health-monitor", limit: 50 })
+    ).length;
+    console.log(`  Runs before pause: ${countBefore}`);
+
+    // Wait a full interval — no new runs should appear
+    console.log("  Waiting 4s (should NOT create new runs)...");
+    await delay(4000);
+
+    const countAfter = (
+      await client.workflow.listRuns({ workflowName: "health-monitor", limit: 50 })
+    ).length;
+    console.log(`  Runs after pause:  ${countAfter}`);
+    if (countAfter === countBefore) {
+      console.log("  ✓ Schedule paused — no new runs while disabled");
+    } else {
+      console.log(`  ⚠ Expected ${countBefore} runs but got ${countAfter}`);
+    }
+
+    // ── 12d. Enable resumes the schedule ──
+    console.log("\n  --- 12d. Enable Resumes Schedule ---");
+
+    await client.workflow.enable("health-monitor");
+    console.log("  Re-enabled health-monitor");
+
+    // Wait for at least one more run to be auto-triggered
+    console.log("  Waiting 5s for scheduler to resume...");
+    await delay(5000);
+
+    const countResumed = (
+      await client.workflow.listRuns({ workflowName: "health-monitor", limit: 50 })
+    ).length;
+    console.log(`  Runs after resume: ${countResumed}`);
+    if (countResumed > countAfter) {
+      console.log("  ✓ Schedule resumed — new runs created after enable");
+    } else {
+      console.log("  ⚠ No new runs after resume (scheduler may need more time)");
+    }
+
+    // Clean up: disable so the schedule doesn't keep firing
+    await client.workflow.disable("health-monitor");
+    console.log("  Disabled health-monitor (cleanup)");
 
     console.log("\nDone ✓");
   } finally {

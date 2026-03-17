@@ -105,6 +105,21 @@ export {
   type WorkflowSyncResult,
   type WorkflowSyncDirFile,
   type WorkflowSyncDirFn,
+  // Processing types
+  type ProcessingSubmitOptions,
+  type ProcessingStatusOptions,
+  type ProcessingListOptions,
+  type ProcessingStopOptions,
+  type ProcessingCancelOptions,
+  type ProcessingSavepointOptions,
+  type ProcessingRestoreOptions,
+  type ProcessingRescaleOptions,
+  type ProcessingStatusResult,
+  type ProcessingListEntry,
+  type ProcessingSyncOptions,
+  type ProcessingSyncResult,
+  type ProcessingSyncDirFile,
+  type ProcessingSyncDirFn,
   // Internal types
   type RawResponse,
   type Transport,
@@ -184,6 +199,11 @@ export {
   extractYAMLField,
   type RequestSender as WorkflowRequestSender,
 } from "./workflows.js";
+export {
+  ProcessingOperations,
+  extractProcessingMeta,
+  type RequestSender as ProcessingRequestSender,
+} from "./processing.js";
 
 // Wire protocol - Action/Worker serialization
 export {

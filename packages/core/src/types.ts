@@ -1231,6 +1231,7 @@ export interface WorkflowSyncOptions {
 export interface WorkflowSyncResult {
   name: string;
   version: string;
+  description: string;
   action: "created" | "updated" | "unchanged";
 }
 
@@ -1249,3 +1250,120 @@ export interface WorkflowSyncDirFile {
 export type WorkflowSyncDirFn = (
   dir: string
 ) => Promise<WorkflowSyncDirFile[]>;
+
+// =============================================================================
+// Processing Types
+// =============================================================================
+
+/**
+ * Options for submitting a processing job.
+ */
+export interface ProcessingSubmitOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for getting processing job status.
+ */
+export interface ProcessingStatusOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for listing processing jobs.
+ */
+export interface ProcessingListOptions {
+  namespace?: string;
+  limit?: number;
+}
+
+/**
+ * Options for stopping a processing job.
+ */
+export interface ProcessingStopOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for cancelling a processing job.
+ */
+export interface ProcessingCancelOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for triggering a processing savepoint.
+ */
+export interface ProcessingSavepointOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for restoring a processing job from a savepoint.
+ */
+export interface ProcessingRestoreOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for rescaling a processing job's parallelism.
+ */
+export interface ProcessingRescaleOptions {
+  namespace?: string;
+}
+
+/**
+ * Status of a processing job.
+ */
+export interface ProcessingStatusResult {
+  job_id: string;
+  name: string;
+  status: string;
+  parallelism: number;
+  batch_size: number;
+  records_processed: number;
+  created_at: number;
+}
+
+/**
+ * A processing job entry returned by list.
+ */
+export interface ProcessingListEntry {
+  name: string;
+  job_id: string;
+  status: string;
+  parallelism: number;
+  created_at: number;
+}
+
+/**
+ * Options for syncing processing jobs.
+ */
+export interface ProcessingSyncOptions {
+  namespace?: string;
+}
+
+/**
+ * Result of a processing sync operation.
+ */
+export interface ProcessingSyncResult {
+  name: string;
+  job_id: string;
+  action: "submitted";
+}
+
+/**
+ * A file entry returned by the directory reader for syncDir.
+ */
+export interface ProcessingSyncDirFile {
+  name: string;
+  content: string;
+}
+
+/**
+ * Function that reads all .yaml/.yml files from a directory.
+ * Injected by the caller to keep core free of Node.js fs dependencies.
+ */
+export type ProcessingSyncDirFn = (
+  dir: string
+) => Promise<ProcessingSyncDirFile[]>;

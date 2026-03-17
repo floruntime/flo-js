@@ -1,0 +1,67 @@
+# Flo Workflow: Internal Transfer
+#
+# Handles all internal ledger-to-ledger transfers:
+#   - Budget fund      (Account → Budget)
+#   - Budget withdraw   (Budget → Account)
+#   - Budget renewal    (refill budget balance on schedule)
+#   - Budget retire     (drain budget balance → Account)
+#   - Card fund/withdraw/renewal/retire (same pattern)
+#
+# These are ledger-only operations — no external partners, no webhooks.
+# The transfer-ledger action debits the source and credits the destination
+# in a single ledger journal entry. create-counterpart creates the matching
+# credit-side transaction record for the destination holding.
+#
+# Flow:
+#   transfer-ledger → create-counterpart → notify → Completed
+#
+# Failure:
+#   Insufficient balance → fail-transaction → Completed (marks txn failed)
+#   System error         → flo.Failed (retryable)
+
+kind: Workflow
+name: internal-transfer
+version: "1.0.0"
+idempotency: required
+
+trigger:
+  stream: txn.internal
+  mode: shared
+  batch_size: 1
+
+searchAttributes:
+  - name: transaction_id
+    type: string
+    from: input.id
+  - name: business_id
+    type: string
+    from: input.business_id
+  - name: transaction_type
+    type: string
+    from: input.type
+
+start:
+  run: "@actions/transfer-ledger"
+  transitions:
+    success: create-counterpart
+    insufficient-balance: fail-insufficient
+    failure: flo.Failed
+
+steps:
+  create-counterpart:
+    run: "@actions/create-counterpart"
+    transitions:
+      success: notify
+      failure: flo.Failed
+
+  notify:
+    run: "@actions/notify-transfer"
+    transitions:
+      success: flo.Completed
+      failure: flo.Completed
+
+  fail-insufficient:
+    run: "@actions/fail-transaction"
+    transitions:
+      success: flo.Completed
+      failure: flo.Failed

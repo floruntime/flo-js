@@ -133,16 +133,18 @@ export class WorkflowOperations {
    */
   async start(
     name: string,
-    input?: Uint8Array | string,
+    input?: Uint8Array | string | Record<string, any>,
     opts?: WorkflowStartOptions
   ): Promise<string> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
     // Wire format: [has_idem:u8][idem_len:u16]?[idem]?[has_rid:u8][rid_len:u16]?[rid]?[input...]
     const inputBytes = input
-      ? typeof input === "string"
-        ? textEncoder.encode(input)
-        : input
+      ? input instanceof Uint8Array
+        ? input
+        : typeof input === "string"
+          ? textEncoder.encode(input)
+          : textEncoder.encode(JSON.stringify(input))
       : new Uint8Array(0);
 
     const parts: number[] = [];
@@ -411,7 +413,7 @@ export class WorkflowOperations {
   async signal(
     runId: string,
     signalName: string,
-    data?: Uint8Array | Record<string, unknown> | string,
+    data?: Uint8Array | string | Record<string, any>,
     opts?: WorkflowSignalOptions
   ): Promise<void> {
     const namespace = this.sender.getNamespace(opts?.namespace);
@@ -572,7 +574,7 @@ export class WorkflowOperations {
     yaml: string,
     opts?: WorkflowSyncOptions
   ): Promise<WorkflowSyncResult> {
-    const { name, version } = extractWorkflowMeta(yaml);
+    const { name, version, description } = extractWorkflowMeta(yaml);
     const namespace = this.sender.getNamespace(opts?.namespace);
 
     // Check if workflow already exists
@@ -581,7 +583,7 @@ export class WorkflowOperations {
     if (existing !== null) {
       const existingVersion = extractYAMLField(existing, "version");
       if (existingVersion === version) {
-        return { name, version, action: "unchanged" };
+        return { name, version, description, action: "unchanged" };
       }
     }
 
@@ -591,6 +593,7 @@ export class WorkflowOperations {
     return {
       name,
       version,
+      description,
       action: existing !== null ? "updated" : "created",
     };
   }
@@ -661,9 +664,11 @@ export class WorkflowOperations {
 export function extractWorkflowMeta(yaml: string): {
   name: string;
   version: string;
+  description: string;
 } {
   const name = extractYAMLField(yaml, "name");
   const version = extractYAMLField(yaml, "version");
+  const description = extractYAMLField(yaml, "description") ?? "";
 
   if (!name) {
     throw new Error("flo: workflow YAML missing required 'name' field");
@@ -672,7 +677,7 @@ export function extractWorkflowMeta(yaml: string): {
     throw new Error("flo: workflow YAML missing required 'version' field");
   }
 
-  return { name, version };
+  return { name, version, description };
 }
 
 /**

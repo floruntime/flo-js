@@ -11,6 +11,10 @@ import {
   HEADER_SIZE,
   KVOperations,
   type OpCode,
+  ProcessingOperations,
+  type ProcessingSyncOptions,
+  type ProcessingSyncResult,
+  type ProcessingSyncDirFile,
   QueueOperations,
   type RawResponse,
   StreamOperations,
@@ -54,6 +58,9 @@ export class FloClient {
   /** Workflow operations */
   readonly workflow: NodeWorkflowOperations;
 
+  /** Processing (stream processing) operations */
+  readonly processing: NodeProcessingOperations;
+
   /**
    * Create a new Flo client.
    *
@@ -87,6 +94,7 @@ export class FloClient {
     this.action = new ActionOperations(this);
     this.worker = new WorkerOperations(this);
     this.workflow = new NodeWorkflowOperations(this);
+    this.processing = new NodeProcessingOperations(this);
   }
 
   /**
@@ -225,4 +233,46 @@ async function readYamlDir(dir: string): Promise<WorkflowSyncDirFile[]> {
     }
   }
   return files;
+}
+
+/**
+ * Node.js processing operations with built-in syncDir support.
+ * Extends the core ProcessingOperations with filesystem access.
+ */
+class NodeProcessingOperations extends ProcessingOperations {
+  /**
+   * Sync all .yaml/.yml processing job files in a directory.
+   *
+   * Reads every YAML file and submits it to the server.
+   * Returns an array of results with the server-assigned job IDs.
+   *
+   * @param dir - Path to directory containing processing YAML files
+   * @param opts - Options (namespace)
+   */
+  async syncDir(
+    dir: string,
+    opts?: ProcessingSyncOptions
+  ): Promise<ProcessingSyncResult[]>;
+  /**
+   * Sync all YAML files using a custom directory reader.
+   *
+   * @param readDirFn - Custom function that returns file entries
+   * @param dir - Directory path passed to readDirFn
+   * @param opts - Options (namespace)
+   */
+  async syncDir(
+    readDirFn: (dir: string) => Promise<ProcessingSyncDirFile[]>,
+    dir: string,
+    opts?: ProcessingSyncOptions
+  ): Promise<ProcessingSyncResult[]>;
+  async syncDir(
+    dirOrFn: string | ((dir: string) => Promise<ProcessingSyncDirFile[]>),
+    dirOrOpts?: string | ProcessingSyncOptions,
+    opts?: ProcessingSyncOptions
+  ): Promise<ProcessingSyncResult[]> {
+    if (typeof dirOrFn === "string") {
+      return super.syncDir(readYamlDir, dirOrFn, dirOrOpts as ProcessingSyncOptions | undefined);
+    }
+    return super.syncDir(dirOrFn, dirOrOpts as string, opts);
+  }
 }
