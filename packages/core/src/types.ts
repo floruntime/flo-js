@@ -5,7 +5,7 @@
 // Protocol constants
 export const MAGIC = 0x004f4c46; // "FLO\0" in little-endian
 export const VERSION = 0x01;
-export const HEADER_SIZE = 24;
+export const HEADER_SIZE = 32;
 
 // Size limits (for client-side validation)
 export const MAX_NAMESPACE_SIZE = 255;
@@ -14,209 +14,209 @@ export const MAX_VALUE_SIZE = 16 * 1024 * 1024; // 16 MB practical limit
 
 /**
  * Operation codes for Flo protocol requests.
+ * Three-layer layout: Infra(0x000–0x0FF), Data(0x100–0x2FF), Compute(0x300–0x3FF)
  */
 export const OpCode = {
-  // System Operations (0x00 - 0x0F)
-  Ping: 0x00,
-  Pong: 0x01,
-  ErrorResponse: 0x02,
-  Auth: 0x03,
-  SetDurability: 0x04,
-  OK: 0x05,
+  // ── System (0x000 – 0x00F) ──
+  Ping: 0x000,
+  Pong: 0x001,
+  ErrorResponse: 0x002,
+  Auth: 0x003,
+  SetDurability: 0x004,
+  OK: 0x005,
 
-  // Streams (0x10 - 0x1F)
-  StreamAppend: 0x10,
-  StreamRead: 0x11,
-  StreamTrim: 0x12,
-  StreamInfo: 0x13,
-  StreamAppendResponse: 0x14,
-  StreamReadResponse: 0x15,
-  StreamEvent: 0x16, // Server-push for subscriptions
-  StreamSubscribe: 0x17, // Subscribe to stream (WebSocket continuous push)
-  StreamUnsubscribe: 0x18, // Unsubscribe from stream
-  StreamSubscribed: 0x19, // Response: subscription confirmed
-  StreamUnsubscribed: 0x1a, // Response: unsubscription confirmed
-  StreamList: 0x1b, // List all streams in namespace
-  StreamListResponse: 0x1c,
-  StreamCreate: 0x1d, // Create stream with partition count
-  StreamCreateResponse: 0x1e,
-  StreamAlter: 0x1f, // Alter stream configuration (retention policy)
+  // ── Namespace (0x010 – 0x02F) ──
+  NamespaceCreate: 0x010,
+  NamespaceDelete: 0x011,
+  NamespaceList: 0x012,
+  NamespaceInfo: 0x013,
+  NamespaceConfigSet: 0x014,
+  NamespaceConfigGet: 0x015,
+  NamespaceCreateResponse: 0x020,
+  NamespaceDeleteResponse: 0x021,
+  NamespaceListResponse: 0x022,
+  NamespaceInfoResponse: 0x023,
+  NamespaceConfigSetResponse: 0x024,
+  NamespaceConfigGetResponse: 0x025,
 
-  // Stream Consumer Groups (0x20 - 0x2F)
-  StreamGroupCreate: 0x20, // Create consumer group with configuration
-  StreamGroupJoin: 0x21,
-  StreamGroupLeave: 0x22,
-  StreamGroupRead: 0x23,
-  StreamGroupAck: 0x24,
-  StreamGroupClaim: 0x25,
-  StreamGroupPending: 0x26,
-  StreamGroupConfigureSweeper: 0x27,
-  StreamGroupReadResponse: 0x28,
-  StreamGroupNack: 0x29,
-  StreamGroupTouch: 0x2a, // Extend ack deadline for pending messages
-  StreamGroupInfo: 0x2b, // Get consumer group info (config + consumers)
-  StreamGroupDelete: 0x2c, // Delete consumer group
+  // ── Cluster (0x030 – 0x04F) ──
+  ClusterStatus: 0x030,
+  ClusterMembers: 0x031,
+  ClusterJoin: 0x032,
+  ClusterLeave: 0x033,
+  ClusterTransferLeader: 0x034,
+  ClusterAddNode: 0x035,
+  ClusterRemoveNode: 0x036,
+  ClusterStatusResponse: 0x040,
+  ClusterMembersResponse: 0x041,
+  ClusterJoinResponse: 0x042,
 
-  // KV Operations (0x30 - 0x3F)
-  KVPut: 0x30,
-  KVGet: 0x31,
-  KVDelete: 0x32,
-  KVScan: 0x33,
-  KVHistory: 0x34,
-  KVGetResponse: 0x35,
-  KVPutResponse: 0x36,
-  KVScanResponse: 0x37,
-  KVHistoryResponse: 0x38,
+  // ── KV + Transactions + Snapshots (0x100 – 0x12F) ──
+  KVPut: 0x100,
+  KVGet: 0x101,
+  KVMGet: 0x102,
+  KVDelete: 0x103,
+  KVScan: 0x104,
+  KVHistory: 0x105,
+  KVGetResponse: 0x106,
+  KVMGetResponse: 0x107,
+  KVPutResponse: 0x108,
+  KVScanResponse: 0x109,
+  KVHistoryResponse: 0x10a,
+  KVBeginTxn: 0x110,
+  KVCommitTxn: 0x111,
+  KVRollbackTxn: 0x112,
+  KVSnapshotCreate: 0x120,
+  KVSnapshotGet: 0x121,
+  KVSnapshotRelease: 0x122,
+  KVSnapshotCreateResponse: 0x123,
 
-  // Transactions (0x39 - 0x3B)
-  KVBeginTxn: 0x39,
-  KVCommitTxn: 0x3a,
-  KVRollbackTxn: 0x3b,
+  // ── Streams (0x130 – 0x14F) ──
+  StreamAppend: 0x130,
+  StreamRead: 0x131,
+  StreamTrim: 0x132,
+  StreamInfo: 0x133,
+  StreamAppendResponse: 0x134,
+  StreamReadResponse: 0x135,
+  StreamEvent: 0x136,
+  StreamSubscribe: 0x137,
+  StreamUnsubscribe: 0x138,
+  StreamSubscribed: 0x139,
+  StreamUnsubscribed: 0x13a,
+  StreamList: 0x13b,
+  StreamListResponse: 0x13c,
+  StreamCreate: 0x13d,
+  StreamCreateResponse: 0x13e,
+  StreamAlter: 0x13f,
 
-  // Snapshots (0x3C - 0x3F)
-  KVSnapshotCreate: 0x3c,
-  KVSnapshotGet: 0x3d,
-  KVSnapshotRelease: 0x3e,
-  KVSnapshotCreateResponse: 0x3f,
+  // ── Stream Consumer Groups (0x150 – 0x16F) ──
+  StreamGroupCreate: 0x150,
+  StreamGroupJoin: 0x151,
+  StreamGroupLeave: 0x152,
+  StreamGroupRead: 0x153,
+  StreamGroupAck: 0x154,
+  StreamGroupClaim: 0x155,
+  StreamGroupPending: 0x156,
+  StreamGroupConfigureSweeper: 0x157,
+  StreamGroupReadResponse: 0x158,
+  StreamGroupNack: 0x159,
+  StreamGroupTouch: 0x15a,
+  StreamGroupInfo: 0x15b,
+  StreamGroupDelete: 0x15c,
 
-  // Queues (0x40 - 0x5F)
-  QueueEnqueue: 0x40,
-  QueueDequeue: 0x41,
-  QueueComplete: 0x42,
-  QueueExtendLease: 0x43,
-  QueueFail: 0x44,
-  QueueFailAuto: 0x45,
-  QueueDLQList: 0x46,
-  QueueDLQDelete: 0x47,
-  QueueDLQRequeue: 0x48,
-  QueueDLQStats: 0x49,
-  QueuePromoteDue: 0x4a,
-  QueueStats: 0x4b,
-  QueuePeek: 0x4c,
-  QueueTouch: 0x4d,
-  QueueBatchEnqueue: 0x4e,
-  QueuePurge: 0x4f,
+  // ── Queues (0x170 – 0x19F) ──
+  QueueEnqueue: 0x170,
+  QueueDequeue: 0x171,
+  QueueComplete: 0x172,
+  QueueExtendLease: 0x173,
+  QueueFail: 0x174,
+  QueueFailAuto: 0x175,
+  QueueDLQList: 0x176,
+  QueueDLQDelete: 0x177,
+  QueueDLQRequeue: 0x178,
+  QueueDLQStats: 0x179,
+  QueuePromoteDue: 0x17a,
+  QueueStats: 0x17b,
+  QueuePeek: 0x17c,
+  QueueTouch: 0x17d,
+  QueueBatchEnqueue: 0x17e,
+  QueuePurge: 0x17f,
+  QueueEnqueueResponse: 0x190,
+  QueueDequeueResponse: 0x191,
+  QueueDLQListResponse: 0x192,
+  QueueStatsResponse: 0x193,
+  QueuePeekResponse: 0x194,
+  QueueTouchResponse: 0x195,
+  QueueBatchEnqueueResponse: 0x196,
+  QueuePurgeResponse: 0x197,
+  QueueList: 0x198,
+  QueueListResponse: 0x199,
 
-  // Queue responses (0x50 - 0x5F)
-  QueueEnqueueResponse: 0x50,
-  QueueDequeueResponse: 0x51,
-  QueueDLQListResponse: 0x52,
-  QueueStatsResponse: 0x53,
-  QueuePeekResponse: 0x54,
-  QueueTouchResponse: 0x55,
-  QueueBatchEnqueueResponse: 0x56,
-  QueuePurgeResponse: 0x57,
-  QueueList: 0x58, // List all queues in namespace
-  QueueListResponse: 0x59,
+  // ── Time-Series (0x1A0 – 0x1BF) ──
+  TSWrite: 0x1a0,
+  TSRead: 0x1a1,
+  TSQuery: 0x1a2,
+  TSFloQL: 0x1a3,
+  TSList: 0x1a4,
+  TSDelete: 0x1a5,
+  TSRetention: 0x1a6,
+  TSWriteResponse: 0x1a7,
+  TSReadResponse: 0x1a8,
+  TSQueryResponse: 0x1a9,
+  TSFloQLResponse: 0x1aa,
+  TSListResponse: 0x1ab,
+  TSDeleteResponse: 0x1ac,
+  TSRetentionResponse: 0x1ad,
 
-  // Actions (0x60 - 0x6D)
-  ActionRegister: 0x60,
-  ActionInvoke: 0x61,
-  ActionStatus: 0x62,
-  ActionList: 0x63,
-  ActionDelete: 0x64,
-  ActionAwait: 0x65,
-  ActionComplete: 0x66,
-  ActionFail: 0x67,
-  ActionTouch: 0x68,
-  ActionRegisterResponse: 0x69,
-  ActionInvokeResponse: 0x6a,
-  ActionStatusResponse: 0x6b,
-  ActionListResponse: 0x6c,
-  ActionTaskAssignment: 0x6d,
+  // ── Actions (0x300 – 0x31F) ──
+  ActionRegister: 0x300,
+  ActionInvoke: 0x301,
+  ActionStatus: 0x302,
+  ActionList: 0x303,
+  ActionListRuns: 0x304,
+  ActionDelete: 0x305,
+  ActionAwait: 0x306,
+  ActionComplete: 0x307,
+  ActionFail: 0x308,
+  ActionTouch: 0x309,
+  ActionRegisterResponse: 0x310,
+  ActionInvokeResponse: 0x311,
+  ActionStatusResponse: 0x312,
+  ActionListResponse: 0x313,
+  ActionListRunsResponse: 0x314,
+  ActionTaskAssignment: 0x315,
 
-  // Workers (0x70 - 0x78)
-  WorkerRegister: 0x70,
-  WorkerHeartbeat: 0x71,
-  WorkerDeregister: 0x72,
-  WorkerList: 0x73,
-  WorkerInfo: 0x74,
-  WorkerRegisterResponse: 0x75,
-  WorkerListResponse: 0x76,
-  WorkerInfoResponse: 0x77,
-  WorkerDrain: 0x78,
+  // ── Workers (0x320 – 0x33F) ──
+  WorkerRegister: 0x320,
+  WorkerHeartbeat: 0x321,
+  WorkerDeregister: 0x322,
+  WorkerList: 0x323,
+  WorkerInfo: 0x324,
+  WorkerDrain: 0x325,
+  WorkerRegisterResponse: 0x330,
+  WorkerListResponse: 0x331,
+  WorkerInfoResponse: 0x332,
+  WorkerDrainResponse: 0x333,
 
-  // Workflows (0x80 - 0x93)
-  WorkflowCreate: 0x80, // Create workflow from YAML definition
-  WorkflowStart: 0x81, // Start a workflow run
-  WorkflowSignal: 0x82, // Send signal to running workflow
-  WorkflowCancel: 0x83, // Cancel a workflow run
-  WorkflowStatus: 0x84, // Get workflow run status
-  WorkflowHistory: 0x85, // Get workflow run history
-  WorkflowListRuns: 0x86, // List workflow runs
-  WorkflowGetDefinition: 0x87, // Get workflow definition
-  WorkflowCreateResponse: 0x88,
-  WorkflowStartResponse: 0x89,
-  WorkflowStatusResponse: 0x8a,
-  WorkflowHistoryResponse: 0x8b,
-  WorkflowListRunsResponse: 0x8c,
-  WorkflowGetDefinitionResponse: 0x8d,
-  WorkflowDisable: 0x8e,
-  WorkflowEnable: 0x8f,
-  WorkflowDisableResponse: 0x90,
-  WorkflowEnableResponse: 0x91,
-  WorkflowListDefinitions: 0x92,
-  WorkflowListDefinitionsResponse: 0x93,
+  // ── Workflows (0x340 – 0x35F) ──
+  WorkflowCreate: 0x340,
+  WorkflowStart: 0x341,
+  WorkflowSignal: 0x342,
+  WorkflowCancel: 0x343,
+  WorkflowStatus: 0x344,
+  WorkflowHistory: 0x345,
+  WorkflowListRuns: 0x346,
+  WorkflowGetDefinition: 0x347,
+  WorkflowDisable: 0x348,
+  WorkflowEnable: 0x349,
+  WorkflowListDefinitions: 0x34a,
+  WorkflowCreateResponse: 0x350,
+  WorkflowStartResponse: 0x351,
+  WorkflowStatusResponse: 0x352,
+  WorkflowHistoryResponse: 0x353,
+  WorkflowListRunsResponse: 0x354,
+  WorkflowGetDefinitionResponse: 0x355,
+  WorkflowDisableResponse: 0x356,
+  WorkflowEnableResponse: 0x357,
+  WorkflowListDefinitionsResponse: 0x358,
 
-  // Cluster Management (0xA0 - 0xAF)
-  ClusterStatus: 0xa0, // Get cluster status (leader, term, health)
-  ClusterMembers: 0xa1, // List cluster members
-  ClusterJoin: 0xa2, // Request to join cluster
-  ClusterLeave: 0xa3, // Request to leave cluster gracefully
-  ClusterTransferLeader: 0xa4, // Transfer leadership to another node
-  ClusterAddNode: 0xa5, // Admin: add node to cluster (leader only)
-  ClusterRemoveNode: 0xa6, // Admin: remove node from cluster (leader only)
-  ClusterStatusResponse: 0xa8,
-  ClusterMembersResponse: 0xa9,
-  ClusterJoinResponse: 0xaa,
-
-  // Namespace Management (0xB0 - 0xBF)
-  NamespaceCreate: 0xb0, // Create a new namespace
-  NamespaceDelete: 0xb1, // Delete an existing namespace
-  NamespaceList: 0xb2, // List all namespaces
-  NamespaceInfo: 0xb3, // Get namespace info/config
-  NamespaceCreateResponse: 0xb4,
-  NamespaceDeleteResponse: 0xb5,
-  NamespaceListResponse: 0xb6,
-  NamespaceInfoResponse: 0xb7,
-  NamespaceConfigSet: 0xb8,
-  NamespaceConfigGet: 0xb9,
-  NamespaceConfigSetResponse: 0xba,
-  NamespaceConfigGetResponse: 0xbb,
-
-  // Processing / Stream Processing (0xC0 - 0xD1)
-  ProcessingSubmit: 0xc0, // Submit a processing job
-  ProcessingStop: 0xc1, // Gracefully stop a processing job
-  ProcessingCancel: 0xc2, // Force cancel a processing job
-  ProcessingStatus: 0xc3, // Get processing job status
-  ProcessingList: 0xc4, // List processing jobs
-  ProcessingSavepoint: 0xc6, // Trigger a savepoint
-  ProcessingRestore: 0xc7, // Restore from a savepoint
-  ProcessingRescale: 0xc8, // Rescale job parallelism
-  ProcessingSubmitResponse: 0xc9,
-  ProcessingStopResponse: 0xca,
-  ProcessingCancelResponse: 0xcb,
-  ProcessingStatusResponse: 0xcc,
-  ProcessingListResponse: 0xcd,
-  ProcessingSavepointResponse: 0xcf,
-  ProcessingRestoreResponse: 0xd0,
-  ProcessingRescaleResponse: 0xd1,
-
-  // Time-Series Operations (0xE0 - 0xED)
-  TSWrite: 0xe0, // Write data point(s) to a time-series
-  TSRead: 0xe1, // Read raw data points from a time-series
-  TSQuery: 0xe2, // Aggregated query over a time range
-  TSFloQL: 0xe3, // FloQL query string
-  TSList: 0xe4, // List measurements or series
-  TSDelete: 0xe5, // Delete a series and its metadata
-  TSRetention: 0xe6, // Configure retention / downsampling policy
-  TSWriteResponse: 0xe7,
-  TSReadResponse: 0xe8,
-  TSQueryResponse: 0xe9,
-  TSFloQLResponse: 0xea,
-  TSListResponse: 0xeb,
-  TSDeleteResponse: 0xec,
-  TSRetentionResponse: 0xed,
+  // ── Processing (0x360 – 0x37F) ──
+  ProcessingSubmit: 0x360,
+  ProcessingStop: 0x361,
+  ProcessingCancel: 0x362,
+  ProcessingStatus: 0x363,
+  ProcessingList: 0x364,
+  ProcessingSavepoint: 0x365,
+  ProcessingRestore: 0x366,
+  ProcessingRescale: 0x367,
+  ProcessingSubmitResponse: 0x370,
+  ProcessingStopResponse: 0x371,
+  ProcessingCancelResponse: 0x372,
+  ProcessingStatusResponse: 0x373,
+  ProcessingListResponse: 0x374,
+  ProcessingSavepointResponse: 0x375,
+  ProcessingRestoreResponse: 0x376,
+  ProcessingRescaleResponse: 0x377,
 } as const;
 
 export type OpCode = (typeof OpCode)[keyof typeof OpCode];
@@ -420,6 +420,8 @@ export interface StreamRecord {
   id: StreamID;
   /** Storage tier (hot, pending, warm, cold) */
   tier: StorageTier;
+  /** Stream name (identifies which stream the record came from) */
+  stream: string;
   /** Event payload */
   payload: Uint8Array;
   /** Optional headers (key-value pairs) */
@@ -1207,6 +1209,8 @@ export interface WorkflowEnableOptions {
  */
 export interface WorkflowListDefinitionsOptions {
   namespace?: string;
+  limit?: number;
+  cursor?: Uint8Array;
 }
 
 /**
@@ -1275,6 +1279,7 @@ export interface ProcessingStatusOptions {
 export interface ProcessingListOptions {
   namespace?: string;
   limit?: number;
+  cursor?: Uint8Array;
 }
 
 /**

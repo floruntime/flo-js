@@ -100,12 +100,14 @@ export function parseStreamReadResponse(data: Uint8Array): StreamReadResult {
     const keyPresent = data[offset];
     offset += 1;
 
-    // skip key if present
+    // read key (stream name) if present
+    let streamName = '';
     if (keyPresent !== 0) {
       if (offset + 4 > data.length) break;
       const keyLen = view.getUint32(offset, true);
       offset += 4;
       if (offset + keyLen > data.length) break;
+      streamName = new TextDecoder().decode(data.subarray(offset, offset + keyLen));
       offset += keyLen;
     }
 
@@ -118,15 +120,38 @@ export function parseStreamReadResponse(data: Uint8Array): StreamReadResult {
     const payload = new Uint8Array(data.subarray(offset, offset + payloadLen));
     offset += payloadLen;
 
-    // header_count (u32) — skip for now
+    // headers: [header_count:u32]([key_len:u32][key][val_len:u32][val])*
     if (offset + 4 > data.length) break;
+    const headerCount = view.getUint32(offset, true);
     offset += 4;
+
+    let headers: Record<string, string> | null = null;
+    if (headerCount > 0) {
+      headers = {};
+      const decoder = new TextDecoder();
+      for (let h = 0; h < headerCount; h++) {
+        if (offset + 4 > data.length) break;
+        const hKeyLen = view.getUint32(offset, true);
+        offset += 4;
+        if (offset + hKeyLen > data.length) break;
+        const hKey = decoder.decode(data.subarray(offset, offset + hKeyLen));
+        offset += hKeyLen;
+        if (offset + 4 > data.length) break;
+        const hValLen = view.getUint32(offset, true);
+        offset += 4;
+        if (offset + hValLen > data.length) break;
+        const hVal = decoder.decode(data.subarray(offset, offset + hValLen));
+        offset += hValLen;
+        headers[hKey] = hVal;
+      }
+    }
 
     records.push({
       id: new StreamID(BigInt(timestampMs < 0n ? 0n : timestampMs), sequence),
       tier,
+      stream: streamName,
       payload,
-      headers: null,
+      headers,
     });
   }
 
