@@ -23,6 +23,11 @@ export {
   type KVEntry,
   type ScanResult,
   type VersionEntry,
+  type PutResult,
+  type GetResult,
+  type MGetEntry,
+  type KVBeginResult,
+  type KVCommitResult,
   // Queue types (for Node.js backend use)
   type Message,
   type DequeueResult,
@@ -47,6 +52,11 @@ export {
   type DeleteOptions,
   type ScanOptions,
   type HistoryOptions,
+  type KVIncrOptions,
+  type KVTouchOptions,
+  type KVExistsOptions,
+  type KVJsonOptions,
+  type KVMGetOptions,
   // Queue Option types (for Node.js backend use)
   type EnqueueOptions,
   type DequeueOptions,
@@ -179,6 +189,12 @@ export {
 
 // Operations
 export { KVOperations, type RequestSender as KVRequestSender } from "./kv.js";
+export {
+  Transaction,
+  TxnFinishedError,
+  TxnUnsupportedOpError,
+  beginTxn,
+} from "./kv_txn.js";
 export { QueueOperations, type RequestSender as QueueRequestSender } from "./queue.js";
 export {
   StreamOperations,

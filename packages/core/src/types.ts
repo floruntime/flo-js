@@ -63,13 +63,23 @@ export const OpCode = {
   KVPutResponse: 0x108,
   KVScanResponse: 0x109,
   KVHistoryResponse: 0x10a,
+  // KV extended (atomic counters, JSON ops)
+  KVIncr: 0x10b,
+  KVJsonGet: 0x10c,
+  KVJsonSet: 0x10d,
+  KVJsonDel: 0x10e,
+  // KV per-shard transactions
   KVBeginTxn: 0x110,
   KVCommitTxn: 0x111,
   KVRollbackTxn: 0x112,
-  KVSnapshotCreate: 0x120,
-  KVSnapshotGet: 0x121,
-  KVSnapshotRelease: 0x122,
-  KVSnapshotCreateResponse: 0x123,
+  // KV extended (TTL lifecycle, exists)
+  KVTouch: 0x113,
+  KVPersist: 0x114,
+  KVExists: 0x115,
+  KVIncrResponse: 0x116,
+  KVJsonResponse: 0x117,
+  KVExistsResponse: 0x118,
+  KVTxnResponse: 0x119,
 
   // ── Streams (0x130 – 0x14F) ──
   StreamAppend: 0x130,
@@ -288,6 +298,7 @@ export const OptionTag = {
   KeysOnly: 0x06, // u8: Skip values in scan response (0/1)
   Cursor: 0x07, // bytes: Pagination cursor (ShardWalker format)
   RoutingKey: 0x08, // string: Explicit routing key for shard co-location
+  TxnID: 0x09, // u64: Transaction ID for per-shard transactions
 
   // Queue Options (0x10 - 0x1F)
   Priority: 0x10, // u8: Message priority (0-255, higher = more urgent)
@@ -379,6 +390,60 @@ export interface VersionEntry {
   version: bigint;
   timestamp: bigint;
   value: Uint8Array;
+}
+
+/**
+ * Result of a successful KV put.
+ *
+ * The `version` is the new version assigned by the server, suitable for CAS
+ * on the next write via {@link PutOptions.casVersion}.
+ */
+export interface PutResult {
+  version: bigint;
+}
+
+/**
+ * Result of a successful KV transaction begin.
+ *
+ * `txnId` is the server-assigned transaction handle. `pinnedHash` is the
+ * partition hash this transaction is bound to — every key written or read
+ * inside the transaction must hash to the same partition.
+ */
+export interface KVBeginResult {
+  txnId: bigint;
+  pinnedHash: bigint;
+}
+
+/**
+ * Result of a successful KV transaction commit.
+ *
+ * `commitIndex` is the Raft log index of the committed batch and `opCount`
+ * is the number of buffered operations applied atomically.
+ */
+export interface KVCommitResult {
+  commitIndex: bigint;
+  opCount: number;
+}
+
+/**
+ * Result of a KV get that found a key.
+ *
+ * `kv.get` returns `null` when the key is missing; check before dereferencing.
+ */
+export interface GetResult {
+  value: Uint8Array;
+  version: bigint;
+}
+
+/**
+ * One entry in a {@link KV.mget} response. `found` is false when the key
+ * did not exist; in that case `value` is empty and `version` is `0n`.
+ */
+export interface MGetEntry {
+  key: string;
+  value: Uint8Array;
+  version: bigint;
+  found: boolean;
 }
 
 /**
@@ -650,6 +715,43 @@ export interface ScanOptions {
 export interface HistoryOptions {
   namespace?: string;
   limit?: number;
+}
+
+/**
+ * Options for KV incr operations.
+ */
+export interface KVIncrOptions {
+  namespace?: string;
+  /** Defaults to +1 when omitted. Negative values decrement. */
+  delta?: bigint;
+}
+
+/**
+ * Options for KV touch / persist operations.
+ */
+export interface KVTouchOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for KV exists operations.
+ */
+export interface KVExistsOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for KV JSON.* operations.
+ */
+export interface KVJsonOptions {
+  namespace?: string;
+}
+
+/**
+ * Options for KV mget operations.
+ */
+export interface KVMGetOptions {
+  namespace?: string;
 }
 
 /**
