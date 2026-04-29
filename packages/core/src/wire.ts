@@ -64,12 +64,12 @@ function crc32(data: Uint8Array): number {
  * Compute CRC32 for header (excluding crc32 field) + payload.
  */
 export function computeCRC32(header: Uint8Array, payload: Uint8Array): number {
-  // CRC32 is computed over: header[0..16] + header[20..24] + payload
-  const totalLen = 16 + 4 + payload.length;
+  // CRC32 is computed over: header[0..16] + header[20..32] + payload
+  const totalLen = 16 + 12 + payload.length;
   const combined = new Uint8Array(totalLen);
   combined.set(header.subarray(0, 16), 0);
-  combined.set(header.subarray(20, 24), 16);
-  combined.set(payload, 20);
+  combined.set(header.subarray(20, 32), 16);
+  combined.set(payload, 28);
   return crc32(combined);
 }
 
@@ -204,10 +204,10 @@ export function serializeRequest(
   view.setUint32(4, payloadLen, true); // payload_length
   view.setBigUint64(8, requestId, true); // request_id
   // CRC32 at [16:20] - filled later
-  buf[20] = VERSION; // version
-  buf[21] = opCode; // op_code
-  buf[22] = 0; // flags
-  buf[23] = 0; // reserved
+  view.setUint16(20, opCode, true); // op_code (u16 LE)
+  buf[22] = VERSION; // version
+  buf[23] = 0; // flags
+  // bytes 24-31 are reserved (already zero)
 
   // Build payload
   let offset = HEADER_SIZE;
