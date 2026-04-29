@@ -1,0 +1,86 @@
+# Flo Processing: Transaction Router
+#
+# Classifies events from the txn.created stream by transaction type and
+# routes them to per-type workflow streams.
+#
+# The stablecoin exact-match rule is evaluated before the payout prefix
+# rule, so payout.stablecoin-transfer gets its own stream while all other
+# payouts (bank, bill, ACH) are grouped together.
+#
+# Events that don't match any rule are tagged "unroutable" and land in
+# the dead-letter queue for ops review.
+
+kind: Processing
+name: tx-router
+description: >
+  Classifies transactions by type and routes to per-type workflow streams.
+
+sources:
+  - name: transactions
+    stream:
+      name: txn.created
+      partitions: all
+
+operators:
+  - type: classify
+    name: route-by-type
+    rules:
+      - condition: "json:type=payout.stablecoin-transfer"
+        tag: stablecoin-payout
+      - condition: "json:type^=payout"
+        tag: bank-payout
+      - condition: "json:type^=funding"
+        tag: funding
+      - condition: "json:type^=internal"
+        tag: internal
+      - condition: "json:type=card.spend"
+        tag: card-spend
+      - condition: "json:type=card.order"
+        tag: card-order
+      - condition: "json:type^=reversal"
+        tag: reversal
+    default_tag: unroutable
+
+sinks:
+  - name: dead-letter
+    stream:
+      name: txn.dlq
+    match: [unroutable]
+
+  - name: bank-payouts
+    stream:
+      name: txn.payout.bank
+    match: [bank-payout]
+
+  - name: stablecoin-payouts
+    stream:
+      name: txn.payout.stablecoin
+    match: [stablecoin-payout]
+
+  - name: funding
+    stream:
+      name: txn.funding
+    match: [funding]
+
+  - name: internal-transfers
+    stream:
+      name: txn.internal
+    match: [internal]
+
+  - name: card-spend
+    stream:
+      name: txn.card.spend
+    match: [card-spend]
+
+  - name: card-order
+    stream:
+      name: txn.card.order
+    match: [card-order]
+
+  - name: reversals
+    stream:
+      name: txn.reversal
+    match: [reversal]
+
+checkpointing:
+  interval_ms: 30000

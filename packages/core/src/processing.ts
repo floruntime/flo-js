@@ -123,11 +123,15 @@ export class ProcessingOperations {
   async list(opts?: ProcessingListOptions): Promise<ProcessingListEntry[]> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
-    // Value: [limit:u32]
+    // Value: [limit:u32][cursor...]
     const limit = opts?.limit ?? 100;
-    const value = new Uint8Array(4);
+    const cursor = opts?.cursor ?? new Uint8Array(0);
+    const value = new Uint8Array(4 + cursor.length);
     const view = new DataView(value.buffer);
     view.setUint32(0, limit, true);
+    if (cursor.length > 0) {
+      value.set(cursor, 4);
+    }
 
     const resp = await this.sender.sendRequest(
       OpCode.ProcessingList,
