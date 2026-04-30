@@ -697,6 +697,12 @@ export interface PutOptions {
  */
 export interface DeleteOptions {
   namespace?: string;
+  /**
+   * CAS guard — when set, the delete only succeeds if the current key
+   * version equals `ifMatch`. Throws on mismatch (CAS failed). Use this
+   * for race-free "only the owner deletes" patterns (locks, leases).
+   */
+  ifMatch?: bigint;
 }
 
 /**
@@ -731,6 +737,12 @@ export interface KVIncrOptions {
  */
 export interface KVTouchOptions {
   namespace?: string;
+  /**
+   * CAS guard — when set, the touch/persist only succeeds if the current
+   * key version equals `ifMatch`. Use this for race-free lease renewal
+   * ("only the owner extends the TTL").
+   */
+  ifMatch?: bigint;
 }
 
 /**

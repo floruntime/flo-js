@@ -233,21 +233,28 @@ export class KVOperations {
 
   /**
    * Delete removes a key.
-   * This operation succeeds even if the key doesn't exist.
+   * This operation succeeds even if the key doesn't exist (unless `ifMatch`
+   * is set, in which case a missing key is treated as a CAS mismatch).
    */
   async delete(key: string, opts?: DeleteOptions): Promise<void> {
     const namespace = this.sender.getNamespace(opts?.namespace);
+
+    const builder = new OptionsBuilder();
+    if (opts?.ifMatch !== undefined) {
+      builder.addU64(OptionTag.CASVersion, opts.ifMatch);
+    }
 
     const resp = await this.sender.sendRequest(
       OpCode.KVDelete,
       namespace,
       textEncoder.encode(key),
       new Uint8Array(0),
-      new Uint8Array(0)
+      builder.build()
     );
 
-    // Delete succeeds for both OK and NOT_FOUND
-    if (resp.status !== StatusCode.OK && resp.status !== StatusCode.NotFound) {
+    // Delete succeeds for both OK and NOT_FOUND when no CAS guard is set.
+    const allowNotFound = opts?.ifMatch === undefined;
+    if (resp.status !== StatusCode.OK && !(allowNotFound && resp.status === StatusCode.NotFound)) {
       throw createServerError(resp.status, resp.data);
     }
   }
@@ -356,6 +363,9 @@ export class KVOperations {
 
   /**
    * Update the TTL on an existing key. `ttlSeconds = 0` clears the TTL.
+   *
+   * When `opts.ifMatch` is set, the touch only succeeds if the current key
+   * version equals it — enabling race-free lease renewal.
    */
   async touch(
     key: string,
@@ -366,12 +376,16 @@ export class KVOperations {
     const ttl = typeof ttlSeconds === "bigint" ? ttlSeconds : BigInt(ttlSeconds);
     const value = new Uint8Array(8);
     new DataView(value.buffer).setBigUint64(0, ttl, true);
+    const builder = new OptionsBuilder();
+    if (opts?.ifMatch !== undefined) {
+      builder.addU64(OptionTag.CASVersion, opts.ifMatch);
+    }
     const resp = await this.sender.sendRequest(
       OpCode.KVTouch,
       namespace,
       textEncoder.encode(key),
       value,
-      new Uint8Array(0)
+      builder.build()
     );
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
@@ -380,15 +394,22 @@ export class KVOperations {
 
   /**
    * Clear the TTL on an existing key, making it permanent.
+   *
+   * When `opts.ifMatch` is set, the persist only succeeds if the current key
+   * version equals it.
    */
   async persist(key: string, opts?: KVTouchOptions): Promise<void> {
     const namespace = this.sender.getNamespace(opts?.namespace);
+    const builder = new OptionsBuilder();
+    if (opts?.ifMatch !== undefined) {
+      builder.addU64(OptionTag.CASVersion, opts.ifMatch);
+    }
     const resp = await this.sender.sendRequest(
       OpCode.KVPersist,
       namespace,
       textEncoder.encode(key),
       new Uint8Array(0),
-      new Uint8Array(0)
+      builder.build()
     );
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
