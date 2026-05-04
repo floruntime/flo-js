@@ -1,6 +1,6 @@
 {
   "name": "@floruntime/node",
-  "version": "0.1.0-dev.3",
+  "version": "0.1.0-dev.4",
   "description": "Flo SDK for Node.js - TCP transport for streams, KV, queues, and workers",
   "type": "module",
   "main": "./dist/index.cjs",
