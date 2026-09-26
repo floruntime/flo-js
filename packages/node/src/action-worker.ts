@@ -36,6 +36,7 @@ import {
   consoleLogger,
   silentLogger,
   type ProcessEntry,
+  workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
 import crypto from "crypto";
@@ -63,7 +64,10 @@ export interface ActionWorkerConfig {
   /** Timeout for action handlers in milliseconds (default: 300000 = 5 minutes) */
   actionTimeoutMs?: number;
 
-  /** Timeout for blocking dequeue in milliseconds (default: 30000) */
+  /**
+   * Long-poll wait per await in ms, at most 300000 (default: 30000).
+   * 0 also means 30000, since 0 (don't wait) would spin the poll loop.
+   */
   blockMs?: number;
 
   /** Machine ID for grouping workers on the same host (auto-detected if not provided) */
@@ -318,7 +322,7 @@ export class ActionWorker {
       workerId: config.workerId ?? this.generateWorkerId(),
       concurrency: config.concurrency ?? 10,
       actionTimeoutMs: config.actionTimeoutMs ?? 300000,
-      blockMs: config.blockMs ?? 30000,
+      blockMs: workerBlockMs(config.blockMs),
       machineId: config.machineId ?? (os.hostname() || ""),
       heartbeatIntervalMs: config.heartbeatIntervalMs ?? 30000,
     };

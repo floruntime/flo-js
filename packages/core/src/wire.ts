@@ -3,6 +3,8 @@
  */
 
 import {
+  BlockTooLongError,
+  FloError,
   IncompleteResponseError,
   InvalidMagicError,
   KeyTooLargeError,
@@ -15,6 +17,7 @@ import {
   HEADER_SIZE,
   type KVEntry,
   MAGIC,
+  MAX_BLOCK_MS,
   MAX_KEY_SIZE,
   MAX_NAMESPACE_SIZE,
   MAX_VALUE_SIZE,
@@ -74,6 +77,29 @@ export function computeCRC32(header: Uint8Array, payload: Uint8Array): number {
 }
 
 /**
+ * Refuse a blockMs the server would refuse (over 300000), or one the u32
+ * encoding would silently change (negative, fractional, NaN).
+ */
+export function checkBlockMs(blockMs: number): void {
+  if (!Number.isInteger(blockMs) || blockMs < 0) {
+    throw new FloError(`flo: blockMs must be a whole number of ms from 0 to ${MAX_BLOCK_MS}, got ${blockMs}`);
+  }
+  if (blockMs > MAX_BLOCK_MS) {
+    throw new BlockTooLongError(blockMs);
+  }
+}
+
+/**
+ * A worker's blockMs. A worker always long-polls, since 0 (don't wait) would
+ * spin its poll loop against the server, so unset or 0 means 30000.
+ */
+export function workerBlockMs(blockMs: number | undefined): number {
+  if (blockMs === undefined || blockMs === 0) return 30000;
+  checkBlockMs(blockMs);
+  return blockMs;
+}
+
+/**
  * Builder for TLV-encoded options.
  */
 export class OptionsBuilder {
@@ -91,6 +117,7 @@ export class OptionsBuilder {
    * Add a u32 option (little-endian).
    */
   addU32(tag: OptionTag, value: number): this {
+    if (tag === OptionTag.BlockMS || tag === OptionTag.WaitMS) checkBlockMs(value);
     this.buf.push(tag, 4);
     this.buf.push(value & 0xff);
     this.buf.push((value >>> 8) & 0xff);

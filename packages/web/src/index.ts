@@ -44,6 +44,8 @@ export {
   NotConnectedError,
   ConnectionError,
   TimeoutError,
+  BlockTooLongError,
+  MAX_BLOCK_MS,
   NotFoundError,
   UnauthorizedError,
   // Stream types

@@ -38,6 +38,7 @@ import {
   type ProcessEntry,
   type StreamID,
   type StreamRecord,
+  workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
 import crypto from "crypto";
@@ -71,7 +72,10 @@ export interface StreamWorkerConfig {
   /** Number of records to read per poll (default: 10) */
   batchSize?: number;
 
-  /** Block timeout for reads in milliseconds (default: 30000) */
+  /**
+   * Long-poll wait per read in ms, at most 300000 (default: 30000).
+   * 0 also means 30000, since 0 (don't wait) would spin the poll loop.
+   */
   blockMs?: number;
 
   /** Maximum duration for a message handler in milliseconds (default: 300000 = 5 minutes) */
@@ -222,7 +226,7 @@ export class StreamWorker {
       machineId: config.machineId ?? (os.hostname() || ""),
       concurrency: config.concurrency ?? 10,
       batchSize: config.batchSize ?? 10,
-      blockMs: config.blockMs ?? 30000,
+      blockMs: workerBlockMs(config.blockMs),
       messageTimeoutMs: config.messageTimeoutMs ?? 300000,
       heartbeatIntervalMs: config.heartbeatIntervalMs ?? 30000,
     };

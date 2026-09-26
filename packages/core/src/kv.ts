@@ -61,7 +61,7 @@ export class KVOperations {
    * @param key - The key to retrieve
    * @param opts - Options including optional blocking behavior
    * @param opts.blockMs - If set, block for up to this many milliseconds waiting for the key.
-   *                       Use 0 to block forever, or a positive number for a timeout.
+   *                       0 means don't wait; the longest wait is 300000 ms (5 minutes).
    */
   async get(key: string, opts?: GetOptions): Promise<GetResult | null> {
     const namespace = this.sender.getNamespace(opts?.namespace);
