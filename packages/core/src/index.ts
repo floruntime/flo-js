@@ -14,6 +14,7 @@ export {
   MAX_NAMESPACE_SIZE,
   MAX_KEY_SIZE,
   MAX_VALUE_SIZE,
+  MAX_BLOCK_MS,
   // Enums
   OpCode,
   StatusCode,
@@ -96,6 +97,7 @@ export {
   NamespaceTooLargeError,
   KeyTooLargeError,
   ValueTooLargeError,
+  BlockTooLongError,
   TimeoutError,
   ServerError,
   NotFoundError,

@@ -3,6 +3,7 @@
  */
 
 import {
+  BlockTooLongError,
   IncompleteResponseError,
   InvalidMagicError,
   KeyTooLargeError,
@@ -15,6 +16,7 @@ import {
   HEADER_SIZE,
   type KVEntry,
   MAGIC,
+  MAX_BLOCK_MS,
   MAX_KEY_SIZE,
   MAX_NAMESPACE_SIZE,
   MAX_VALUE_SIZE,
@@ -91,6 +93,9 @@ export class OptionsBuilder {
    * Add a u32 option (little-endian).
    */
   addU32(tag: OptionTag, value: number): this {
+    if (tag === OptionTag.BlockMS && value > MAX_BLOCK_MS) {
+      throw new BlockTooLongError(value);
+    }
     this.buf.push(tag, 4);
     this.buf.push(value & 0xff);
     this.buf.push((value >>> 8) & 0xff);

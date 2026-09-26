@@ -158,7 +158,7 @@ interface EnqueueOptions {
 interface DequeueOptions {
   namespace?: string;
   visibilityTimeoutMs?: number;  // Lease duration in ms
-  blockMs?: number;              // Wait for messages if queue empty
+  blockMs?: number;              // Wait for messages if queue empty (0 = don't wait, max 300000)
 }
 ```
 

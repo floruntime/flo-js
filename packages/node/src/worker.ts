@@ -26,7 +26,7 @@
  * ```
  */
 
-import { ActionType } from "@floruntime/core";
+import { ActionType, BlockTooLongError, MAX_BLOCK_MS } from "@floruntime/core";
 import { FloClient } from "./client.js";
 import crypto from "crypto";
 import os from "os";
@@ -53,7 +53,11 @@ export interface WorkerConfig {
   /** Timeout for action handlers in milliseconds (default: 300000 = 5 minutes) */
   actionTimeoutMs?: number;
 
-  /** Timeout for blocking dequeue in milliseconds (default: 30000) */
+  /**
+   * Long-poll wait per await in milliseconds, at most 300000 (default: 30000).
+   * 0 also means 30000: a worker always long-polls, since 0 (don't wait)
+   * would spin its poll loop against the server.
+   */
   blockMs?: number;
 
   /** Enable debug logging (default: false) */
@@ -221,6 +225,9 @@ export class Worker {
     if (!config.endpoint) {
       throw new Error("endpoint is required");
     }
+    if (config.blockMs !== undefined && config.blockMs > MAX_BLOCK_MS) {
+      throw new BlockTooLongError(config.blockMs);
+    }
 
     // Apply defaults
     this.config = {
@@ -229,7 +236,7 @@ export class Worker {
       workerId: config.workerId ?? this.generateWorkerId(),
       concurrency: config.concurrency ?? 10,
       actionTimeoutMs: config.actionTimeoutMs ?? 300000,
-      blockMs: config.blockMs ?? 30000,
+      blockMs: config.blockMs || 30000,
       debug: config.debug ?? false,
     };
   }
