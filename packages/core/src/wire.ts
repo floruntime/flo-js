@@ -100,6 +100,37 @@ export function workerBlockMs(blockMs: number | undefined): number {
 }
 
 /**
+ * How long the server may hold a serialized request before answering: its
+ * BlockMS or WaitMS option, or 0. Transports add this to their timeout so a
+ * long poll is not cut off client-side while the server is still waiting.
+ */
+export function requestBlockMs(request: Uint8Array): number {
+  const view = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  let off = HEADER_SIZE;
+  if (request.length < off + 2) return 0;
+  off += 2 + view.getUint16(off, true); // namespace
+  if (request.length < off + 2) return 0;
+  off += 2 + view.getUint16(off, true); // key
+  if (request.length < off + 4) return 0;
+  off += 4 + view.getUint32(off, true); // value
+  if (request.length < off + 2) return 0;
+  const end = Math.min(request.length, off + 2 + view.getUint16(off, true));
+  off += 2;
+  let blockMs = 0;
+  while (off + 2 <= end) {
+    const tag = request[off]!;
+    const len = request[off + 1]!;
+    off += 2;
+    if (off + len > end) break;
+    if ((tag === OptionTag.BlockMS || tag === OptionTag.WaitMS) && len === 4) {
+      blockMs = Math.max(blockMs, view.getUint32(off, true));
+    }
+    off += len;
+  }
+  return blockMs;
+}
+
+/**
  * Builder for TLV-encoded options.
  */
 export class OptionsBuilder {
