@@ -39,6 +39,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
+import { EmptyPollBackoff } from "./poll-backoff.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -446,6 +447,7 @@ export class ActionWorker {
   }
 
   private async pollLoop(actionNames: string[]): Promise<void> {
+    const backoff = new EmptyPollBackoff();
     while (this.running && !this.stopRequested) {
       try {
         // Check concurrency limit
@@ -461,14 +463,16 @@ export class ActionWorker {
         }
 
         // Await task from server
+        const started = Date.now();
         const result = await this.client!.worker.awaitTask(
           this.config.workerId,
           actionNames,
           { blockMs: this.config.blockMs }
         );
 
+        const wait = backoff.next(result.task === null, Date.now() - started, this.config.blockMs);
         if (result.task === null) {
-          // No task available, continue polling
+          if (wait > 0) await this.sleep(wait);
           continue;
         }
 

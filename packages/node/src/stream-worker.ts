@@ -41,6 +41,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
+import { EmptyPollBackoff } from "./poll-backoff.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -349,6 +350,7 @@ export class StreamWorker {
   }
 
   private async pollLoop(): Promise<void> {
+    const backoff = new EmptyPollBackoff();
     while (this.running && !this.stopRequested) {
       try {
         // Check concurrency limit
@@ -360,6 +362,7 @@ export class StreamWorker {
         if (this.stopRequested) break;
 
         // Read batch from consumer group
+        const started = Date.now();
         const result = await this.client!.stream.groupRead(this.config.stream, {
           group: this.config.group,
           consumer: this.config.consumer,
@@ -367,7 +370,10 @@ export class StreamWorker {
           blockMs: this.config.blockMs,
         });
 
-        if (!result || result.records.length === 0) {
+        const empty = !result || result.records.length === 0;
+        const wait = backoff.next(empty, Date.now() - started, this.config.blockMs);
+        if (empty) {
+          if (wait > 0) await this.sleep(wait);
           continue;
         }
 
