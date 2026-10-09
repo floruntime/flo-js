@@ -13,11 +13,14 @@ import {
   TimeoutError,
   BadRequestError,
   FloError,
+  InvalidChecksumError,
+  InvalidMagicError,
   UnexpectedEOFError,
   VERSION,
   computeCRC32,
   parseResponseHeader,
   requestBlockMs,
+  requestTakesItems,
   serializeRequest,
 } from "@floruntime/core";
 import { TcpTransport } from "@floruntime/node";
@@ -42,6 +45,20 @@ function response(id: bigint, data: Uint8Array = new Uint8Array(0), status = 0):
   buf.set(data, HEADER_SIZE);
   view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
   return buf;
+}
+
+function awaitRequest(id: bigint, blockMs?: number): Uint8Array {
+  const opts = new OptionsBuilder();
+  if (blockMs !== undefined) opts.addU32(OptionTag.BlockMS, blockMs);
+  return serializeRequest(id, OpCode.ActionAwait, enc.encode("ns"), enc.encode("w"), new Uint8Array(0), opts.build());
+}
+
+function getRequest(id: bigint): Uint8Array {
+  return serializeRequest(id, OpCode.Get, enc.encode("ns"), enc.encode("k"), new Uint8Array(0), new Uint8Array(0));
+}
+
+function spyLogger() {
+  return { debug: vi.fn(), warn: vi.fn(), error: vi.fn() };
 }
 
 const idOf = (resp: Uint8Array) => parseResponseHeader(resp.subarray(0, HEADER_SIZE))[2];
@@ -113,6 +130,31 @@ describe("requestBlockMs", () => {
       new OptionsBuilder().addU32(OptionTag.WaitMS, 1234).build());
     expect(requestBlockMs(watch)).toBe(1234);
   });
+
+  it("takes the larger of BlockMS and WaitMS, in either order", () => {
+    const both = (first: number, second: number) =>
+      serializeRequest(1n, OpCode.Get, enc.encode("ns"), enc.encode("k"), new Uint8Array(0),
+        new OptionsBuilder().addU32(first, 2000).addU32(second, 1000).build());
+    expect(requestBlockMs(both(OptionTag.BlockMS, OptionTag.WaitMS))).toBe(2000);
+    expect(requestBlockMs(both(OptionTag.WaitMS, OptionTag.BlockMS))).toBe(2000);
+  });
+
+  it("counts an await with no BlockMS as the server's 30000 default", () => {
+    expect(requestBlockMs(awaitRequest(1n))).toBe(30000);
+    expect(requestBlockMs(awaitRequest(1n, 0))).toBe(0);
+    expect(requestBlockMs(awaitRequest(1n, 500))).toBe(500);
+  });
+});
+
+describe("requestTakesItems", () => {
+  it("is true for requests whose reply carries what they took", () => {
+    const op = (code: number) => serializeRequest(1n, code as OpCode, enc.encode("ns"), enc.encode("k"), new Uint8Array(0), new Uint8Array(0));
+    for (const code of [OpCode.QueueDequeue, OpCode.StreamGroupRead, OpCode.StreamGroupClaim, OpCode.ActionAwait]) {
+      expect(requestTakesItems(op(code))).toBe(true);
+    }
+    expect(requestTakesItems(op(OpCode.Get))).toBe(false);
+    expect(requestTakesItems(op(OpCode.QueueEnqueue))).toBe(false);
+  });
 });
 
 describe("TcpTransport", () => {
@@ -152,6 +194,21 @@ describe("TcpTransport", () => {
     // Reply 1 arrives while request 2 is waiting.
     const resp = await transport.sendAndReceive(request(2n));
     expect(idOf(resp)).toBe(2n);
+  });
+
+  it("warns when it drops a late reply that took items, and only then", async () => {
+    const srv = await fakeServer(() => 80);
+    close = srv.close;
+    const logger = spyLogger();
+    transport = new TcpTransport(srv.endpoint, { timeoutMs: 30, logger });
+    await transport.connect();
+    await expect(transport.sendAndReceive(getRequest(1n))).rejects.toThrow(TimeoutError);
+    await sleep(100);
+    expect(logger.warn).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalledWith(expect.stringContaining("Dropping reply to request 1"));
+    await expect(transport.sendAndReceive(request(2n))).rejects.toThrow(TimeoutError);
+    await sleep(100);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Dropping reply to request 2"));
   });
 
   it("gives each of several requests in flight its own reply", async () => {
@@ -238,6 +295,32 @@ describe("TcpTransport framing and failures", () => {
     }
   });
 
+  it("rejects a reply whose CRC does not match", async () => {
+    const t = await connect((sock, id) => {
+      const r = response(id, enc.encode("payload"));
+      r[HEADER_SIZE] ^= 0xff;
+      sock.write(r);
+    });
+    await expect(t.sendAndReceive(request(1n))).rejects.toThrow(InvalidChecksumError);
+  });
+
+  it("fails waiting requests and closes the socket on a bad header", async () => {
+    let serverSock: net.Socket | undefined;
+    const t = await connect((sock, id) => {
+      serverSock = sock;
+      const r = response(id);
+      r[0] ^= 0xff;
+      sock.write(r);
+    });
+    await expect(t.sendAndReceive(request(1n))).rejects.toThrow(InvalidMagicError);
+    expect(t.isConnected()).toBe(false);
+    // The client end is destroyed, so the server sees the connection close.
+    await new Promise<void>((resolve) => {
+      if (serverSock!.readableEnded) resolve();
+      else serverSock!.once("end", () => resolve());
+    });
+  });
+
   it("refuses a request id already in flight", async () => {
     const t = await connect((sock, id) => {
       setTimeout(() => sock.write(response(id)), 50);
@@ -297,5 +380,19 @@ describe("WebSocketTransport", () => {
     await expect(t.sendAndReceive(request(7n))).rejects.toThrow(TimeoutError);
     ws.reply(7n);
     expect(pushes).toEqual([]);
+  });
+
+  it("warns when it drops a late reply that took items, and only then", async () => {
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    const logger = spyLogger();
+    const t = new WebSocketTransport("ws://flo.test", { timeoutMs: 20, logger });
+    await t.connect();
+    const ws = FakeWebSocket.last;
+    await expect(t.sendAndReceive(getRequest(1n))).rejects.toThrow(TimeoutError);
+    ws.reply(1n);
+    expect(logger.warn).not.toHaveBeenCalled();
+    await expect(t.sendAndReceive(request(2n))).rejects.toThrow(TimeoutError);
+    ws.reply(2n);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Dropping reply to request 2"));
   });
 });

@@ -18,6 +18,7 @@ import {
   computeCRC32,
   parseResponseHeader,
   requestBlockMs,
+  requestTakesItems,
   type Logger,
   silentLogger,
 } from "@floruntime/core";
@@ -90,8 +91,9 @@ export class TcpTransport implements Transport {
     bigint,
     { resolve: (data: Uint8Array) => void; reject: (err: Error) => void }
   >();
-  // Received bytes not yet framed, kept as chunks so a large reply is
-  // joined once rather than on every chunk.
+  // Timed-out request ids, and whether each one's reply takes items.
+  private readonly abandoned = new Map<bigint, boolean>();
+  // Received bytes not yet framed; chunks are joined only when a frame needs them.
   private received: Buffer[] = [];
   private receivedLen = 0;
 
@@ -172,10 +174,10 @@ export class TcpTransport implements Transport {
     }
 
     return new Promise<Uint8Array>((resolve, reject) => {
-      // Once timed out the id is forgotten, so a late reply is dropped
-      // rather than taken as the answer to a later request.
+      // Forget the id on timeout so a late reply is dropped.
       const timeoutId = setTimeout(() => {
         this.pending.delete(requestId);
+        this.abandoned.set(requestId, requestTakesItems(data));
         reject(new TimeoutError(deadlineMs));
       }, deadlineMs);
 
@@ -235,7 +237,14 @@ export class TcpTransport implements Transport {
           this.failAndDestroy(createServerError(status, payload));
           return;
         }
-        this.logger.debug(`Dropping reply to request ${requestId}: no longer waited for`);
+        if (this.abandoned.get(requestId)) {
+          this.logger.warn(
+            `Dropping reply to request ${requestId}: no longer waited for; what it took stays leased until its lease or visibility timeout`
+          );
+        } else {
+          this.logger.debug(`Dropping reply to request ${requestId}: no longer waited for`);
+        }
+        this.abandoned.delete(requestId);
         continue;
       }
       this.pending.delete(requestId);
@@ -266,6 +275,7 @@ export class TcpTransport implements Transport {
     this.socket = null;
     this.received = [];
     this.receivedLen = 0;
+    this.abandoned.clear();
     const pending = [...this.pending.values()];
     this.pending.clear();
     for (const p of pending) p.reject(err);

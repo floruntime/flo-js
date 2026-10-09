@@ -13,6 +13,7 @@ import {
   computeCRC32,
   parseResponseHeader,
   requestBlockMs,
+  requestTakesItems,
   type Logger,
   silentLogger,
 } from "@floruntime/core";
@@ -94,9 +95,9 @@ export class WebSocketTransport implements Transport {
     { resolve: (data: Uint8Array) => void; reject: (err: Error) => void }
   > = new Map();
 
-  // Requests that timed out: their late replies are dropped, not taken for
-  // server pushes.
-  private abandonedRequests: Set<bigint> = new Set();
+  // Requests that timed out, and whether each one's reply takes items: their
+  // late replies are dropped, not taken for server pushes.
+  private abandonedRequests: Map<bigint, boolean> = new Map();
 
   // Buffer for partial messages
   private receiveBuffer: Uint8Array = new Uint8Array(0);
@@ -350,8 +351,15 @@ export class WebSocketTransport implements Transport {
           result.set(message);
           pending.resolve(result);
         }
-      } else if (this.abandonedRequests.delete(requestId)) {
-        this.logger.debug(`Dropping reply to request ${requestId}: no longer waited for`);
+      } else if (this.abandonedRequests.has(requestId)) {
+        if (this.abandonedRequests.get(requestId)) {
+          this.logger.warn(
+            `Dropping reply to request ${requestId}: no longer waited for; what it took stays leased until its lease or visibility timeout`
+          );
+        } else {
+          this.logger.debug(`Dropping reply to request ${requestId}: no longer waited for`);
+        }
+        this.abandonedRequests.delete(requestId);
       } else if (this.pushMessageHandler) {
         // No pending request - this is a server-pushed message (subscription)
         // The request_id field contains the subscription_id
@@ -393,7 +401,7 @@ export class WebSocketTransport implements Transport {
     return new Promise<Uint8Array>((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         this.pendingRequests.delete(requestId);
-        this.abandonedRequests.add(requestId);
+        this.abandonedRequests.set(requestId, requestTakesItems(data));
         reject(new TimeoutError(deadlineMs));
       }, deadlineMs);
 
