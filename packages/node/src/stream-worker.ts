@@ -364,7 +364,7 @@ export class StreamWorker {
         if (this.stopRequested) break;
 
         // Read batch from consumer group
-        const started = Date.now();
+        const started = performance.now();
         const result = await this.client!.stream.groupRead(this.config.stream, {
           group: this.config.group,
           consumer: this.config.consumer,
@@ -373,7 +373,7 @@ export class StreamWorker {
         });
 
         const empty = !result || result.records.length === 0;
-        const wait = backoff.next(empty, Date.now() - started, this.config.blockMs);
+        const wait = backoff.next(empty, performance.now() - started, this.config.blockMs);
         if (empty) {
           if (wait > 0) await pause(wait, this.stopSignal.signal);
           continue;

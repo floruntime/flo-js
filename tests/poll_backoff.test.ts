@@ -8,6 +8,7 @@ import * as net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { HEADER_SIZE, MAGIC, OpCode, VERSION, computeCRC32 } from "@floruntime/core";
 import { ActionWorker, StreamWorker } from "@floruntime/node";
+import { EmptyPollBackoff } from "../packages/node/src/poll-backoff.js";
 
 function reply(id: bigint, data: Uint8Array = new Uint8Array(0)): Uint8Array {
   const buf = new Uint8Array(HEADER_SIZE + data.length);
@@ -99,6 +100,43 @@ const workers: [string, number, (endpoint: string) => Started][] = [
   }],
 ];
 
+describe("EmptyPollBackoff.next", () => {
+  const early = (b: EmptyPollBackoff, n: number, blockMs = 30000) =>
+    Array.from({ length: n }, () => b.next(true, 0, blockMs));
+
+  it("re-polls the first early empty at once, then pauses 50 ms doubling to a 1 s cap", () => {
+    expect(early(new EmptyPollBackoff(), 9)).toEqual([0, 50, 100, 200, 400, 800, 1000, 1000, 1000]);
+  });
+
+  it("resets on work", () => {
+    const b = new EmptyPollBackoff();
+    early(b, 4);
+    expect(b.next(false, 0, 30000)).toBe(0);
+    expect(early(b, 3)).toEqual([0, 50, 100]);
+  });
+
+  it("resets on an empty that was not early", () => {
+    const b = new EmptyPollBackoff();
+    early(b, 4);
+    expect(b.next(true, 300, 30000)).toBe(0);
+    expect(early(b, 3)).toEqual([0, 50, 100]);
+  });
+
+  it("counts an empty as early under min(250 ms, blockMs / 2)", () => {
+    const b = new EmptyPollBackoff();
+    early(b, 2);
+    expect(b.next(true, 249, 30000)).toBe(100);
+    expect(b.next(true, 250, 30000)).toBe(0);
+
+    // With blockMs 100 the threshold is 50 ms, not 250.
+    const small = new EmptyPollBackoff();
+    early(small, 2, 100);
+    expect(small.next(true, 49, 100)).toBe(100);
+    expect(small.next(true, 60, 100)).toBe(0);
+    expect(early(small, 2, 100)).toEqual([0, 50]);
+  });
+});
+
 describe.each(workers)("%s against a full waiter pool", (_name, pollOp, start) => {
   let close: (() => void) | undefined;
   afterEach(() => close?.());
@@ -125,6 +163,32 @@ describe.each(workers)("%s against a full waiter pool", (_name, pollOp, start) =
     w.stop();
     await w.done;
     expect(Date.now() - stopped).toBeLessThan(100);
+  });
+});
+
+describe("ActionWorker restart", () => {
+  let close: (() => void) | undefined;
+  afterEach(() => close?.());
+
+  it("backs off again after a stop and start", async () => {
+    const srv = await fakeServer(() => undefined);
+    close = srv.close;
+    const w = new ActionWorker({ endpoint: srv.endpoint, blockMs: 30000, heartbeatIntervalMs: 0 });
+    w.action("a", async () => new Uint8Array(0));
+    let done = w.start();
+    await sleep(100);
+    w.stop();
+    await done;
+
+    const before = srv.polls.filter((p) => p.op === OpCode.ActionAwait).length;
+    done = w.start();
+    await sleep(600);
+    w.stop();
+    await done;
+    // An already-aborted stop signal would cut every pause short and spin.
+    const polls = srv.polls.filter((p) => p.op === OpCode.ActionAwait).length - before;
+    expect(polls).toBeGreaterThan(1);
+    expect(polls).toBeLessThan(20);
   });
 });
 

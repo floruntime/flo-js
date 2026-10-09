@@ -6,9 +6,8 @@
  * consumers re-read. The wire can't tell these apart, so timing does: a
  * full pool answers within about a round trip, while append wakes come
  * whenever data arrives. An empty answer counts as early only under
- * min(250 ms, blockMs / 2). The first early empty in a row is re-polled at
- * once (a fast append wake); a run of them pauses 50 ms, doubling up to 1 s.
- * Work, or an empty that wasn't early, resets it.
+ * min(250 ms, blockMs / 2) (the first early empty is re-polled at once: it
+ * is usually an append wake).
  */
 export class EmptyPollBackoff {
   static readonly EARLY_MS = 250;

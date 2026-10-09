@@ -465,14 +465,14 @@ export class ActionWorker {
         }
 
         // Await task from server
-        const started = Date.now();
+        const started = performance.now();
         const result = await this.client!.worker.awaitTask(
           this.config.workerId,
           actionNames,
           { blockMs: this.config.blockMs }
         );
 
-        const wait = backoff.next(result.task === null, Date.now() - started, this.config.blockMs);
+        const wait = backoff.next(result.task === null, performance.now() - started, this.config.blockMs);
         if (result.task === null) {
           if (wait > 0) await pause(wait, this.stopSignal.signal);
           continue;
