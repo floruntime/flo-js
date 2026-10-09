@@ -11,6 +11,8 @@ export const HEADER_SIZE = 32;
 export const MAX_NAMESPACE_SIZE = 255;
 export const MAX_KEY_SIZE = 64 * 1024; // 64 KB
 export const MAX_VALUE_SIZE = 16 * 1024 * 1024; // 16 MB practical limit
+/** Longest blocking wait (blockMs) the server accepts: 5 minutes. */
+export const MAX_BLOCK_MS = 300_000;
 
 /**
  * Operation codes for Flo protocol requests.
@@ -308,8 +310,8 @@ export const OptionTag = {
   MaxRetries: 0x14, // u8: Maximum retry attempts before DLQ
   Count: 0x15, // u32: Number of messages to dequeue
   SendToDLQ: 0x16, // u8: Whether to send failed messages to DLQ (0/1)
-  BlockMS: 0x17, // u32: Blocking timeout for dequeue (0 = infinite, default = 0)
-  WaitMS: 0x18, // u32: Watch timeout - wait for NEXT version change (0=forever)
+  BlockMS: 0x17, // u32: Blocking timeout (0 = don't wait, max 300000)
+  WaitMS: 0x18, // u32: Watch timeout - wait for NEXT version change (0 = don't wait, max 300000)
 
   // Stream Options (0x20 - 0x2F) - StreamID-native ONLY
   // 0x20 reserved
@@ -587,9 +589,8 @@ export interface StreamReadOptions {
   partition?: number;
   /**
    * Block for up to this many milliseconds waiting for new records.
-   * - undefined/not set: no blocking (immediate return)
-   * - 0: block forever until records available
-   * - >0: block for at most N milliseconds
+   * - undefined/not set or 0: don't wait (immediate return)
+   * - up to 300000 (5 minutes); more throws BlockTooLongError
    */
   blockMs?: number;
 }
@@ -635,9 +636,8 @@ export interface StreamGroupOptions {
   limit?: number;
   /**
    * Block for up to this many milliseconds waiting for new records.
-   * - undefined/not set: no blocking (immediate return)
-   * - 0: block forever until records available
-   * - >0: block for at most N milliseconds
+   * - undefined/not set or 0: don't wait (immediate return)
+   * - up to 300000 (5 minutes); more throws BlockTooLongError
    */
   blockMs?: number;
 }
@@ -674,9 +674,8 @@ export interface GetOptions {
   /**
    * Block for up to this many milliseconds if the key doesn't exist.
    * Useful for waiting on a key to be set by another process.
-   * - undefined/not set: no blocking (immediate return)
-   * - 0: block forever until key exists
-   * - >0: block for at most N milliseconds
+   * - undefined/not set or 0: don't wait (immediate return)
+   * - up to 300000 (5 minutes); more throws BlockTooLongError
    */
   blockMs?: number;
 }
@@ -782,6 +781,7 @@ export interface EnqueueOptions {
 export interface DequeueOptions {
   namespace?: string;
   visibilityTimeoutMs?: number;
+  /** Wait for messages if the queue is empty, in ms. 0 = don't wait, max 300000. */
   blockMs?: number;
 }
 
@@ -1133,7 +1133,7 @@ export interface WorkerRegisterOptions {
  */
 export interface WorkerAwaitOptions {
   namespace?: string;
-  /** Block waiting for task. 0 = infinite, >0 = timeout in ms */
+  /** Block waiting for task, in ms. Unset = 30000, 0 = don't wait, max 300000. */
   blockMs?: number;
   timeoutMs?: number;
 }

@@ -158,7 +158,7 @@ interface EnqueueOptions {
 interface DequeueOptions {
   namespace?: string;
   visibilityTimeoutMs?: number;  // Lease duration in ms
-  blockMs?: number;              // Wait for messages if queue empty
+  blockMs?: number;              // Wait for messages if queue empty (ms; 0 = don't wait, max 300000)
 }
 ```
 
@@ -336,6 +336,7 @@ try {
 | `NotConnectedError` | Client not connected |
 | `ConnectionError` | Connection failed |
 | `TimeoutError` | Operation timed out |
+| `BlockTooLongError` | `blockMs` over 300000, refused before sending |
 | `NotFoundError` | Resource not found |
 | `ConflictError` | CAS version mismatch |
 | `BadRequestError` | Invalid request |

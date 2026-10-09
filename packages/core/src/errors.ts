@@ -130,6 +130,19 @@ export class ValueTooLargeError extends FloError {
 }
 
 /**
+ * Error thrown when a blocking wait (blockMs) exceeds 300000 ms (5 minutes).
+ * The server would refuse it with bad_request, so the SDK refuses it first.
+ */
+export class BlockTooLongError extends FloError {
+  constructor(blockMs: number) {
+    super(
+      `flo: a blocking wait (blockMs) is at most 300000 ms (5 minutes), got ${blockMs}`
+    );
+    this.name = "BlockTooLongError";
+  }
+}
+
+/**
  * Error thrown when the operation times out.
  */
 export class TimeoutError extends FloError {
