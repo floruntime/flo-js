@@ -179,6 +179,8 @@ export {
 export {
   OptionsBuilder,
   workerBlockMs,
+  requestBlockMs,
+  requestTakesItems,
   computeCRC32,
   serializeRequest,
   parseResponseHeader,
