@@ -33,7 +33,7 @@ describe("Wire Protocol", () => {
     });
 
     it("should have correct header size", () => {
-      expect(HEADER_SIZE).toBe(24);
+      expect(HEADER_SIZE).toBe(32);
     });
   });
 
@@ -86,7 +86,7 @@ describe("Wire Protocol", () => {
 
   describe("CRC32", () => {
     it("should compute CRC32 correctly", () => {
-      const header = new Uint8Array(24);
+      const header = new Uint8Array(HEADER_SIZE);
       const payload = new Uint8Array([1, 2, 3, 4]);
 
       const crc = computeCRC32(header, payload);
@@ -96,7 +96,7 @@ describe("Wire Protocol", () => {
     });
 
     it("should produce different CRC for different data", () => {
-      const header = new Uint8Array(24);
+      const header = new Uint8Array(HEADER_SIZE);
       const payload1 = new Uint8Array([1, 2, 3, 4]);
       const payload2 = new Uint8Array([5, 6, 7, 8]);
 
@@ -123,11 +123,14 @@ describe("Wire Protocol", () => {
       const view = new DataView(request.buffer);
       expect(view.getUint32(0, true)).toBe(MAGIC);
 
-      // Check version
-      expect(request[20]).toBe(VERSION);
+      // Check opcode (u16 at 20-21)
+      expect(view.getUint16(20, true)).toBe(OpCode.KVGet);
 
-      // Check opcode
-      expect(request[21]).toBe(OpCode.KVGet);
+      // Check version
+      expect(request[22]).toBe(VERSION);
+
+      // Reserved bytes 24-31 are zero
+      expect(Array.from(request.subarray(24, HEADER_SIZE))).toEqual(new Array(8).fill(0));
     });
 
     it("should include namespace in payload", () => {
@@ -153,7 +156,7 @@ describe("Wire Protocol", () => {
 
   describe("parseResponseHeader", () => {
     it("should parse valid header", () => {
-      const header = new Uint8Array(24);
+      const header = new Uint8Array(HEADER_SIZE);
       const view = new DataView(header.buffer);
 
       view.setUint32(0, MAGIC, true);
@@ -172,7 +175,7 @@ describe("Wire Protocol", () => {
     });
 
     it("should throw on invalid magic", () => {
-      const header = new Uint8Array(24);
+      const header = new Uint8Array(HEADER_SIZE);
       const view = new DataView(header.buffer);
       view.setUint32(0, 0xdeadbeef, true); // wrong magic
 
@@ -180,7 +183,7 @@ describe("Wire Protocol", () => {
     });
 
     it("should throw on unsupported version", () => {
-      const header = new Uint8Array(24);
+      const header = new Uint8Array(HEADER_SIZE);
       const view = new DataView(header.buffer);
       view.setUint32(0, MAGIC, true);
       header[20] = 0xff; // wrong version
