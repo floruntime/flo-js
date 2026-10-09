@@ -39,7 +39,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff } from "./poll-backoff.js";
+import { EmptyPollBackoff, pause } from "./poll-backoff.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -306,6 +306,7 @@ export class ActionWorker {
   private readonly handlers: Map<string, ActionHandler> = new Map();
   private running = false;
   private stopRequested = false;
+  private stopSignal = new AbortController();
   private activeTaskCount = 0;
   private readonly pendingTasks: Set<Promise<void>> = new Set();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -414,6 +415,7 @@ export class ActionWorker {
       // Initialize state
       this.running = true;
       this.stopRequested = false;
+      this.stopSignal = new AbortController();
 
       // Start heartbeat interval
       this.startHeartbeat();
@@ -472,7 +474,7 @@ export class ActionWorker {
 
         const wait = backoff.next(result.task === null, Date.now() - started, this.config.blockMs);
         if (result.task === null) {
-          if (wait > 0) await this.sleep(wait);
+          if (wait > 0) await pause(wait, this.stopSignal.signal);
           continue;
         }
 
@@ -612,6 +614,7 @@ export class ActionWorker {
     this.log("Stopping worker...");
     this.running = false;
     this.stopRequested = true;
+    this.stopSignal.abort();
   }
 
   /**

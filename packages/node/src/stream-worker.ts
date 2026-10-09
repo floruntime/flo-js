@@ -41,7 +41,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff } from "./poll-backoff.js";
+import { EmptyPollBackoff, pause } from "./poll-backoff.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -193,6 +193,7 @@ export class StreamWorker {
   private readonly handler: StreamRecordHandler;
   private running = false;
   private stopRequested = false;
+  private stopSignal = new AbortController();
   private activeCount = 0;
   private readonly pendingTasks: Set<Promise<void>> = new Set();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -304,6 +305,7 @@ export class StreamWorker {
       // Initialize state
       this.running = true;
       this.stopRequested = false;
+      this.stopSignal = new AbortController();
 
       // Start heartbeat
       this.startHeartbeat();
@@ -373,7 +375,7 @@ export class StreamWorker {
         const empty = !result || result.records.length === 0;
         const wait = backoff.next(empty, Date.now() - started, this.config.blockMs);
         if (empty) {
-          if (wait > 0) await this.sleep(wait);
+          if (wait > 0) await pause(wait, this.stopSignal.signal);
           continue;
         }
 
@@ -443,6 +445,7 @@ export class StreamWorker {
     this.log("Stopping stream worker...");
     this.running = false;
     this.stopRequested = true;
+    this.stopSignal.abort();
   }
 
   /**
