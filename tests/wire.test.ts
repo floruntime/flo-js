@@ -197,14 +197,10 @@ describe("Wire Protocol", () => {
   });
 
   describe("parseScanResponse", () => {
+    // Wire format: [count:u32] ([key_len:u16][key][value_len:u32][value])*
+    //              [has_more:u8][cursor_len:u16][cursor]
     it("should parse empty scan response", () => {
-      // Wire format: [has_more:u8] [cursor_len:u32] [cursor:bytes]? [count:u32] [entries...]
-      const data = new Uint8Array(9);
-      const view = new DataView(data.buffer);
-
-      data[0] = 0; // hasMore = false
-      view.setUint32(1, 0, true); // cursorLen = 0
-      view.setUint32(5, 0, true); // count = 0
+      const data = new Uint8Array(7); // count=0, has_more=0, cursor_len=0
 
       const result = parseScanResponse(data);
 
@@ -213,22 +209,18 @@ describe("Wire Protocol", () => {
       expect(result.entries).toEqual([]);
     });
 
-    it("should parse scan response with entries", () => {
-      // Wire format: [has_more:u8] [cursor_len:u32] [cursor:bytes]? [count:u32] ([key_len:u16][key][value_len:u32][value])*
-      // Build response: hasMore=true, cursor="cur", count=1, entry: key="k", value="v"
-      const data = new Uint8Array(22);
+    it("should parse scan response with entries and a cursor", () => {
+      const data = new Uint8Array(4 + (2 + 1 + 4 + 1) + 1 + 2 + 3);
       const view = new DataView(data.buffer);
 
-      data[0] = 1; // hasMore = true
-      view.setUint32(1, 3, true); // cursorLen = 3
-      data[5] = 99; // 'c'
-      data[6] = 117; // 'u'
-      data[7] = 114; // 'r'
-      view.setUint32(8, 1, true); // count = 1
-      view.setUint16(12, 1, true); // keyLen = 1
-      data[14] = 107; // 'k'
-      view.setUint32(15, 1, true); // valueLen = 1
-      data[19] = 118; // 'v'
+      view.setUint32(0, 1, true); // count = 1
+      view.setUint16(4, 1, true); // keyLen = 1
+      data[6] = 107; // 'k'
+      view.setUint32(7, 1, true); // valueLen = 1
+      data[11] = 118; // 'v'
+      data[12] = 1; // hasMore = true
+      view.setUint16(13, 3, true); // cursorLen = 3
+      data.set([99, 117, 114], 15); // "cur"
 
       const result = parseScanResponse(data);
 

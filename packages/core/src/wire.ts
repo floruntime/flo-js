@@ -368,75 +368,44 @@ export function parseRawResponse(
 
 /**
  * Parse scan response data.
+ * Format: [count:u32] ([key_len:u16][key][value_len:u32][value])*
+ *         [has_more:u8][cursor_len:u16][cursor]
  */
 export function parseScanResponse(data: Uint8Array): ScanResult {
-  if (data.length < 9) {
+  if (data.length < 4) {
     throw new IncompleteResponseError("scan response too short");
   }
 
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   let offset = 0;
 
-  // has_more
-  const hasMore = data[offset]! !== 0;
-  offset++;
-
-  // cursor
-  const cursorLen = view.getUint32(offset, true);
-  offset += 4;
-
-  if (data.length < offset + cursorLen) {
-    throw new IncompleteResponseError("scan response truncated at cursor");
-  }
-
-  let cursor: Uint8Array | null = null;
-  if (cursorLen > 0) {
-    cursor = data.slice(offset, offset + cursorLen);
-  }
-  offset += cursorLen;
-
-  // count
-  if (data.length < offset + 4) {
-    throw new IncompleteResponseError("scan response truncated at count");
-  }
-
   const count = view.getUint32(offset, true);
   offset += 4;
 
-  // entries
   const entries: KVEntry[] = [];
   for (let i = 0; i < count; i++) {
-    // key
     if (data.length < offset + 2) {
       throw new IncompleteResponseError("scan response truncated at key length");
     }
-
     const keyLen = view.getUint16(offset, true);
     offset += 2;
 
     if (data.length < offset + keyLen) {
       throw new IncompleteResponseError("scan response truncated at key data");
     }
-
     const key = data.slice(offset, offset + keyLen);
     offset += keyLen;
 
-    // value
     if (data.length < offset + 4) {
-      throw new IncompleteResponseError(
-        "scan response truncated at value length"
-      );
+      throw new IncompleteResponseError("scan response truncated at value length");
     }
-
     const valueLen = view.getUint32(offset, true);
     offset += 4;
 
     let value: Uint8Array | null = null;
     if (valueLen > 0) {
       if (data.length < offset + valueLen) {
-        throw new IncompleteResponseError(
-          "scan response truncated at value data"
-        );
+        throw new IncompleteResponseError("scan response truncated at value data");
       }
       value = data.slice(offset, offset + valueLen);
       offset += valueLen;
@@ -444,6 +413,18 @@ export function parseScanResponse(data: Uint8Array): ScanResult {
 
     entries.push({ key, value });
   }
+
+  if (data.length < offset + 3) {
+    throw new IncompleteResponseError("scan response truncated at cursor");
+  }
+  const hasMore = data[offset]! !== 0;
+  offset += 1;
+  const cursorLen = view.getUint16(offset, true);
+  offset += 2;
+  if (data.length < offset + cursorLen) {
+    throw new IncompleteResponseError("scan response truncated at cursor");
+  }
+  const cursor = cursorLen > 0 ? data.slice(offset, offset + cursorLen) : null;
 
   return { entries, cursor, hasMore };
 }
@@ -666,13 +647,17 @@ export function serializeActionInvokeValue(
 }
 
 /**
- * Serialize action list value.
- * Format: [limit:u32]
+ * Serialize the value every list/scan op reads: [limit:u32][cursor...].
+ * A limit of 0 asks for the server default; the cursor is the opaque bytes
+ * the previous page returned (empty for the first page).
  */
-export function serializeActionListValue(limit: number = 100): Uint8Array {
-  const buf = new Uint8Array(4);
-  const view = new DataView(buf.buffer);
-  view.setUint32(0, limit, true);
+export function serializeListValue(limit: number = 0, cursor?: Uint8Array | null): Uint8Array {
+  const cursorLen = cursor?.length ?? 0;
+  const buf = new Uint8Array(4 + cursorLen);
+  new DataView(buf.buffer).setUint32(0, limit, true);
+  if (cursor && cursorLen > 0) {
+    buf.set(cursor, 4);
+  }
   return buf;
 }
 
@@ -915,17 +900,6 @@ export function serializeWorkerFailValue(
   // error_message
   buf.set(errorBytes, offset);
 
-  return buf;
-}
-
-/**
- * Serialize worker list value.
- * Format: [limit:u32]
- */
-export function serializeWorkerListValue(limit: number = 100): Uint8Array {
-  const buf = new Uint8Array(4);
-  const view = new DataView(buf.buffer);
-  view.setUint32(0, limit, true);
   return buf;
 }
 

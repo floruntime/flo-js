@@ -4,7 +4,7 @@ WebSocket client for Flo in browser environments.
 
 ## Features
 
-- **Real-time Streams**: Subscribe to and publish events with pub/sub patterns
+- **Streams**: Append, read and consume via consumer groups
 - **KV Store (Read-Only)**: Access configuration, feature flags, user preferences
 - **Authentication**: JWT-based auth with scopes for fine-grained access control
 - **Auto-reconnect**: Handles disconnections with token refresh callbacks
@@ -29,10 +29,8 @@ const client = new FloClient("wss://flo.example.com/ws", {
 
 await client.connect();
 
-// Subscribe to real-time events
-await client.streams.subscribe("chat:room-123", (record) => {
-  console.log("New message:", new TextDecoder().decode(record.payload));
-});
+// Wait for new records
+const { records } = await client.streams.read("chat:room-123", { blockMs: 30000 });
 
 // Publish an event
 await client.streams.append("chat:room-123", encoder.encode("Hello!"));
@@ -128,13 +126,6 @@ new FloClient(url: string, options?: WebClientOptions)
 ### Stream Operations
 
 ```typescript
-// Subscribe to a stream (real-time push)
-const sub = await client.streams.subscribe(streamName, callback, options);
-// Options: { offset: 0n } from beginning, { from: timestamp } from time, omit for tail
-
-// Unsubscribe
-await sub.unsubscribe();
-
 // Publish to a stream
 const result = await client.streams.append(streamName, payload, options);
 

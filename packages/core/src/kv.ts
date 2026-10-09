@@ -29,6 +29,7 @@ import {
   OptionsBuilder,
   parseHistoryResponse,
   parseScanResponse,
+  serializeListValue,
 } from "./wire.js";
 
 /**
@@ -271,15 +272,7 @@ export class KVOperations {
       builder.addU8(OptionTag.KeysOnly, 1);
     }
 
-    // Value: [limit:u32][cursor...]
-    const limit = opts?.limit ?? 0; // 0 = server default
-    const cursor = opts?.cursor ?? new Uint8Array(0);
-    const value = new Uint8Array(4 + cursor.length);
-    const view = new DataView(value.buffer);
-    view.setUint32(0, limit, true);
-    if (cursor.length > 0) {
-      value.set(cursor, 4);
-    }
+    const value = serializeListValue(opts?.limit, opts?.cursor);
 
     const resp = await this.sender.sendRequest(
       OpCode.KVScan,

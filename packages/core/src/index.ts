@@ -41,9 +41,6 @@ export {
   type StreamInfoResult,
   type StreamAppendOptions,
   type StreamReadOptions,
-  type StreamSubscribeOptions,
-  type StreamEventCallback,
-  type StreamSubscription,
   type StreamGroupOptions,
   type StreamAckOptions,
   type StreamNackOptions,
@@ -66,7 +63,6 @@ export {
   type DLQListOptions,
   type DLQRequeueOptions,
   type PeekOptions,
-  type TouchOptions,
   // Action types
   ActionType,
   type ActionInfo,
@@ -230,12 +226,11 @@ export {
 export {
   serializeActionRegisterValue,
   serializeActionInvokeValue,
-  serializeActionListValue,
+  serializeListValue,
   serializeWorkerRegisterValue,
   serializeWorkerAwaitValue,
   serializeWorkerTouchValue,
   serializeWorkerCompleteValue,
   serializeWorkerFailValue,
-  serializeWorkerListValue,
   parseTaskAssignment,
 } from "./wire.js";

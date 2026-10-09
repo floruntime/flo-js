@@ -147,8 +147,6 @@ interface ScanOptions {
 interface EnqueueOptions {
   namespace?: string;
   priority?: number;       // Higher = processed first (0-255)
-  delayMs?: bigint;        // Delay before message becomes available
-  dedupKey?: string;       // Deduplication key
 }
 ```
 
@@ -157,8 +155,7 @@ interface EnqueueOptions {
 ```typescript
 interface DequeueOptions {
   namespace?: string;
-  visibilityTimeoutMs?: number;  // Lease duration in ms
-  blockMs?: number;              // Wait for messages if queue empty (ms; 0 = don't wait, max 300000)
+  blockMs?: number;  // Wait for messages if queue empty (ms; 0 = don't wait, max 300000)
 }
 ```
 
