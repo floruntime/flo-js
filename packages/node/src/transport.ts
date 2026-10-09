@@ -5,6 +5,9 @@
 import * as net from "node:net";
 import {
   ConnectionError,
+  FloError,
+  StatusCode,
+  createServerError,
   HEADER_SIZE,
   InvalidChecksumError,
   InvalidEndpointError,
@@ -87,7 +90,10 @@ export class TcpTransport implements Transport {
     bigint,
     { resolve: (data: Uint8Array) => void; reject: (err: Error) => void }
   >();
-  private receiveBuffer: Buffer = Buffer.alloc(0);
+  // Received bytes not yet framed, kept as chunks so a large reply is
+  // joined once rather than on every chunk.
+  private received: Buffer[] = [];
+  private receivedLen = 0;
 
   constructor(endpoint: string, options?: TcpTransportOptions) {
     const { host, port } = parseEndpoint(endpoint);
@@ -118,7 +124,8 @@ export class TcpTransport implements Transport {
         connected = true;
         clearTimeout(timeoutId);
         this.socket = socket;
-        this.receiveBuffer = Buffer.alloc(0);
+        this.received = [];
+        this.receivedLen = 0;
         socket.on("data", (chunk: Buffer) => this.onData(chunk));
         socket.on("error", (err) => this.failAll(socket, new UnexpectedEOFError(err.message)));
         socket.on("close", () => this.failAll(socket, new UnexpectedEOFError("connection closed")));
@@ -160,6 +167,9 @@ export class TcpTransport implements Transport {
     const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
     const requestId = view.getBigUint64(8, true);
     const deadlineMs = this.timeoutMs + requestBlockMs(data);
+    if (this.pending.has(requestId)) {
+      throw new FloError(`flo: request id ${requestId} is already in flight`);
+    }
 
     return new Promise<Uint8Array>((resolve, reject) => {
       // Once timed out the id is forgotten, so a late reply is dropped
@@ -185,43 +195,52 @@ export class TcpTransport implements Transport {
   }
 
   private onData(chunk: Buffer): void {
-    this.receiveBuffer =
-      this.receiveBuffer.length === 0 ? chunk : Buffer.concat([this.receiveBuffer, chunk]);
+    this.received.push(chunk);
+    this.receivedLen += chunk.length;
 
-    while (this.receiveBuffer.length >= HEADER_SIZE) {
-      const buf = this.receiveBuffer;
-      const header = new Uint8Array(buf.buffer, buf.byteOffset, HEADER_SIZE);
+    while (this.receivedLen >= HEADER_SIZE) {
+      if (this.received[0]!.length < HEADER_SIZE) this.joinReceived();
+      const head = this.received[0]!;
+      const header = new Uint8Array(head.buffer, head.byteOffset, HEADER_SIZE);
 
+      let status: StatusCode;
       let dataLen: number;
       let requestId: bigint;
       let expectedCRC: number;
       try {
-        [, dataLen, requestId, expectedCRC] = parseResponseHeader(header);
+        [status, dataLen, requestId, expectedCRC] = parseResponseHeader(header);
       } catch (err) {
         // The stream can't be re-framed past a bad header.
-        const socket = this.socket;
-        if (socket) {
-          this.failAll(socket, err as Error);
-          socket.destroy();
-        }
+        this.failAndDestroy(err as Error);
         return;
       }
 
       const totalLen = HEADER_SIZE + dataLen;
-      if (buf.length < totalLen) return;
+      if (this.receivedLen < totalLen) return;
+      if (this.received[0]!.length < totalLen) this.joinReceived();
+      const buf = this.received[0]!;
 
       const result = new Uint8Array(totalLen);
       result.set(new Uint8Array(buf.buffer, buf.byteOffset, totalLen));
-      this.receiveBuffer = buf.subarray(totalLen);
+      if (buf.length > totalLen) this.received[0] = buf.subarray(totalLen);
+      else this.received.shift();
+      this.receivedLen -= totalLen;
 
+      const payload = result.subarray(HEADER_SIZE);
       const pending = this.pending.get(requestId);
       if (!pending) {
+        // A request the server could not parse is answered with id 0, and
+        // the server then closes; tell every caller why.
+        if (requestId === 0n && status !== StatusCode.OK) {
+          this.failAndDestroy(createServerError(status, payload));
+          return;
+        }
         this.logger.debug(`Dropping reply to request ${requestId}: no longer waited for`);
         continue;
       }
       this.pending.delete(requestId);
 
-      const computedCRC = computeCRC32(result.subarray(0, HEADER_SIZE), result.subarray(HEADER_SIZE));
+      const computedCRC = computeCRC32(result.subarray(0, HEADER_SIZE), payload);
       if (expectedCRC !== computedCRC) {
         pending.reject(new InvalidChecksumError(expectedCRC, computedCRC));
       } else {
@@ -230,10 +249,23 @@ export class TcpTransport implements Transport {
     }
   }
 
+  private joinReceived(): void {
+    this.received = [Buffer.concat(this.received, this.receivedLen)];
+  }
+
+  private failAndDestroy(err: Error): void {
+    const socket = this.socket;
+    if (socket) {
+      this.failAll(socket, err);
+      socket.destroy();
+    }
+  }
+
   private failAll(socket: net.Socket, err: Error): void {
     if (this.socket !== socket) return;
     this.socket = null;
-    this.receiveBuffer = Buffer.alloc(0);
+    this.received = [];
+    this.receivedLen = 0;
     const pending = [...this.pending.values()];
     this.pending.clear();
     for (const p of pending) p.reject(err);
