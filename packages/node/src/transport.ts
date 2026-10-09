@@ -5,6 +5,9 @@
 import * as net from "node:net";
 import {
   ConnectionError,
+  FloError,
+  StatusCode,
+  createServerError,
   HEADER_SIZE,
   InvalidChecksumError,
   InvalidEndpointError,
@@ -14,6 +17,8 @@ import {
   UnexpectedEOFError,
   computeCRC32,
   parseResponseHeader,
+  requestBlockMs,
+  requestTakesItems,
   type Logger,
   silentLogger,
 } from "@floruntime/core";
@@ -70,6 +75,10 @@ export function parseEndpoint(endpoint: string): { host: string; port: number } 
 
 /**
  * TCP transport implementation.
+ *
+ * Requests may be in flight together (a worker completes tasks while its
+ * long poll is parked), and the server can answer them out of order, so
+ * replies are routed to their request by request id.
  */
 export class TcpTransport implements Transport {
   private socket: net.Socket | null = null;
@@ -78,6 +87,15 @@ export class TcpTransport implements Transport {
   private readonly connectTimeoutMs: number;
   private readonly timeoutMs: number;
   private readonly logger: Logger;
+  private readonly pending = new Map<
+    bigint,
+    { resolve: (data: Uint8Array) => void; reject: (err: Error) => void }
+  >();
+  // Timed-out request ids, and whether each one's reply takes items.
+  private readonly abandoned = new Map<bigint, boolean>();
+  // Received bytes not yet framed; chunks are joined only when a frame needs them.
+  private received: Buffer[] = [];
+  private receivedLen = 0;
 
   constructor(endpoint: string, options?: TcpTransportOptions) {
     const { host, port } = parseEndpoint(endpoint);
@@ -108,6 +126,11 @@ export class TcpTransport implements Transport {
         connected = true;
         clearTimeout(timeoutId);
         this.socket = socket;
+        this.received = [];
+        this.receivedLen = 0;
+        socket.on("data", (chunk: Buffer) => this.onData(chunk));
+        socket.on("error", (err) => this.failAll(socket, new UnexpectedEOFError(err.message)));
+        socket.on("close", () => this.failAll(socket, new UnexpectedEOFError("connection closed")));
         this.logger.debug(`Connected to ${this.host}:${this.port}`);
         resolve();
       });
@@ -127,8 +150,9 @@ export class TcpTransport implements Transport {
 
   async close(): Promise<void> {
     if (this.socket) {
-      this.socket.destroy();
-      this.socket = null;
+      const socket = this.socket;
+      this.failAll(socket, new UnexpectedEOFError("connection closed"));
+      socket.destroy();
       this.logger.debug("Disconnected");
     }
   }
@@ -142,107 +166,118 @@ export class TcpTransport implements Transport {
       throw new NotConnectedError();
     }
 
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const requestId = view.getBigUint64(8, true);
+    const deadlineMs = this.timeoutMs + requestBlockMs(data);
+    if (this.pending.has(requestId)) {
+      throw new FloError(`flo: request id ${requestId} is already in flight`);
+    }
+
     return new Promise<Uint8Array>((resolve, reject) => {
-      const socket = this.socket!;
-      const chunks: Buffer[] = [];
-      let totalLength = 0;
-      let headerParsed = false;
-      let expectedDataLen = 0;
-      let resolved = false;
-
-      const cleanup = () => {
-        socket.removeListener("data", onData);
-        socket.removeListener("error", onError);
-        socket.removeListener("close", onClose);
-        clearTimeout(timeoutId);
-      };
-
+      // Forget the id on timeout so a late reply is dropped.
       const timeoutId = setTimeout(() => {
-        if (!resolved) {
-          resolved = true;
-          cleanup();
-          reject(new TimeoutError(this.timeoutMs));
-        }
-      }, this.timeoutMs);
+        this.pending.delete(requestId);
+        this.abandoned.set(requestId, requestTakesItems(data));
+        reject(new TimeoutError(deadlineMs));
+      }, deadlineMs);
 
-      const onData = (chunk: Buffer) => {
-        chunks.push(chunk);
-        totalLength += chunk.length;
-
-        // Check if we have enough for header
-        if (!headerParsed && totalLength >= HEADER_SIZE) {
-          const combined = Buffer.concat(chunks);
-          const header = new Uint8Array(
-            combined.buffer,
-            combined.byteOffset,
-            HEADER_SIZE
-          );
-
-          try {
-            const [, dataLen] = parseResponseHeader(header);
-            expectedDataLen = dataLen;
-            headerParsed = true;
-          } catch (err) {
-            resolved = true;
-            cleanup();
-            reject(err);
-            return;
-          }
-        }
-
-        // Check if we have complete response
-        if (headerParsed && totalLength >= HEADER_SIZE + expectedDataLen) {
-          resolved = true;
-          cleanup();
-
-          const combined = Buffer.concat(chunks);
-          const result = new Uint8Array(HEADER_SIZE + expectedDataLen);
-          result.set(
-            new Uint8Array(
-              combined.buffer,
-              combined.byteOffset,
-              HEADER_SIZE + expectedDataLen
-            )
-          );
-
-          // Verify CRC32
-          const header = result.subarray(0, HEADER_SIZE);
-          const payload = result.subarray(HEADER_SIZE);
-          const view = new DataView(header.buffer, header.byteOffset, HEADER_SIZE);
-          const expectedCRC = view.getUint32(16, true);
-          const computedCRC = computeCRC32(header, payload);
-
-          if (expectedCRC !== computedCRC) {
-            reject(new InvalidChecksumError(expectedCRC, computedCRC));
-            return;
-          }
-
+      this.pending.set(requestId, {
+        resolve: (result) => {
+          clearTimeout(timeoutId);
           resolve(result);
-        }
-      };
+        },
+        reject: (err) => {
+          clearTimeout(timeoutId);
+          reject(err);
+        },
+      });
 
-      const onError = (err: Error) => {
-        if (!resolved) {
-          resolved = true;
-          cleanup();
-          reject(new UnexpectedEOFError(err.message));
-        }
-      };
-
-      const onClose = () => {
-        if (!resolved) {
-          resolved = true;
-          cleanup();
-          reject(new UnexpectedEOFError("connection closed"));
-        }
-      };
-
-      socket.on("data", onData);
-      socket.once("error", onError);
-      socket.once("close", onClose);
-
-      // Send data
-      socket.write(Buffer.from(data));
+      this.socket!.write(Buffer.from(data));
     });
+  }
+
+  private onData(chunk: Buffer): void {
+    this.received.push(chunk);
+    this.receivedLen += chunk.length;
+
+    while (this.receivedLen >= HEADER_SIZE) {
+      if (this.received[0]!.length < HEADER_SIZE) this.joinReceived();
+      const head = this.received[0]!;
+      const header = new Uint8Array(head.buffer, head.byteOffset, HEADER_SIZE);
+
+      let status: StatusCode;
+      let dataLen: number;
+      let requestId: bigint;
+      let expectedCRC: number;
+      try {
+        [status, dataLen, requestId, expectedCRC] = parseResponseHeader(header);
+      } catch (err) {
+        // The stream can't be re-framed past a bad header.
+        this.failAndDestroy(err as Error);
+        return;
+      }
+
+      const totalLen = HEADER_SIZE + dataLen;
+      if (this.receivedLen < totalLen) return;
+      if (this.received[0]!.length < totalLen) this.joinReceived();
+      const buf = this.received[0]!;
+
+      const result = new Uint8Array(totalLen);
+      result.set(new Uint8Array(buf.buffer, buf.byteOffset, totalLen));
+      if (buf.length > totalLen) this.received[0] = buf.subarray(totalLen);
+      else this.received.shift();
+      this.receivedLen -= totalLen;
+
+      const payload = result.subarray(HEADER_SIZE);
+      const pending = this.pending.get(requestId);
+      if (!pending) {
+        // A request the server could not parse is answered with id 0, and
+        // the server then closes; tell every caller why.
+        if (requestId === 0n && status !== StatusCode.OK) {
+          this.failAndDestroy(createServerError(status, payload));
+          return;
+        }
+        if (this.abandoned.get(requestId)) {
+          this.logger.warn(
+            `Dropping reply to request ${requestId}: no longer waited for; what it took stays leased until its lease or visibility timeout`
+          );
+        } else {
+          this.logger.debug(`Dropping reply to request ${requestId}: no longer waited for`);
+        }
+        this.abandoned.delete(requestId);
+        continue;
+      }
+      this.pending.delete(requestId);
+
+      const computedCRC = computeCRC32(result.subarray(0, HEADER_SIZE), payload);
+      if (expectedCRC !== computedCRC) {
+        pending.reject(new InvalidChecksumError(expectedCRC, computedCRC));
+      } else {
+        pending.resolve(result);
+      }
+    }
+  }
+
+  private joinReceived(): void {
+    this.received = [Buffer.concat(this.received, this.receivedLen)];
+  }
+
+  private failAndDestroy(err: Error): void {
+    const socket = this.socket;
+    if (socket) {
+      this.failAll(socket, err);
+      socket.destroy();
+    }
+  }
+
+  private failAll(socket: net.Socket, err: Error): void {
+    if (this.socket !== socket) return;
+    this.socket = null;
+    this.received = [];
+    this.receivedLen = 0;
+    this.abandoned.clear();
+    const pending = [...this.pending.values()];
+    this.pending.clear();
+    for (const p of pending) p.reject(err);
   }
 }

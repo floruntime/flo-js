@@ -22,7 +22,7 @@ import {
   MAX_NAMESPACE_SIZE,
   MAX_VALUE_SIZE,
   type Message,
-  type OpCode,
+  OpCode,
   OptionTag,
   type RawResponse,
   ScanResult,
@@ -97,6 +97,60 @@ export function workerBlockMs(blockMs: number | undefined): number {
   if (blockMs === undefined || blockMs === 0) return 30000;
   checkBlockMs(blockMs);
   return blockMs;
+}
+
+/**
+ * How long the server may hold a serialized request before answering: its
+ * BlockMS or WaitMS option, the larger if both are set; else 30000 for an
+ * action await, which the server holds that long by default; else 0.
+ * Transports add this to their timeout so a long poll is not cut off
+ * client-side while the server is still waiting.
+ *
+ * @internal
+ */
+export function requestBlockMs(request: Uint8Array): number {
+  const view = new DataView(request.buffer, request.byteOffset, request.byteLength);
+  let off = HEADER_SIZE;
+  if (request.length < off + 2) return 0;
+  off += 2 + view.getUint16(off, true); // namespace
+  if (request.length < off + 2) return 0;
+  off += 2 + view.getUint16(off, true); // key
+  if (request.length < off + 4) return 0;
+  off += 4 + view.getUint32(off, true); // value
+  if (request.length < off + 2) return 0;
+  const end = Math.min(request.length, off + 2 + view.getUint16(off, true));
+  off += 2;
+  let blockMs: number | undefined;
+  while (off + 2 <= end) {
+    const tag = request[off]!;
+    const len = request[off + 1]!;
+    off += 2;
+    if (off + len > end) break;
+    if ((tag === OptionTag.BlockMS || tag === OptionTag.WaitMS) && len === 4) {
+      blockMs = Math.max(blockMs ?? 0, view.getUint32(off, true));
+    }
+    off += len;
+  }
+  if (blockMs !== undefined) return blockMs;
+  return view.getUint16(20, true) === OpCode.ActionAwait ? 30000 : 0;
+}
+
+/**
+ * Whether a serialized request takes items its reply carries (a dequeued
+ * message, a group read's records, a claimed or awaited task). If its reply
+ * is dropped, those items stay leased to nobody until their lease runs out.
+ *
+ * @internal
+ */
+export function requestTakesItems(request: Uint8Array): boolean {
+  if (request.length < HEADER_SIZE) return false;
+  const op = new DataView(request.buffer, request.byteOffset, request.byteLength).getUint16(20, true);
+  return (
+    op === OpCode.QueueDequeue ||
+    op === OpCode.StreamGroupRead ||
+    op === OpCode.StreamGroupClaim ||
+    op === OpCode.ActionAwait
+  );
 }
 
 /**

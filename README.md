@@ -112,7 +112,7 @@ interface ClientOptions {
 ```typescript
 interface PutOptions {
   namespace?: string;      // Override default namespace
-  ttlSeconds?: bigint;     // Time-to-live in seconds
+  ttlMs?: bigint;          // Time-to-live in milliseconds (0 = no expiry)
   casVersion?: bigint;     // CAS version for optimistic locking
   ifNotExists?: boolean;   // Only put if key doesn't exist
   ifExists?: boolean;      // Only put if key exists
