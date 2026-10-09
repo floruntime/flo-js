@@ -39,6 +39,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
+import { EmptyPollBackoff, pause } from "./poll-backoff.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -305,6 +306,7 @@ export class ActionWorker {
   private readonly handlers: Map<string, ActionHandler> = new Map();
   private running = false;
   private stopRequested = false;
+  private stopSignal = new AbortController();
   private activeTaskCount = 0;
   private readonly pendingTasks: Set<Promise<void>> = new Set();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -413,6 +415,7 @@ export class ActionWorker {
       // Initialize state
       this.running = true;
       this.stopRequested = false;
+      this.stopSignal = new AbortController();
 
       // Start heartbeat interval
       this.startHeartbeat();
@@ -446,6 +449,7 @@ export class ActionWorker {
   }
 
   private async pollLoop(actionNames: string[]): Promise<void> {
+    const backoff = new EmptyPollBackoff();
     while (this.running && !this.stopRequested) {
       try {
         // Check concurrency limit
@@ -461,14 +465,16 @@ export class ActionWorker {
         }
 
         // Await task from server
+        const started = performance.now();
         const result = await this.client!.worker.awaitTask(
           this.config.workerId,
           actionNames,
           { blockMs: this.config.blockMs }
         );
 
+        const wait = backoff.next(result.task === null, performance.now() - started, this.config.blockMs);
         if (result.task === null) {
-          // No task available, continue polling
+          if (wait > 0) await pause(wait, this.stopSignal.signal);
           continue;
         }
 
@@ -608,6 +614,7 @@ export class ActionWorker {
     this.log("Stopping worker...");
     this.running = false;
     this.stopRequested = true;
+    this.stopSignal.abort();
   }
 
   /**

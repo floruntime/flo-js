@@ -41,6 +41,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
+import { EmptyPollBackoff, pause } from "./poll-backoff.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -192,6 +193,7 @@ export class StreamWorker {
   private readonly handler: StreamRecordHandler;
   private running = false;
   private stopRequested = false;
+  private stopSignal = new AbortController();
   private activeCount = 0;
   private readonly pendingTasks: Set<Promise<void>> = new Set();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -303,6 +305,7 @@ export class StreamWorker {
       // Initialize state
       this.running = true;
       this.stopRequested = false;
+      this.stopSignal = new AbortController();
 
       // Start heartbeat
       this.startHeartbeat();
@@ -349,6 +352,7 @@ export class StreamWorker {
   }
 
   private async pollLoop(): Promise<void> {
+    const backoff = new EmptyPollBackoff();
     while (this.running && !this.stopRequested) {
       try {
         // Check concurrency limit
@@ -360,6 +364,7 @@ export class StreamWorker {
         if (this.stopRequested) break;
 
         // Read batch from consumer group
+        const started = performance.now();
         const result = await this.client!.stream.groupRead(this.config.stream, {
           group: this.config.group,
           consumer: this.config.consumer,
@@ -367,7 +372,10 @@ export class StreamWorker {
           blockMs: this.config.blockMs,
         });
 
-        if (!result || result.records.length === 0) {
+        const empty = !result || result.records.length === 0;
+        const wait = backoff.next(empty, performance.now() - started, this.config.blockMs);
+        if (empty) {
+          if (wait > 0) await pause(wait, this.stopSignal.signal);
           continue;
         }
 
@@ -437,6 +445,7 @@ export class StreamWorker {
     this.log("Stopping stream worker...");
     this.running = false;
     this.stopRequested = true;
+    this.stopSignal.abort();
   }
 
   /**
