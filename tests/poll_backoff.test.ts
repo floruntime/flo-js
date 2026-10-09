@@ -197,10 +197,8 @@ describe("StreamWorker group read wakes", () => {
   afterEach(() => close?.());
 
   it("re-reads promptly after append wakes", async () => {
-    // Each cycle: two wakes 20 ms after parking, then the record. Acks are
-    // left unanswered so no reply crosses a parked read.
+    // Each cycle: two wakes 20 ms after parking, then the record.
     const srv = await fakeServer((op, nth) => {
-      if (op === OpCode.StreamGroupAck) return null;
       if (op !== OpCode.StreamGroupRead) return undefined;
       if (nth >= 9) return { delayMs: NEVER };
       return nth % 3 === 2 ? { delayMs: 0, data: oneRecord(nth) } : { delayMs: 20 };
@@ -225,12 +223,12 @@ describe("StreamWorker group read wakes", () => {
     for (let i = 0; i < 3; i++) {
       expect(handled[i]! - wakes[2 * i + 1]!.at).toBeLessThan(100);
     }
-    // The first early empty in a row re-reads at once; the second pauses 50 ms.
-    // Checked on the first cycle only: later cycles have an unanswered ack in
-    // flight, and with Nagle on the socket the next read waits for its ACK.
+    // In each cycle the first early empty re-reads at once; the second pauses 50 ms.
     const reads = srv.polls.filter((p) => p.op === OpCode.StreamGroupRead);
-    expect(reads[1]!.at - wakes[0]!.at).toBeLessThan(30);
-    expect(reads[2]!.at - wakes[1]!.at).toBeGreaterThanOrEqual(45);
+    for (let i = 0; i < 3; i++) {
+      expect(reads[3 * i + 1]!.at - wakes[2 * i]!.at).toBeLessThan(30);
+      expect(reads[3 * i + 2]!.at - wakes[2 * i + 1]!.at).toBeGreaterThanOrEqual(45);
+    }
   });
 
   it("never pauses after empties that took longer than 250 ms", async () => {
