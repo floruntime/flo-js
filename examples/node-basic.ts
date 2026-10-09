@@ -41,7 +41,7 @@ async function main() {
 
     // Put with TTL
     await client.kv.put("temp-key", textEncoder.encode("expires soon"), {
-      ttlSeconds: 60n,
+      ttlMs: 60_000n,
     });
     console.log("Put key with TTL: temp-key");
 

@@ -94,8 +94,8 @@ export class KVOperations {
 
     const builder = new OptionsBuilder();
 
-    if (opts?.ttlSeconds !== undefined) {
-      builder.addU64(OptionTag.TTLSeconds, opts.ttlSeconds);
+    if (opts?.ttlMs !== undefined) {
+      builder.addU64(OptionTag.TTLMs, opts.ttlMs);
     }
 
     if (opts?.casVersion !== undefined) {

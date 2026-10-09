@@ -11,6 +11,8 @@ import {
   StatusCode,
   OptionTag,
   OptionsBuilder,
+  KVOperations,
+  type KVRequestSender,
   computeCRC32,
   serializeRequest,
   parseResponseHeader,
@@ -61,11 +63,11 @@ describe("Wire Protocol", () => {
 
     it("should build u64 option", () => {
       const builder = new OptionsBuilder();
-      builder.addU64(OptionTag.TTLSeconds, 3600n);
+      builder.addU64(OptionTag.CASVersion, 3600n);
       const options = builder.build();
       // 3600 = 0x0E10 in little-endian
       expect(options).toEqual(
-        new Uint8Array([0x01, 8, 0x10, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        new Uint8Array([0x02, 8, 0x10, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
       );
     });
 
@@ -317,6 +319,26 @@ describe("Wire Protocol", () => {
       expect(result[0]!.version).toBe(1n);
       expect(result[0]!.timestamp).toBe(1000n);
       expect(new TextDecoder().decode(result[0]!.value)).toBe("v");
+    });
+  });
+
+  describe("KV put TTL", () => {
+    it("encodes ttlMs as option 0x01 with an 8-byte millisecond value", async () => {
+      let sent: Uint8Array | undefined;
+      const sender: KVRequestSender = {
+        getNamespace: (ns) => ns ?? "default",
+        sendRequest: async (_op, _ns, _key, _value, options) => {
+          sent = options;
+          return { status: StatusCode.OK, data: new Uint8Array(), requestId: 0n };
+        },
+      };
+
+      await new KVOperations(sender).put("k", new Uint8Array([1]), { ttlMs: 90_000n });
+
+      // 90000 = 0x015F90, little-endian u64
+      expect(sent).toEqual(
+        new Uint8Array([0x01, 8, 0x90, 0x5f, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00])
+      );
     });
   });
 });
