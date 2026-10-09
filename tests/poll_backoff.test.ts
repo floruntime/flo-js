@@ -161,6 +161,12 @@ describe("StreamWorker group read wakes", () => {
     for (let i = 0; i < 3; i++) {
       expect(handled[i]! - wakes[2 * i + 1]!.at).toBeLessThan(100);
     }
+    // The first early empty in a row re-reads at once; the second pauses 50 ms.
+    // Checked on the first cycle only: later cycles have an ack in flight, and
+    // on a transport without per-id routing that ack can take a read's reply.
+    const reads = srv.polls.filter((p) => p.op === OpCode.StreamGroupRead);
+    expect(reads[1]!.at - wakes[0]!.at).toBeLessThan(30);
+    expect(reads[2]!.at - wakes[1]!.at).toBeGreaterThanOrEqual(45);
   });
 
   it("never pauses after empties that took longer than 250 ms", async () => {
