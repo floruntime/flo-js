@@ -178,7 +178,6 @@ export {
 // Wire protocol
 export {
   OptionsBuilder,
-  checkBlockMs,
   workerBlockMs,
   computeCRC32,
   serializeRequest,

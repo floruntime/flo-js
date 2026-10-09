@@ -114,7 +114,8 @@ export class OptionsBuilder {
   }
 
   /**
-   * Add a u32 option (little-endian).
+   * Add a u32 option (little-endian). Throws for a BlockMS or WaitMS the
+   * server would refuse (see checkBlockMs).
    */
   addU32(tag: OptionTag, value: number): this {
     if (tag === OptionTag.BlockMS || tag === OptionTag.WaitMS) checkBlockMs(value);
