@@ -292,7 +292,7 @@ export function statusCodeToString(status: StatusCode): string {
  */
 export const OptionTag = {
   // KV Options (0x01 - 0x0F)
-  TTLSeconds: 0x01, // u64: Time-to-live in seconds (0 = no expiration)
+  TTLMs: 0x01, // u64: Time-to-live in milliseconds (0 = no expiration)
   CASVersion: 0x02, // u64: Expected version for compare-and-swap
   IfNotExists: 0x03, // void: Only set if key doesn't exist (NX)
   IfExists: 0x04, // void: Only set if key exists (XX)
@@ -685,7 +685,8 @@ export interface GetOptions {
  */
 export interface PutOptions {
   namespace?: string;
-  ttlSeconds?: bigint;
+  /** Time-to-live in milliseconds (0 = no expiration). */
+  ttlMs?: bigint;
   casVersion?: bigint;
   ifNotExists?: boolean;
   ifExists?: boolean;

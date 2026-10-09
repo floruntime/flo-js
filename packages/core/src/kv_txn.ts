@@ -105,8 +105,8 @@ export class Transaction {
   ): Promise<PutResult> {
     this.checkAlive();
     const builder = this.txnOptions();
-    if (opts?.ttlSeconds !== undefined) {
-      builder.addU64(OptionTag.TTLSeconds, opts.ttlSeconds);
+    if (opts?.ttlMs !== undefined) {
+      builder.addU64(OptionTag.TTLMs, opts.ttlMs);
     }
     if (opts?.casVersion !== undefined) {
       builder.addU64(OptionTag.CASVersion, opts.casVersion);
@@ -197,11 +197,14 @@ export class Transaction {
     return view.getBigInt64(0, true);
   }
 
-  /** Update the TTL on an existing key inside the transaction. */
-  async touch(key: string, ttlSeconds: bigint): Promise<void> {
+  /**
+   * Update the TTL on an existing key inside the transaction, in
+   * milliseconds. `ttlMs = 0` clears the TTL.
+   */
+  async touch(key: string, ttlMs: bigint): Promise<void> {
     this.checkAlive();
     const value = new Uint8Array(8);
-    new DataView(value.buffer).setBigUint64(0, ttlSeconds, true);
+    new DataView(value.buffer).setBigUint64(0, ttlMs, true);
     const resp = await this.sender.sendRequest(
       OpCode.KVTouch,
       this.namespace,

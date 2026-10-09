@@ -117,8 +117,8 @@ export class KVOperations {
 
     const builder = new OptionsBuilder();
 
-    if (opts?.ttlSeconds !== undefined) {
-      builder.addU64(OptionTag.TTLSeconds, opts.ttlSeconds);
+    if (opts?.ttlMs !== undefined) {
+      builder.addU64(OptionTag.TTLMs, opts.ttlMs);
     }
 
     if (opts?.casVersion !== undefined) {
@@ -362,18 +362,19 @@ export class KVOperations {
   }
 
   /**
-   * Update the TTL on an existing key. `ttlSeconds = 0` clears the TTL.
+   * Update the TTL on an existing key, in milliseconds. `ttlMs = 0` clears
+   * the TTL.
    *
    * When `opts.ifMatch` is set, the touch only succeeds if the current key
    * version equals it — enabling race-free lease renewal.
    */
   async touch(
     key: string,
-    ttlSeconds: bigint | number,
+    ttlMs: bigint | number,
     opts?: KVTouchOptions
   ): Promise<void> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-    const ttl = typeof ttlSeconds === "bigint" ? ttlSeconds : BigInt(ttlSeconds);
+    const ttl = typeof ttlMs === "bigint" ? ttlMs : BigInt(ttlMs);
     const value = new Uint8Array(8);
     new DataView(value.buffer).setBigUint64(0, ttl, true);
     const builder = new OptionsBuilder();
