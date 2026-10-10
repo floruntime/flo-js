@@ -29,7 +29,7 @@ trigger:
   mode: shared
   batch_size: 1
 
-searchAttributes:
+search_attributes:
   - name: transaction_id
     type: string
     from: input.id
