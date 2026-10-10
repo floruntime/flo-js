@@ -4,8 +4,7 @@
     "baseUrl": ".",
     "paths": {
       "@floruntime/core": ["./packages/core/src"],
-      "@floruntime/node": ["./packages/node/src"],
-      "@floruntime/web": ["./packages/web/src"]
+      "@floruntime/node": ["./packages/node/src"]
     }
   },
   "include": ["examples/**/*"],

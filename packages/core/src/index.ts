@@ -10,6 +10,7 @@ export {
   // Protocol constants
   MAGIC,
   VERSION,
+  TABLE_HASH,
   HEADER_SIZE,
   MAX_NAMESPACE_SIZE,
   MAX_KEY_SIZE,
@@ -146,7 +147,7 @@ export {
   InvalidEndpointError,
   UnexpectedEOFError,
   InvalidMagicError,
-  UnsupportedVersionError,
+  TableMismatchError,
   InvalidChecksumError,
   IncompleteResponseError,
   NamespaceTooLargeError,

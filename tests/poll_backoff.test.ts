@@ -6,7 +6,7 @@
 
 import * as net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { HEADER_SIZE, MAGIC, OpCode, VERSION, computeCRC32 } from "@floruntime/core";
+import { HEADER_SIZE, MAGIC, OpCode, TABLE_HASH, VERSION, computeCRC32 } from "@floruntime/core";
 import { ActionWorker, StreamWorker } from "@floruntime/node";
 import { EmptyPollBackoff } from "../packages/node/src/poll-backoff.js";
 
@@ -17,6 +17,7 @@ function reply(id: bigint, data: Uint8Array = new Uint8Array(0)): Uint8Array {
   view.setUint32(4, data.length, true);
   view.setBigUint64(8, id, true);
   buf[20] = VERSION;
+  view.setBigUint64(24, TABLE_HASH, true);
   buf.set(data, HEADER_SIZE);
   view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
   return buf;

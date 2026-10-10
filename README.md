@@ -1,6 +1,6 @@
 # Flo JavaScript SDK
 
-JavaScript/TypeScript SDK for the Flo distributed systems platform. This monorepo contains packages for both Node.js and browser environments.
+JavaScript/TypeScript SDK for the Flo distributed systems platform. This monorepo contains the core protocol package and the Node.js client.
 
 ## Packages
 
@@ -8,11 +8,8 @@ JavaScript/TypeScript SDK for the Flo distributed systems platform. This monorep
 |---------|-------------|-----------|
 | `@floruntime/core` | Core wire protocol, types, and transport-agnostic operations | - |
 | `@floruntime/node` | Node.js client with TCP transport | TCP |
-| `@floruntime/web` | Browser client with WebSocket transport | WebSocket |
 
 ## Installation
-
-### Node.js
 
 ```bash
 npm install @floruntime/node
@@ -20,19 +17,9 @@ npm install @floruntime/node
 yarn install @floruntime/node
 ```
 
-### Browser
-
-```bash
-npm install @floruntime/web
-# or
-yarn add @floruntime/web
-```
-
-> **Note:** The `@floruntime/web` package requires WebSocket server support on the Flo server. See the Flo documentation for WebSocket endpoint configuration.
+The client and the server must be built from the same op table: a server refuses a client from another release, and the client refuses its answers (`TableMismatchError`). Upgrade the server and the SDK together.
 
 ## Quick Start
-
-### Node.js
 
 ```typescript
 import { FloClient } from "@floruntime/node";
@@ -63,24 +50,6 @@ for (const msg of result.messages) {
   console.log(decoder.decode(msg.payload));
   await client.queue.ack("tasks", [msg.seq]);
 }
-
-await client.close();
-```
-
-### Browser
-
-```typescript
-import { FloClient } from "@floruntime/web";
-
-const client = new FloClient("wss://flo.example.com/ws", {
-  namespace: "myapp",
-});
-
-await client.connect();
-
-// Same API as Node.js
-await client.kv.put("key", new TextEncoder().encode("value"));
-const value = await client.kv.get("key");
 
 await client.close();
 ```

@@ -2,7 +2,7 @@
  * Flo SDK error types.
  */
 
-import { StatusCode, statusCodeToString } from "./types.js";
+import { StatusCode, statusCodeToString, TABLE_HASH, VERSION } from "./types.js";
 
 /**
  * Base error class for Flo SDK errors.
@@ -68,13 +68,26 @@ export class InvalidMagicError extends FloError {
 }
 
 /**
- * Error thrown when the protocol version is unsupported.
+ * Thrown when the server was built from another protocol version or op
+ * table than this SDK, so neither can read the other. Upgrade the SDK and
+ * the server together.
  */
-export class UnsupportedVersionError extends FloError {
-  constructor(version: number) {
-    super(`flo: unsupported protocol version: ${version}`);
-    this.name = "UnsupportedVersionError";
+export class TableMismatchError extends FloError {
+  constructor(
+    public readonly serverVersion: number,
+    public readonly serverTable: bigint
+  ) {
+    super(
+      serverVersion !== VERSION
+        ? `flo: server protocol ${serverVersion}, client protocol ${VERSION}: upgrade the client`
+        : `flo: server table 0x${hex16(serverTable)}, client table 0x${hex16(TABLE_HASH)}: upgrade the client`
+    );
+    this.name = "TableMismatchError";
   }
+}
+
+function hex16(n: bigint): string {
+  return n.toString(16).padStart(16, "0");
 }
 
 /**

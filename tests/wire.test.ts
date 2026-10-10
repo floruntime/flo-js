@@ -6,6 +6,8 @@ import { describe, it, expect } from "vitest";
 import {
   MAGIC,
   VERSION,
+  TABLE_HASH,
+  TableMismatchError,
   HEADER_SIZE,
   OpCode,
   StatusCode,
@@ -36,7 +38,7 @@ describe("Wire Protocol", () => {
     });
 
     it("should have correct version", () => {
-      expect(VERSION).toBe(0x01);
+      expect(VERSION).toBe(0x02);
     });
 
     it("should have correct header size", () => {
@@ -133,11 +135,9 @@ describe("Wire Protocol", () => {
       // Check opcode (u16 at 20-21)
       expect(view.getUint16(20, true)).toBe(OpCode.KVGet);
 
-      // Check version
+      // Version, then the pinned table hash at 24-31
       expect(request[22]).toBe(VERSION);
-
-      // Reserved bytes 24-31 are zero
-      expect(Array.from(request.subarray(24, HEADER_SIZE))).toEqual(new Array(8).fill(0));
+      expect(view.getBigUint64(24, true)).toBe(0x4e9243eeab771a02n);
     });
 
     it("should include namespace in payload", () => {
@@ -171,6 +171,7 @@ describe("Wire Protocol", () => {
       view.setBigUint64(8, 42n, true); // requestId
       view.setUint32(16, 0x12345678, true); // crc
       header[20] = VERSION;
+      view.setBigUint64(24, TABLE_HASH, true);
       header[21] = StatusCode.OK;
 
       const [status, dataLen, requestId, crc] = parseResponseHeader(header);
@@ -189,13 +190,24 @@ describe("Wire Protocol", () => {
       expect(() => parseResponseHeader(header)).toThrow("invalid protocol magic");
     });
 
-    it("should throw on unsupported version", () => {
-      const header = new Uint8Array(HEADER_SIZE);
-      const view = new DataView(header.buffer);
-      view.setUint32(0, MAGIC, true);
-      header[20] = 0xff; // wrong version
-
-      expect(() => parseResponseHeader(header)).toThrow("unsupported protocol version");
+    it("refuses an answer from another protocol version or table, naming both", () => {
+      const cases: [number, bigint, string][] = [
+        [1, 0n, "flo: server protocol 1, client protocol 2: upgrade the client"],
+        [
+          VERSION,
+          TABLE_HASH + 1n,
+          `flo: server table 0x${(TABLE_HASH + 1n).toString(16).padStart(16, "0")}, client table 0x${TABLE_HASH.toString(16).padStart(16, "0")}: upgrade the client`,
+        ],
+      ];
+      for (const [version, table, message] of cases) {
+        const header = new Uint8Array(HEADER_SIZE);
+        const view = new DataView(header.buffer);
+        view.setUint32(0, MAGIC, true);
+        header[20] = version;
+        view.setBigUint64(24, table, true);
+        expect(() => parseResponseHeader(header)).toThrow(TableMismatchError);
+        expect(() => parseResponseHeader(header)).toThrow(message);
+      }
     });
   });
 

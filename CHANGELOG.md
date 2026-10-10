@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Requests carry the op table hash (`TABLE_HASH`) under protocol version 2. An answer from a server built from another protocol version or table throws `TableMismatchError`, naming both tables, before its body is read, and the connection is closed. `UnsupportedVersionError` is gone.
 - Workers back off (50 ms, doubling to 1 s) when blocking polls keep coming back empty at once.
 - `blockMs: 0` now means don't wait, as on the server. An `ActionWorker` or `StreamWorker` given 0 or nothing uses 30000.
 - A `blockMs` over 300000 (5 minutes) throws `BlockTooLongError` before anything is sent. A negative or fractional `blockMs` throws `FloError`.
@@ -20,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `kv.scan` reads the server's reply layout, `[count][entries][has_more:u8][cursor_len:u16][cursor]`; it parsed a header-first layout the server never sent.
 
 ### Removed
+
+- `@floruntime/web`, the browser client: the server has no WebSocket endpoint, so it could not connect.
 
 Opcodes and options the server never serves:
 
