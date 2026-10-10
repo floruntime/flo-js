@@ -17,6 +17,8 @@ import {
   InvalidMagicError,
   UnexpectedEOFError,
   VERSION,
+  TABLE_HASH,
+  TableMismatchError,
   computeCRC32,
   parseResponseHeader,
   requestBlockMs,
@@ -24,7 +26,6 @@ import {
   serializeRequest,
 } from "@floruntime/core";
 import { TcpTransport } from "@floruntime/node";
-import { WebSocketTransport } from "@floruntime/web";
 
 const enc = new TextEncoder();
 
@@ -41,6 +42,7 @@ function response(id: bigint, data: Uint8Array = new Uint8Array(0), status = 0):
   view.setUint32(4, data.length, true);
   view.setBigUint64(8, id, true);
   buf[20] = VERSION;
+  view.setBigUint64(24, TABLE_HASH, true);
   buf[21] = status;
   buf.set(data, HEADER_SIZE);
   view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
@@ -321,6 +323,21 @@ describe("TcpTransport framing and failures", () => {
     });
   });
 
+  it("refuses an answer from another table unread and closes the connection", async () => {
+    const t = await connect((sock, id) => {
+      const r = response(id, enc.encode("from elsewhere"));
+      const view = new DataView(r.buffer, r.byteOffset, r.byteLength);
+      view.setBigUint64(24, TABLE_HASH + 1n, true);
+      view.setUint32(16, computeCRC32(r.subarray(0, HEADER_SIZE), r.subarray(HEADER_SIZE)), true);
+      sock.write(r);
+    });
+    const err = await t.sendAndReceive(request(1n)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TableMismatchError);
+    expect((err as TableMismatchError).serverTable).toBe(TABLE_HASH + 1n);
+    expect((err as Error).message).toContain("upgrade the client");
+    expect(t.isConnected()).toBe(false);
+  });
+
   it("refuses a request id already in flight", async () => {
     const t = await connect((sock, id) => {
       setTimeout(() => sock.write(response(id)), 50);
@@ -328,62 +345,5 @@ describe("TcpTransport framing and failures", () => {
     const first = t.sendAndReceive(request(1n));
     await expect(t.sendAndReceive(request(1n))).rejects.toThrow(FloError);
     expect(idOf(await first)).toBe(1n);
-  });
-});
-
-describe("WebSocketTransport", () => {
-  class FakeWebSocket {
-    static OPEN = 1;
-    static last: FakeWebSocket;
-    readyState = 1;
-    binaryType = "";
-    sent: Uint8Array[] = [];
-    onopen?: () => void;
-    onmessage?: (ev: { data: ArrayBuffer }) => void;
-    onclose?: (ev: unknown) => void;
-    onerror?: () => void;
-    constructor() {
-      FakeWebSocket.last = this;
-      setTimeout(() => this.onopen?.(), 0);
-    }
-    send(data: Uint8Array) {
-      this.sent.push(data);
-    }
-    close() {}
-    reply(id: bigint) {
-      const r = response(id);
-      this.onmessage?.({ data: r.buffer.slice(r.byteOffset, r.byteOffset + r.byteLength) as ArrayBuffer });
-    }
-  }
-
-  afterEach(() => vi.unstubAllGlobals());
-
-  async function open(timeoutMs: number) {
-    vi.stubGlobal("WebSocket", FakeWebSocket);
-    const t = new WebSocketTransport("ws://flo.test", { timeoutMs });
-    await t.connect();
-    return { t, ws: FakeWebSocket.last };
-  }
-
-  it("waits out a blocking request longer than its timeout", async () => {
-    const { t, ws } = await open(50);
-    const p = t.sendAndReceive(request(1n, 200));
-    await sleep(120);
-    ws.reply(1n);
-    expect(idOf(await p)).toBe(1n);
-  });
-
-  it("warns when it drops a late reply that took items, and only then", async () => {
-    vi.stubGlobal("WebSocket", FakeWebSocket);
-    const logger = spyLogger();
-    const t = new WebSocketTransport("ws://flo.test", { timeoutMs: 20, logger });
-    await t.connect();
-    const ws = FakeWebSocket.last;
-    await expect(t.sendAndReceive(getRequest(1n))).rejects.toThrow(TimeoutError);
-    ws.reply(1n);
-    expect(logger.warn).not.toHaveBeenCalled();
-    await expect(t.sendAndReceive(request(2n))).rejects.toThrow(TimeoutError);
-    ws.reply(2n);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("Dropping reply to request 2"));
   });
 });

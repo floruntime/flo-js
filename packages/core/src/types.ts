@@ -4,7 +4,13 @@
 
 // Protocol constants
 export const MAGIC = 0x004f4c46; // "FLO\0" in little-endian
-export const VERSION = 0x01;
+export const VERSION = 0x02;
+/**
+ * The hash of the op table this SDK was built for, written into every
+ * request header. A server built from another table refuses the request,
+ * and its answers carry its own hash, which this SDK refuses.
+ */
+export const TABLE_HASH = 0x4e9243eeab771a02n;
 export const HEADER_SIZE = 32;
 
 // Size limits (for client-side validation)

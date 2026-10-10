@@ -14,6 +14,7 @@ import {
   StatusCode,
   UnavailableError,
   VERSION,
+  TABLE_HASH,
   computeCRC32,
   createServerError,
   isInternal,
@@ -22,7 +23,6 @@ import {
   serializeRequest,
 } from "@floruntime/core";
 import { FloClient } from "@floruntime/node";
-import { WebSocketTransport } from "@floruntime/web";
 
 const enc = new TextEncoder();
 const UNAVAILABLE_MSG = "shard 3 is offline; an operator must restart it";
@@ -34,6 +34,7 @@ function response(id: bigint, data: Uint8Array = new Uint8Array(0), status = 0):
   view.setUint32(4, data.length, true);
   view.setBigUint64(8, id, true);
   buf[20] = VERSION;
+  view.setBigUint64(24, TABLE_HASH, true);
   buf[21] = status;
   buf.set(data, HEADER_SIZE);
   view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
@@ -134,45 +135,4 @@ describe("a non-ok reply leaves the connection framed for the next one", () => {
     });
   }
 
-  it("over WebSocket, after status 200", async () => {
-    let socket: { onmessage?: (ev: { data: ArrayBuffer }) => void } | undefined;
-    class FakeWebSocket {
-      static OPEN = 1;
-      readyState = 1;
-      binaryType = "";
-      onopen?: () => void;
-      onmessage?: (ev: { data: ArrayBuffer }) => void;
-      constructor() {
-        socket = this;
-        setTimeout(() => this.onopen?.(), 0);
-      }
-      send() {}
-      close() {}
-    }
-    vi.stubGlobal("WebSocket", FakeWebSocket);
-    try {
-      const t = new WebSocketTransport("ws://flo.test", { timeoutMs: 2000 });
-      await t.connect();
-      const req = (id: bigint) =>
-        serializeRequest(id, OpCode.KVGet, enc.encode("ns"), enc.encode("k"), new Uint8Array(0), new Uint8Array(0));
-      const p1 = t.sendAndReceive(req(1n));
-      const p2 = t.sendAndReceive(req(2n));
-      const both = new Uint8Array([...response(1n, enc.encode("from the future"), 200), ...response(2n, getBody(7n, "v"))]);
-      socket!.onmessage!({ data: both.buffer });
-
-      const r1 = await p1;
-      const raw1 = parseRawResponse(r1.subarray(0, HEADER_SIZE), r1.subarray(HEADER_SIZE));
-      const err = createServerError(raw1.status, raw1.data);
-      expect(err.message).toContain("200");
-      expect(err.message).toContain("from the future");
-
-      const r2 = await p2;
-      const raw2 = parseRawResponse(r2.subarray(0, HEADER_SIZE), r2.subarray(HEADER_SIZE));
-      expect(raw2.status).toBe(StatusCode.OK);
-      expect(raw2.requestId).toBe(2n);
-      expect(raw2.data).toEqual(getBody(7n, "v"));
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
 });

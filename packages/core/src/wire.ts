@@ -9,7 +9,7 @@ import {
   InvalidMagicError,
   KeyTooLargeError,
   NamespaceTooLargeError,
-  UnsupportedVersionError,
+  TableMismatchError,
   ValueTooLargeError,
 } from "./errors.js";
 import {
@@ -28,6 +28,7 @@ import {
   ScanResult,
   type StatusCode,
   VERSION,
+  TABLE_HASH,
   type VersionEntry,
 } from "./types.js";
 
@@ -289,7 +290,7 @@ export function serializeRequest(
   view.setUint16(20, opCode, true); // op_code (u16 LE)
   buf[22] = VERSION; // version
   buf[23] = 0; // flags
-  // bytes 24-31 are reserved (already zero)
+  view.setBigUint64(24, TABLE_HASH, true); // table_hash
 
   // Build payload
   let offset = HEADER_SIZE;
@@ -350,8 +351,11 @@ export function parseResponseHeader(
   // frames normally, so its body is consumed and surfaces as a ServerError.
   const status = header[21] as StatusCode;
 
-  if (version !== VERSION) {
-    throw new UnsupportedVersionError(version);
+  // Another build's body can't be read: the transport closes the
+  // connection with it unread.
+  const tableHash = view.getBigUint64(24, true);
+  if (version !== VERSION || tableHash !== TABLE_HASH) {
+    throw new TableMismatchError(version, tableHash);
   }
 
   return [status, dataLen, requestId, crcValue];
