@@ -160,6 +160,7 @@ export {
   ConflictError,
   UnauthorizedError,
   OverloadedError,
+  UnavailableError,
   InternalError,
   createServerError,
   // Error type guards
@@ -168,6 +169,7 @@ export {
   isBadRequest,
   isUnauthorized,
   isOverloaded,
+  isUnavailable,
   isInternal,
 } from "./errors.js";
 

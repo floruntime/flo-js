@@ -337,6 +337,7 @@ try {
 | `BadRequestError` | Invalid request |
 | `UnauthorizedError` | Authentication failed |
 | `OverloadedError` | Server overloaded |
+| `UnavailableError` | No leader, or the shard isn't taking writes; retryable |
 | `InternalError` | Internal server error |
 
 ## Development
