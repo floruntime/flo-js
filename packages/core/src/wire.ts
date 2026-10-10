@@ -613,47 +613,30 @@ export function serializeActionRegisterValue(
 
 /**
  * Serialize action invoke value.
- * Format: [priority:u8][delay_ms:i64][has_caller:u8]
- *         [has_idempotency_key:u8][key_len:u16]?[key]?[input...]
+ * Format: [has_labels:u8]([labels_len:u16 LE][labels])?[input...]
+ *
+ * has_labels is 0 or 1. labels is a JSON object; only workers whose
+ * registered labels contain every key/value receive the run.
  */
-export function serializeActionInvokeValue(
-  input: Uint8Array,
-  priority: number = 10,
-  idempotencyKey?: string
-): Uint8Array {
-  const keyBytes = idempotencyKey ? textEncoder.encode(idempotencyKey) : null;
-  const size = 1 + 8 + 1 + (keyBytes ? 1 + 2 + keyBytes.length : 1) + input.length;
+export function serializeActionInvokeValue(input: Uint8Array, labels?: string): Uint8Array {
+  const labelBytes = labels ? textEncoder.encode(labels) : null;
+  if (labelBytes && labelBytes.length > 0xffff) {
+    throw new FloError(`flo: invoke labels are ${labelBytes.length} bytes; the limit is 65535`);
+  }
 
-  const buf = new Uint8Array(size);
-  const view = new DataView(buf.buffer);
+  const buf = new Uint8Array(1 + (labelBytes ? 2 + labelBytes.length : 0) + input.length);
   let offset = 0;
-
-  // priority
-  buf[offset++] = priority & 0xff;
-
-  // delay_ms (default 0)
-  view.setBigInt64(offset, 0n, true);
-  offset += 8;
-
-  // caller_id (none)
-  buf[offset++] = 0;
-
-  // idempotency_key
-  if (keyBytes) {
+  if (labelBytes) {
     buf[offset++] = 1;
-    view.setUint16(offset, keyBytes.length, true);
+    new DataView(buf.buffer).setUint16(offset, labelBytes.length, true);
     offset += 2;
-    buf.set(keyBytes, offset);
-    offset += keyBytes.length;
+    buf.set(labelBytes, offset);
+    offset += labelBytes.length;
   } else {
     buf[offset++] = 0;
   }
-
-  // input
   buf.set(input, offset);
-  offset += input.length;
-
-  return buf.subarray(0, offset);
+  return buf;
 }
 
 /**

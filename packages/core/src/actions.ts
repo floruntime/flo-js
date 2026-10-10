@@ -117,11 +117,7 @@ export class ActionOperations {
   ): Promise<ActionInvokeResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
-    const value = serializeActionInvokeValue(
-      input,
-      opts?.priority ?? 10,
-      opts?.idempotencyKey
-    );
+    const value = serializeActionInvokeValue(input, opts?.labels);
 
     const resp = await this.sender.sendRequest(
       OpCode.ActionInvoke,

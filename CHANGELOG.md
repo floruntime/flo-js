@@ -28,6 +28,8 @@ Opcodes and options the server never serves:
 - The web client's `authenticate()` and `AuthResult`, `streams.subscribe()` and its types (`StreamSubscribeOptions`, `StreamEventCallback`, `StreamSubscription`, `StreamEventHandler`), and the transport's push handling.
 - Every `*Response` opcode (a reply header has no opcode), the unhandled opcodes (`Pong`, `Auth`, `SetDurability`, `OK`, stream subscribe/event, `QueueExtendLease`, `QueueFailAuto`, `QueueDLQStats`, `QueuePromoteDue`, `QueueTouch`, `QueueBatchEnqueue`, `ActionTaskAssignment`), and the option tags the server does not read.
 - `serializeActionListValue` and `serializeWorkerListValue`, replaced by `serializeListValue(limit, cursor)`.
+- `ActionInvokeOptions.priority` and `idempotencyKey`, which the server ignores; invoke now sends `[has_labels:u8]([labels_len:u16][labels])?[input]` and takes a `labels` option (a JSON object string naming required worker labels). Invoke priority, delay and idempotency are deferred: https://github.com/floruntime/flo/issues/181.
+- The deprecated `Worker` and `WorkerConfig` aliases; use `ActionWorker` and `ActionWorkerConfig`.
 
 ## [0.1.0-dev.4] - 2026-05-04
 

@@ -24,6 +24,8 @@ import {
   parseEnqueueResponse,
   serializeSeqs,
   IncompleteResponseError,
+  serializeActionInvokeValue,
+  FloError,
 } from "@floruntime/core";
 
 describe("Wire Protocol", () => {
@@ -394,6 +396,27 @@ describe("Wire Protocol", () => {
       expect(sent.value).toEqual(
         new Uint8Array([0x90, 0x5f, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00])
       );
+    });
+  });
+
+  describe("Action invoke value", () => {
+    const enc = new TextEncoder();
+
+    it("writes has_labels=0 then the input when there are no labels", () => {
+      expect(serializeActionInvokeValue(enc.encode("x"))).toEqual(new Uint8Array([0, 0x78]));
+    });
+
+    it("writes has_labels=1, a u16 LE length and the labels before the input", () => {
+      const labels = '{"gpu":true}';
+      expect(labels.length).toBe(12);
+      expect(serializeActionInvokeValue(enc.encode("x"), labels)).toEqual(
+        new Uint8Array([1, 12, 0, ...enc.encode(labels), 0x78])
+      );
+    });
+
+    it("throws rather than truncate labels over 65535 bytes", () => {
+      const labels = JSON.stringify({ k: "a".repeat(65535) });
+      expect(() => serializeActionInvokeValue(enc.encode("x"), labels)).toThrow(FloError);
     });
   });
 });

@@ -724,8 +724,3 @@ export class NonRetryableError extends Error {
     this.name = "NonRetryableError";
   }
 }
-
-/** @deprecated Use `ActionWorker` instead. */
-export const Worker = ActionWorker;
-/** @deprecated Use `ActionWorkerConfig` instead. */
-export type WorkerConfig = ActionWorkerConfig;
