@@ -136,8 +136,9 @@ export class QueueOperations {
   }
 
   /**
-   * Nack negatively acknowledges messages; the server retries them or moves
-   * them to the DLQ once they run out of attempts.
+   * Nack negatively acknowledges messages. Queues are at-most-once today:
+   * a dequeue consumes its messages, so a nack doesn't redeliver them
+   * (tracked in floruntime/flo#179).
    */
   async nack(queue: string, seqs: bigint[], opts?: NackOptions): Promise<void> {
     if (seqs.length === 0) {
@@ -165,17 +166,13 @@ export class QueueOperations {
    */
   async dlqList(queue: string, opts?: DLQListOptions): Promise<DequeueResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-    const limit = opts?.limit ?? 100;
-
-    const builder = new OptionsBuilder();
-    builder.addU32(OptionTag.Limit, limit);
 
     const resp = await this.sender.sendRequest(
       OpCode.QueueDLQList,
       namespace,
       textEncoder.encode(queue),
       new Uint8Array(0),
-      builder.build()
+      new OptionsBuilder().build()
     );
 
     if (resp.status !== StatusCode.OK) {

@@ -214,7 +214,7 @@ export const OptionTag = {
   CASVersion: 0x02, // u64: Expected version for compare-and-swap
   IfNotExists: 0x03, // void: Only set if key doesn't exist (NX)
   IfExists: 0x04, // void: Only set if key exists (XX)
-  Limit: 0x05, // u32: Maximum number of results (history, DLQ list); list/scan ops take theirs in the value
+  Limit: 0x05, // u32: Maximum results for KV history and TS read; list/scan ops take theirs in the value
   RoutingKey: 0x08, // string: Explicit routing key for shard co-location
   TxnID: 0x09, // u64: Transaction ID for per-shard transactions
 
@@ -660,7 +660,6 @@ export interface NackOptions {
  */
 export interface DLQListOptions {
   namespace?: string;
-  limit?: number;
 }
 
 /**

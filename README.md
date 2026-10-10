@@ -187,8 +187,7 @@ await client.action.register("process-image", ActionType.User, {
 // Invoke an action
 const result = await client.action.invoke(
   "process-image",
-  encoder.encode(JSON.stringify({ imageUrl: "https://..." })),
-  { priority: 10, idempotencyKey: "order-123" }
+  encoder.encode(JSON.stringify({ imageUrl: "https://..." }))
 );
 console.log(`Run ID: ${result.runId}`);
 
