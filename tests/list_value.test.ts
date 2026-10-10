@@ -93,10 +93,10 @@ describe("list requests", () => {
     }
   });
 
-  it("kv.scan keeps keys_only as an option", async () => {
+  it("kv.scan sends no options", async () => {
     const { sender, sent } = capture();
-    await expect(new KVOperations(sender).scan("p", { keysOnly: true })).rejects.toThrow("captured");
-    expect(tagsOf(sent[0]!.options)).toEqual([OptionTag.KeysOnly]);
+    await expect(new KVOperations(sender).scan("p")).rejects.toThrow("captured");
+    expect(tagsOf(sent[0]!.options)).toEqual([]);
     expect(Array.from(sent[0]!.value)).toEqual([0, 0, 0, 0]);
   });
 });

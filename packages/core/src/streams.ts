@@ -598,15 +598,9 @@ export class KVReadOnlyOperations {
    */
   async scan(
     prefix: string,
-    opts?: { namespace?: string; cursor?: Uint8Array; limit?: number; keysOnly?: boolean }
+    opts?: { namespace?: string; cursor?: Uint8Array; limit?: number }
   ): Promise<import("./types.js").ScanResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const builder = new OptionsBuilder();
-
-    if (opts?.keysOnly) {
-      builder.addU8(OptionTag.KeysOnly, 1);
-    }
 
     const value = serializeListValue(opts?.limit, opts?.cursor);
 
@@ -615,7 +609,7 @@ export class KVReadOnlyOperations {
       namespace,
       textEncoder.encode(prefix),
       value,
-      builder.build()
+      new OptionsBuilder().build()
     );
 
     if (resp.status !== StatusCode.OK) {

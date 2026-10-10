@@ -266,12 +266,6 @@ export class KVOperations {
   async scan(prefix: string, opts?: ScanOptions): Promise<ScanResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
-    const builder = new OptionsBuilder();
-
-    if (opts?.keysOnly) {
-      builder.addU8(OptionTag.KeysOnly, 1);
-    }
-
     const value = serializeListValue(opts?.limit, opts?.cursor);
 
     const resp = await this.sender.sendRequest(
@@ -279,7 +273,7 @@ export class KVOperations {
       namespace,
       textEncoder.encode(prefix),
       value,
-      builder.build()
+      new OptionsBuilder().build()
     );
 
     if (resp.status !== StatusCode.OK) {

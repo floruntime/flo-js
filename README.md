@@ -126,7 +126,6 @@ interface ScanOptions {
   namespace?: string;
   cursor?: Uint8Array;     // Pagination cursor
   limit?: number;          // Max entries to return
-  keysOnly?: boolean;      // Return only keys, not values
 }
 ```
 
@@ -146,7 +145,7 @@ interface ScanOptions {
 ```typescript
 interface EnqueueOptions {
   namespace?: string;
-  priority?: number;       // Higher = processed first (0-255)
+  priority?: number;       // 0-255, lower is taken first; unset is 0, so it goes before any explicit priority
 }
 ```
 

@@ -215,12 +215,11 @@ export const OptionTag = {
   IfNotExists: 0x03, // void: Only set if key doesn't exist (NX)
   IfExists: 0x04, // void: Only set if key exists (XX)
   Limit: 0x05, // u32: Maximum number of results (history, DLQ list); list/scan ops take theirs in the value
-  KeysOnly: 0x06, // u8: Skip values in scan response (0/1)
   RoutingKey: 0x08, // string: Explicit routing key for shard co-location
   TxnID: 0x09, // u64: Transaction ID for per-shard transactions
 
   // Queue Options (0x10 - 0x1F)
-  Priority: 0x10, // u8: Message priority (0-255, higher = more urgent)
+  Priority: 0x10, // u8: Message priority (0-255, lower is taken first; unset is 0)
   Count: 0x15, // u32: Number of messages to dequeue
   BlockMS: 0x17, // u32: Blocking timeout (0 = don't wait, max 300000)
   WaitMS: 0x18, // u32: Watch timeout - wait for NEXT version change (0 = don't wait, max 300000)
@@ -262,7 +261,7 @@ export type OptionTag = (typeof OptionTag)[keyof typeof OptionTag];
  */
 export interface KVEntry {
   key: Uint8Array;
-  value: Uint8Array | null; // null if keys_only=true
+  value: Uint8Array | null;
 }
 
 /**
@@ -571,7 +570,6 @@ export interface ScanOptions {
   namespace?: string;
   cursor?: Uint8Array;
   limit?: number;
-  keysOnly?: boolean;
 }
 
 /**
@@ -630,6 +628,7 @@ export interface KVMGetOptions {
  */
 export interface EnqueueOptions {
   namespace?: string;
+  /** 0-255; lower is taken first. Unset is 0, so it is taken before any explicit priority. */
   priority?: number;
 }
 
