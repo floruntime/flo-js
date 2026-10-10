@@ -321,11 +321,7 @@ export const OptionTag = {
   Partition: 0x24, // u32: Explicit partition index
   PartitionKey: 0x25, // string: Key for partition routing
   MaxAgeSeconds: 0x26, // u64: Maximum age in seconds for retention
-  MaxBytes: 0x27, // u64: Maximum size in bytes for retention
   DryRun: 0x28, // void: Flag to preview what would be deleted without deleting
-  RetentionCount: 0x29, // u64: Retention policy - max event count
-  RetentionAge: 0x2a, // u64: Retention policy - max age in seconds
-  RetentionBytes: 0x2b, // u64: Retention policy - max bytes
 
   // Consumer Group Options (0x30 - 0x3F)
   AckTimeoutMS: 0x30, // u32: Time before unacked message auto-redelivers (overrides default)
