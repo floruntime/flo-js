@@ -44,8 +44,10 @@ export {
   TimeoutError,
   BlockTooLongError,
   MAX_BLOCK_MS,
+  ServerError,
   NotFoundError,
   UnauthorizedError,
+  UnavailableError,
   // Stream types
   type StreamRecord,
   type StreamAppendResult,
@@ -66,6 +68,7 @@ export {
   // Error type guards
   isNotFound,
   isUnauthorized,
+  isUnavailable,
 } from "@floruntime/core";
 
 // Web-specific exports

@@ -230,7 +230,21 @@ export class OverloadedError extends ServerError {
 }
 
 /**
- * Error thrown when there is an internal server error.
+ * Error thrown when a write reached no leader, or the shard stopped taking
+ * writes or is offline. Retryable, but an offline shard stays unavailable
+ * until an operator acts; the server's message says which case it is.
+ */
+export class UnavailableError extends ServerError {
+  constructor(message?: string) {
+    super(StatusCode.Unavailable, message);
+    this.name = "UnavailableError";
+  }
+}
+
+/**
+ * Error thrown when there is an internal server error. Not retryable: the
+ * server also uses it for a write that committed but was not applied, which
+ * must not be resent.
  */
 export class InternalError extends ServerError {
   constructor(message?: string) {
@@ -259,6 +273,8 @@ export function createServerError(
       return new UnauthorizedError(message);
     case StatusCode.Overloaded:
       return new OverloadedError(message);
+    case StatusCode.Unavailable:
+      return new UnavailableError(message);
     case StatusCode.InternalError:
       return new InternalError(message);
     default:
@@ -299,6 +315,13 @@ export function isUnauthorized(err: unknown): err is UnauthorizedError {
  */
 export function isOverloaded(err: unknown): err is OverloadedError {
   return err instanceof ServerError && err.status === StatusCode.Overloaded;
+}
+
+/**
+ * Check if an error is an UnavailableError.
+ */
+export function isUnavailable(err: unknown): err is UnavailableError {
+  return err instanceof ServerError && err.status === StatusCode.Unavailable;
 }
 
 /**

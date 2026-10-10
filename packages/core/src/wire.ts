@@ -346,6 +346,8 @@ export function parseResponseHeader(
   const requestId = view.getBigUint64(8, true);
   const crcValue = view.getUint32(16, true);
   const version = header[20]!;
+  // Not checked against StatusCode: a status this SDK doesn't know still
+  // frames normally, so its body is consumed and surfaces as a ServerError.
   const status = header[21] as StatusCode;
 
   if (version !== VERSION) {

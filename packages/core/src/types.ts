@@ -167,6 +167,7 @@ export const StatusCode = {
   InternalError: 9,
   Overloaded: 10,
   RateLimited: 11, // Request rate limit exceeded (WebSocket)
+  Unavailable: 12, // No leader, or the shard isn't taking writes; retryable
 } as const;
 
 export type StatusCode = (typeof StatusCode)[keyof typeof StatusCode];
@@ -200,8 +201,11 @@ export function statusCodeToString(status: StatusCode): string {
       return "Server overloaded";
     case StatusCode.RateLimited:
       return "Request rate limit exceeded";
+    case StatusCode.Unavailable:
+      return "Unavailable: no leader or the shard isn't taking writes; retry";
     default:
-      return "Unknown error";
+      // A newer server can send a status this SDK predates.
+      return `Unknown status ${status as number}`;
   }
 }
 
