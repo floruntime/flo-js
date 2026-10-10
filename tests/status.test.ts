@@ -10,6 +10,8 @@ import {
   MAGIC,
   OpCode,
   OverloadedError,
+  Ran,
+  Reason,
   ServerError,
   StatusCode,
   UnavailableError,
@@ -26,6 +28,17 @@ import { FloClient } from "@floruntime/node";
 
 const enc = new TextEncoder();
 const UNAVAILABLE_MSG = "shard 3 is offline; an operator must restart it";
+
+/** A refusal's body as the server writes it: [reason:u16][ran:u8][message]. */
+function refusal(message: string, reason: Reason = Reason.Unclassified, ran: Ran = Ran.No): Uint8Array {
+  const text = enc.encode(message);
+  const b = new Uint8Array(3 + text.length);
+  b[0] = reason & 0xff;
+  b[1] = reason >> 8;
+  b[2] = ran;
+  b.set(text, 3);
+  return b;
+}
 
 function response(id: bigint, data: Uint8Array = new Uint8Array(0), status = 0): Uint8Array {
   const buf = new Uint8Array(HEADER_SIZE + data.length);
@@ -52,7 +65,7 @@ function getBody(version: bigint, value: string): Uint8Array {
 
 describe("createServerError", () => {
   it("maps status 12 to UnavailableError carrying the server's message", () => {
-    const err = createServerError(12 as StatusCode, enc.encode(UNAVAILABLE_MSG));
+    const err = createServerError(12 as StatusCode, refusal(UNAVAILABLE_MSG));
     expect(err).toBeInstanceOf(UnavailableError);
     expect(err.status).toBe(StatusCode.Unavailable);
     expect(err.serverMessage).toBe(UNAVAILABLE_MSG);
@@ -61,7 +74,7 @@ describe("createServerError", () => {
   });
 
   it("maps an unknown status to a plain ServerError naming the number and the message", () => {
-    const err = createServerError(200 as StatusCode, enc.encode("from the future"));
+    const err = createServerError(200 as StatusCode, refusal("from the future", Reason.Unclassified, Ran.Unknown));
     expect(err.constructor).toBe(ServerError);
     expect(err.status).toBe(200);
     expect(err.message).toContain("200");
@@ -69,7 +82,7 @@ describe("createServerError", () => {
   });
 
   it("keeps internal_error apart from the retryable statuses", () => {
-    const err = createServerError(StatusCode.InternalError, enc.encode("committed but not applied"));
+    const err = createServerError(StatusCode.InternalError, refusal("committed but not applied", Reason.CommittedNotApplied, Ran.Yes));
     expect(err).toBeInstanceOf(InternalError);
     expect(isInternal(err)).toBe(true);
     expect(isUnavailable(err)).toBe(false);
@@ -102,7 +115,7 @@ describe("a non-ok reply leaves the connection framed for the next one", () => {
         if (ids.length === 2) {
           sock.write(
             Buffer.concat([
-              response(ids[0]!, enc.encode(UNAVAILABLE_MSG), status),
+              response(ids[0]!, refusal(UNAVAILABLE_MSG), status),
               response(ids[1]!, getBody(7n, "v")),
             ])
           );
@@ -135,4 +148,22 @@ describe("a non-ok reply leaves the connection framed for the next one", () => {
     });
   }
 
+});
+
+describe("a refusal's reason and ran", () => {
+  it("reach the caller, and the reason shows in the text when the server gave one", () => {
+    const err = createServerError(StatusCode.InternalError, refusal("do not resend", Reason.CommittedNotApplied, Ran.Yes));
+    expect(err).toBeInstanceOf(InternalError);
+    expect((err as ServerError).reason).toBe(Reason.CommittedNotApplied);
+    expect((err as ServerError).ran).toBe(Ran.Yes);
+    expect(err.message).toContain("/committed_not_applied");
+    const plain = createServerError(StatusCode.BadRequest, refusal("x"));
+    expect(plain.message).not.toContain("unclassified");
+  });
+
+  it("a body that isn't a refusal is refused, not guessed at", () => {
+    for (const body of [new Uint8Array([1, 0]), new Uint8Array([0xff, 0xff, 0]), new Uint8Array([1, 0, 9])]) {
+      expect(createServerError(StatusCode.BadRequest, body)).not.toBeInstanceOf(ServerError);
+    }
+  });
 });
