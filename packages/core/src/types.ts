@@ -450,6 +450,9 @@ export interface MGetEntry {
 export interface Message {
   seq: bigint;
   payload: Uint8Array;
+  enqueuedAtMs: bigint;
+  deliveryCount: number;
+  priority: number;
 }
 
 /**

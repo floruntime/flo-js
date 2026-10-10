@@ -506,6 +506,8 @@ export function parseDequeueResponse(data: Uint8Array): DequeueResult {
   const count = view.getUint32(offset, true);
   offset += 4;
 
+  // Each message: [seq:u64][payload_len:u32][payload]
+  //               [enqueued_at_ms:i64][delivery_count:u32][priority:u8]
   const messages: Message[] = [];
   for (let i = 0; i < count; i++) {
     if (data.length < offset + 12) {
@@ -527,7 +529,15 @@ export function parseDequeueResponse(data: Uint8Array): DequeueResult {
     const payload = data.slice(offset, offset + payloadLen);
     offset += payloadLen;
 
-    messages.push({ seq, payload });
+    if (data.length < offset + 13) {
+      throw new IncompleteResponseError("dequeue response truncated at message trailer");
+    }
+    const enqueuedAtMs = view.getBigInt64(offset, true);
+    const deliveryCount = view.getUint32(offset + 8, true);
+    const priority = view.getUint8(offset + 12);
+    offset += 13;
+
+    messages.push({ seq, payload, enqueuedAtMs, deliveryCount, priority });
   }
 
   return { messages };

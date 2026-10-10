@@ -23,6 +23,7 @@ import {
   parseDequeueResponse,
   parseEnqueueResponse,
   serializeSeqs,
+  IncompleteResponseError,
 } from "@floruntime/core";
 
 describe("Wire Protocol", () => {
@@ -250,22 +251,49 @@ describe("Wire Protocol", () => {
       expect(result.messages).toEqual([]);
     });
 
-    it("should parse dequeue response with messages", () => {
-      // Build response: count=1, message: seq=42, payload="hi"
-      const data = new Uint8Array(18);
+    it("parses every message of a multi-message answer as the server writes it", () => {
+      // [seq:u64][payload_len:u32][payload][enqueued_at_ms:i64][delivery_count:u32][priority:u8]
+      const want = [
+        { seq: 42n, payload: "hi", enqueuedAtMs: 1700000000000n, deliveryCount: 1, priority: 0 },
+        { seq: 43n, payload: "two", enqueuedAtMs: 1700000000005n, deliveryCount: 2, priority: 7 },
+        { seq: 44n, payload: "", enqueuedAtMs: 1700000000009n, deliveryCount: 3, priority: 255 },
+      ];
+      const size = 4 + want.reduce((n, m) => n + 8 + 4 + m.payload.length + 13, 0);
+      const data = new Uint8Array(size);
       const view = new DataView(data.buffer);
-
-      view.setUint32(0, 1, true); // count = 1
-      view.setBigUint64(4, 42n, true); // seq = 42
-      view.setUint32(12, 2, true); // payloadLen = 2
-      data[16] = 104; // 'h'
-      data[17] = 105; // 'i'
+      view.setUint32(0, want.length, true);
+      let at = 4;
+      for (const m of want) {
+        view.setBigUint64(at, m.seq, true);
+        view.setUint32(at + 8, m.payload.length, true);
+        data.set(new TextEncoder().encode(m.payload), at + 12);
+        at += 12 + m.payload.length;
+        view.setBigInt64(at, m.enqueuedAtMs, true);
+        view.setUint32(at + 8, m.deliveryCount, true);
+        view.setUint8(at + 12, m.priority);
+        at += 13;
+      }
 
       const result = parseDequeueResponse(data);
 
-      expect(result.messages.length).toBe(1);
-      expect(result.messages[0]!.seq).toBe(42n);
-      expect(new TextDecoder().decode(result.messages[0]!.payload)).toBe("hi");
+      expect(
+        result.messages.map((m) => ({
+          seq: m.seq,
+          payload: new TextDecoder().decode(m.payload),
+          enqueuedAtMs: m.enqueuedAtMs,
+          deliveryCount: m.deliveryCount,
+          priority: m.priority,
+        }))
+      ).toEqual(want);
+    });
+
+    it("refuses a message whose trailer is cut short", () => {
+      const data = new Uint8Array(4 + 12 + 1 + 12);
+      const view = new DataView(data.buffer);
+      view.setUint32(0, 1, true);
+      view.setBigUint64(4, 1n, true);
+      view.setUint32(12, 1, true);
+      expect(() => parseDequeueResponse(data)).toThrow(IncompleteResponseError);
     });
   });
 
