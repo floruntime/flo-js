@@ -23,6 +23,7 @@ import {
   parseDequeueResponse,
   parseEnqueueResponse,
   serializeSeqs,
+  IncompleteResponseError,
 } from "@floruntime/core";
 
 describe("Wire Protocol", () => {
@@ -292,7 +293,7 @@ describe("Wire Protocol", () => {
       view.setUint32(0, 1, true);
       view.setBigUint64(4, 1n, true);
       view.setUint32(12, 1, true);
-      expect(() => parseDequeueResponse(data)).toThrow();
+      expect(() => parseDequeueResponse(data)).toThrow(IncompleteResponseError);
     });
   });
 
