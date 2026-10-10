@@ -18,18 +18,6 @@ import {
   silentLogger,
 } from "@floruntime/core";
 
-import type { StreamRecord } from "@floruntime/core";
-
-/**
- * Callback for server-pushed stream events.
- */
-export type StreamEventHandler = (streamName: string, record: StreamRecord) => void;
-
-/**
- * Callback for server-pushed messages (subscriptions).
- */
-export type PushMessageHandler = (subscriptionId: number, data: Uint8Array) => void;
-
 /**
  * Callback for disconnect events.
  */
@@ -96,17 +84,11 @@ export class WebSocketTransport implements Transport {
   > = new Map();
 
   // Requests that timed out, and whether each one's reply takes items: their
-  // late replies are dropped, not taken for server pushes.
+  // late replies are dropped.
   private abandonedRequests: Map<bigint, boolean> = new Map();
 
   // Buffer for partial messages
   private receiveBuffer: Uint8Array = new Uint8Array(0);
-
-  // Stream event handlers for server-push notifications
-  private streamEventHandlers: Set<StreamEventHandler> = new Set();
-
-  // Push message handler for subscription notifications
-  private pushMessageHandler: PushMessageHandler | null = null;
 
   // Disconnect handler
   private disconnectHandler: DisconnectHandler | null = null;
@@ -144,28 +126,6 @@ export class WebSocketTransport implements Transport {
    */
   setAuthToken(token: string): void {
     this.authToken = token;
-  }
-
-  /**
-   * Register a handler for server-pushed stream events.
-   */
-  onStreamEvent(handler: StreamEventHandler): void {
-    this.streamEventHandlers.add(handler);
-  }
-
-  /**
-   * Unregister a stream event handler.
-   */
-  offStreamEvent(handler: StreamEventHandler): void {
-    this.streamEventHandlers.delete(handler);
-  }
-
-  /**
-   * Register a handler for push messages (subscription notifications).
-   * The handler receives the subscription ID and raw data payload.
-   */
-  onPushMessage(handler: PushMessageHandler): void {
-    this.pushMessageHandler = handler;
   }
 
   /**
@@ -360,19 +320,6 @@ export class WebSocketTransport implements Transport {
           this.logger.debug(`Dropping reply to request ${requestId}: no longer waited for`);
         }
         this.abandonedRequests.delete(requestId);
-      } else if (this.pushMessageHandler) {
-        // No pending request - this is a server-pushed message (subscription)
-        // The request_id field contains the subscription_id
-        this.logger.debug(`Push received for subscription ${requestId}, crcMatch=${expectedCRC === computedCRC}`);
-        if (expectedCRC === computedCRC) {
-          const subscriptionId = Number(requestId);
-          // Make a copy of the payload
-          const payloadCopy = new Uint8Array(payload.length);
-          payloadCopy.set(payload);
-          this.pushMessageHandler(subscriptionId, payloadCopy);
-        } else {
-          this.logger.warn(`Push CRC mismatch for subscription ${requestId}`);
-        }
       }
     }
   }

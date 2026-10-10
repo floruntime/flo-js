@@ -102,9 +102,7 @@ async function main() {
     console.log(`Enqueued high-priority message with seq: ${seq2}`);
 
     // Dequeue messages
-    const result = await client.queue.dequeue("tasks", 5, {
-      visibilityTimeoutMs: 30000,
-    });
+    const result = await client.queue.dequeue("tasks", 5);
     console.log(`Dequeued ${result.messages.length} messages:`);
 
     for (const msg of result.messages) {
@@ -117,14 +115,6 @@ async function main() {
       await client.queue.ack("tasks", seqs);
       console.log(`Acknowledged ${seqs.length} messages`);
     }
-
-    // Enqueue with delay
-    const seq3 = await client.queue.enqueue(
-      "tasks",
-      textEncoder.encode(JSON.stringify({ task: "delayed-task" })),
-      { delayMs: 5000n } // 5 second delay
-    );
-    console.log(`Enqueued delayed message with seq: ${seq3}`);
 
     */
 

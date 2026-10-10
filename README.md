@@ -126,7 +126,6 @@ interface ScanOptions {
   namespace?: string;
   cursor?: Uint8Array;     // Pagination cursor
   limit?: number;          // Max entries to return
-  keysOnly?: boolean;      // Return only keys, not values
 }
 ```
 
@@ -146,9 +145,7 @@ interface ScanOptions {
 ```typescript
 interface EnqueueOptions {
   namespace?: string;
-  priority?: number;       // Higher = processed first (0-255)
-  delayMs?: bigint;        // Delay before message becomes available
-  dedupKey?: string;       // Deduplication key
+  priority?: number;       // 0-255, lower is taken first; unset is 0, so it goes before any explicit priority
 }
 ```
 
@@ -157,8 +154,7 @@ interface EnqueueOptions {
 ```typescript
 interface DequeueOptions {
   namespace?: string;
-  visibilityTimeoutMs?: number;  // Lease duration in ms
-  blockMs?: number;              // Wait for messages if queue empty (ms; 0 = don't wait, max 300000)
+  blockMs?: number;  // Wait for messages if queue empty (ms; 0 = don't wait, max 300000)
 }
 ```
 
@@ -191,8 +187,7 @@ await client.action.register("process-image", ActionType.User, {
 // Invoke an action
 const result = await client.action.invoke(
   "process-image",
-  encoder.encode(JSON.stringify({ imageUrl: "https://..." })),
-  { priority: 10, idempotencyKey: "order-123" }
+  encoder.encode(JSON.stringify({ imageUrl: "https://..." }))
 );
 console.log(`Run ID: ${result.runId}`);
 

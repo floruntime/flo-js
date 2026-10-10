@@ -2,7 +2,7 @@
  * @floruntime/web - Flo SDK for browser environments
  *
  * This package provides a Flo client optimized for real-time browser applications:
- * - **Streams**: Subscribe to and publish real-time events (pub/sub)
+ * - **Streams**: Append, read and consume via consumer groups
  * - **KV (read-only)**: Access configuration, feature flags, user preferences
  * - **Authentication**: JWT/API key auth during WebSocket upgrade
  *
@@ -21,10 +21,8 @@
  *
  * await client.connect();
  *
- * // Real-time subscriptions
- * await client.streams.subscribe("chat:room-123", (record) => {
- *   console.log("New message:", new TextDecoder().decode(record.payload));
- * });
+ * // Read new records
+ * const { records } = await client.streams.read("chat:room-123", { blockMs: 30000 });
  *
  * // Read config/feature flags
  * const flags = await client.kv.get("config:feature-flags");
@@ -54,9 +52,6 @@ export {
   type StreamReadResult,
   type StreamAppendOptions,
   type StreamReadOptions,
-  type StreamSubscribeOptions,
-  type StreamEventCallback,
-  type StreamSubscription,
   type StreamGroupOptions,
   type StreamAckOptions,
   // KV types (read-only subset)
@@ -74,5 +69,5 @@ export {
 } from "@floruntime/core";
 
 // Web-specific exports
-export { FloClient, type AuthResult } from "./client.js";
-export { WebSocketTransport, AuthenticationError, type WebSocketTransportOptions, type StreamEventHandler } from "./transport.js";
+export { FloClient } from "./client.js";
+export { WebSocketTransport, AuthenticationError, type WebSocketTransportOptions } from "./transport.js";

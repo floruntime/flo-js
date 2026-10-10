@@ -34,13 +34,12 @@ import {
   OptionsBuilder,
   parseTaskAssignment,
   serializeActionInvokeValue,
-  serializeActionListValue,
+  serializeListValue,
   serializeActionRegisterValue,
   serializeWorkerAwaitValue,
   serializeWorkerCompleteValue,
   serializeWorkerFailValue,
   serializeWorkerHeartbeatValue,
-  serializeWorkerListValue,
   serializeWorkerRegisterValue,
   serializeWorkerTouchValue,
 } from "./wire.js";
@@ -180,7 +179,7 @@ export class ActionOperations {
   async list(opts?: ActionListOptions): Promise<ActionListResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
-    const value = serializeActionListValue(opts?.limit ?? 100);
+    const value = serializeListValue(opts?.limit ?? 100);
 
     const resp = await this.sender.sendRequest(
       OpCode.ActionList,
@@ -357,7 +356,7 @@ export class WorkerOperations {
    *
    * @param workerId - Worker identifier
    * @param taskTypes - Task types to listen for
-   * @param opts - Await options (blockMs, timeoutMs)
+   * @param opts - Await options (blockMs)
    * @returns WorkerAwaitResult with task if available
    */
   async awaitTask(
@@ -369,13 +368,9 @@ export class WorkerOperations {
 
     const value = serializeWorkerAwaitValue(taskTypes);
 
-    // Build options for block_ms and timeout_ms
     const optionsBuilder = new OptionsBuilder();
     if (opts?.blockMs !== undefined) {
       optionsBuilder.addU32(OptionTag.BlockMS, opts.blockMs);
-    }
-    if (opts?.timeoutMs !== undefined) {
-      optionsBuilder.addU32(OptionTag.TimeoutMS, opts.timeoutMs);
     }
 
     const resp = await this.sender.sendRequest(
@@ -505,7 +500,7 @@ export class WorkerOperations {
   async list(opts?: WorkerListOptions): Promise<WorkerListResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
-    const value = serializeWorkerListValue(opts?.limit ?? 100);
+    const value = serializeListValue(opts?.limit ?? 100);
 
     const resp = await this.sender.sendRequest(
       OpCode.WorkerList,

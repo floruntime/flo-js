@@ -1,8 +1,7 @@
 /**
  * Stream operations for Flo SDK.
  *
- * Provides pub/sub style streaming for real-time applications.
- * Primary use case: browser clients receiving real-time events.
+ * Append, read and consume streams through consumer groups.
  */
 
 import { createServerError } from "./errors.js";
@@ -19,14 +18,11 @@ import {
   type StreamReadResult,
   type StreamRecord,
   type StreamInfoResult,
-  type StreamSubscribeOptions,
-  type StreamEventCallback,
-  type StreamSubscription,
   type StreamGroupOptions,
   type StreamAckOptions,
   type StreamNackOptions,
 } from "./types.js";
-import { OptionsBuilder } from "./wire.js";
+import { OptionsBuilder, serializeListValue } from "./wire.js";
 
 /**
  * Interface for sending requests (implemented by client).
@@ -41,17 +37,6 @@ export interface StreamRequestSender {
   ): Promise<RawResponse>;
 
   getNamespace(override?: string): string;
-
-  /**
-   * Register a callback for server-pushed stream events.
-   * Used for real-time subscriptions.
-   */
-  onStreamEvent?(callback: (streamName: string, record: StreamRecord) => void): void;
-
-  /**
-   * Unregister stream event callback.
-   */
-  offStreamEvent?(callback: (streamName: string, record: StreamRecord) => void): void;
 }
 
 const textEncoder = new TextEncoder();
@@ -202,32 +187,11 @@ export function parseStreamInfoResponse(data: Uint8Array): StreamInfoResult {
  *
  * Provides real-time event streaming capabilities:
  * - Publish events to streams
- * - Subscribe to stream events (real-time push)
  * - Read historical events
  * - Consumer group support for load balancing
  */
 export class StreamOperations {
-  private subscriptions: Map<string, Set<StreamEventCallback>> = new Map();
-  private subscriptionIds: Map<number, { streamKey: string; callback: StreamEventCallback }> = new Map();
-  private nextSubscriptionId = 1;
-
-  constructor(private readonly sender: StreamRequestSender) {
-    // Register for server-pushed events if supported
-    if (sender.onStreamEvent) {
-      sender.onStreamEvent((streamName, record) => {
-        const callbacks = this.subscriptions.get(streamName);
-        if (callbacks) {
-          for (const callback of callbacks) {
-            try {
-              callback(record);
-            } catch (err) {
-              console.error("[flo] Stream callback error:", err);
-            }
-          }
-        }
-      });
-    }
-  }
+  constructor(private readonly sender: StreamRequestSender) {}
 
   /**
    * Append/publish a record to a stream.
@@ -322,106 +286,6 @@ export class StreamOperations {
     return parseStreamReadResponse(resp.data);
   }
 
-  /**
-   * Subscribe to real-time events from a stream.
-   *
-   * This sends a StreamSubscribe (0x17) request and the server will
-   * push StreamEvent (0x16) messages for new records until unsubscribed.
-   * Requires WebSocket transport.
-   *
-   * @param stream - Stream name to subscribe to
-   * @param callback - Function called for each event
-   * @param opts - Subscribe options
-   */
-  async subscribe(
-    stream: string,
-    callback: StreamEventCallback,
-    opts?: StreamSubscribeOptions
-  ): Promise<StreamSubscription> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-    const streamKey = `${namespace}:${stream}`;
-
-    // Generate subscription ID
-    const subscriptionId = this.nextSubscriptionId++;
-
-    // Register local callback
-    if (!this.subscriptions.has(streamKey)) {
-      this.subscriptions.set(streamKey, new Set());
-    }
-    this.subscriptions.get(streamKey)!.add(callback);
-
-    // Track subscription ID for unsubscribe
-    this.subscriptionIds.set(subscriptionId, { streamKey, callback });
-
-    // Build subscription request
-    const builder = new OptionsBuilder();
-
-    // Tail mode flag (default for subscriptions is tail)
-    if (opts?.tail !== false) {
-      builder.addFlag(OptionTag.StreamTail);
-    }
-
-    // Start StreamID (16 bytes, big-endian)
-    if (opts?.start !== undefined) {
-      builder.addBytes(OptionTag.StreamStart, opts.start.toBytes());
-    }
-
-    // Explicit partition
-    if (opts?.partition !== undefined) {
-      builder.addU32(OptionTag.Partition, opts.partition);
-    }
-
-    // Subscription ID
-    builder.addU64(OptionTag.SubscriptionID, BigInt(subscriptionId));
-
-    // Send StreamSubscribe request
-    const resp = await this.sender.sendRequest(
-      OpCode.StreamSubscribe,
-      namespace,
-      textEncoder.encode(stream),
-      new Uint8Array(0),
-      builder.build()
-    );
-
-    if (resp.status !== StatusCode.OK) {
-      // Clean up on failure
-      this.subscriptions.get(streamKey)?.delete(callback);
-      this.subscriptionIds.delete(subscriptionId);
-      throw createServerError(resp.status, resp.data);
-    }
-
-    return {
-      subscriptionId,
-      unsubscribe: async () => {
-        // Remove local callback
-        const callbacks = this.subscriptions.get(streamKey);
-        if (callbacks) {
-          callbacks.delete(callback);
-          if (callbacks.size === 0) {
-            this.subscriptions.delete(streamKey);
-          }
-        }
-        this.subscriptionIds.delete(subscriptionId);
-
-        // Send StreamUnsubscribe request
-        const unsubBuilder = new OptionsBuilder();
-        unsubBuilder.addU64(OptionTag.SubscriptionID, BigInt(subscriptionId));
-
-        try {
-          await this.sender.sendRequest(
-            OpCode.StreamUnsubscribe,
-            namespace,
-            textEncoder.encode(stream),
-            new Uint8Array(0),
-            unsubBuilder.build()
-          );
-        } catch (err) {
-          // Log but don't throw - unsubscribe is best-effort
-          console.warn("[flo] Unsubscribe failed:", err);
-        }
-      },
-    };
-  }
   /**
    * Get stream metadata.
    *
@@ -639,11 +503,11 @@ export class StreamOperations {
 
   /**
    * Negatively acknowledge records in a consumer group.
-   * Records will be redelivered after the redelivery delay.
+   * The records become available for redelivery.
    *
    * @param stream - Stream name
    * @param ids - StreamIDs to nack
-   * @param opts - Nack options (group, consumer, redeliveryDelayMs)
+   * @param opts - Nack options (group, consumer)
    */
   async groupNack(stream: string, ids: StreamID[], opts: StreamNackOptions): Promise<void> {
     if (ids.length === 0) {
@@ -678,18 +542,12 @@ export class StreamOperations {
       offset += 8;
     }
 
-    // Add redelivery delay via TLV options
-    const builder = new OptionsBuilder();
-    if (opts.redeliveryDelayMs !== undefined) {
-      builder.addU32(OptionTag.RedeliveryDelayMS, opts.redeliveryDelayMs);
-    }
-
     const resp = await this.sender.sendRequest(
       OpCode.StreamGroupNack,
       namespace,
       textEncoder.encode(stream),
       value,
-      builder.build()
+      new Uint8Array(0)
     );
 
     if (resp.status !== StatusCode.OK) {
@@ -740,28 +598,18 @@ export class KVReadOnlyOperations {
    */
   async scan(
     prefix: string,
-    opts?: { namespace?: string; cursor?: Uint8Array; limit?: number; keysOnly?: boolean }
+    opts?: { namespace?: string; cursor?: Uint8Array; limit?: number }
   ): Promise<import("./types.js").ScanResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
-    const builder = new OptionsBuilder();
-
-    if (opts?.limit !== undefined) {
-      builder.addU32(OptionTag.Limit, opts.limit);
-    }
-
-    if (opts?.keysOnly) {
-      builder.addU8(OptionTag.KeysOnly, 1);
-    }
-
-    const value = opts?.cursor ?? new Uint8Array(0);
+    const value = serializeListValue(opts?.limit, opts?.cursor);
 
     const resp = await this.sender.sendRequest(
       OpCode.KVScan,
       namespace,
       textEncoder.encode(prefix),
       value,
-      builder.build()
+      new OptionsBuilder().build()
     );
 
     if (resp.status !== StatusCode.OK) {

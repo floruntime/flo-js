@@ -96,7 +96,7 @@
     <br><br>
     <strong>Note:</strong> The @floruntime/web package is optimized for real-time browser applications:
     <ul style="margin-bottom: 0;">
-      <li><strong>Streams</strong>: Subscribe to and publish real-time events (pub/sub)</li>
+      <li><strong>Streams</strong>: Append and read events</li>
       <li><strong>KV (read-only)</strong>: Access configuration, feature flags, user preferences</li>
     </ul>
   </div>
@@ -116,14 +116,12 @@
   </div>
 
   <div class="section">
-    <h2>Stream Operations (Real-time Events)</h2>
+    <h2>Stream Operations</h2>
     <div class="input-row">
       <input type="text" id="streamName" placeholder="Stream name" value="chat">
       <input type="text" id="streamPayload" placeholder="Message" value="Hello from browser!">
     </div>
     <div class="controls">
-      <button id="subscribeBtn" disabled>Subscribe</button>
-      <button id="unsubscribeBtn" disabled>Unsubscribe</button>
       <button id="publishBtn" disabled>Publish</button>
       <button id="readBtn" disabled>Read History</button>
     </div>
@@ -161,7 +159,6 @@
 
     // State
     let client = null;
-    let subscription = null;
     const decoder = new TextDecoder();
     const encoder = new TextEncoder();
 
@@ -170,8 +167,6 @@
     const status = document.getElementById('status');
     const connectBtn = document.getElementById('connectBtn');
     const disconnectBtn = document.getElementById('disconnectBtn');
-    const subscribeBtn = document.getElementById('subscribeBtn');
-    const unsubscribeBtn = document.getElementById('unsubscribeBtn');
     const publishBtn = document.getElementById('publishBtn');
     const readBtn = document.getElementById('readBtn');
     const getBtn = document.getElementById('getBtn');
@@ -191,8 +186,6 @@
       status.className = `status ${connected ? 'connected' : 'disconnected'}`;
       connectBtn.disabled = connected;
       disconnectBtn.disabled = !connected;
-      subscribeBtn.disabled = !connected;
-      unsubscribeBtn.disabled = !connected || !subscription;
       publishBtn.disabled = !connected;
       readBtn.disabled = !connected;
       getBtn.disabled = !connected;
@@ -218,7 +211,6 @@
         client.onDisconnect((reason) => {
           appendLog(`Connection lost: ${reason || 'unknown reason'}`, 'error');
           setConnected(false);
-          subscription = null;
         });
 
         await client.connect();
@@ -235,50 +227,12 @@
       
       appendLog('Disconnecting...');
       try {
-        if (subscription) {
-          await subscription.unsubscribe();
-          subscription = null;
-        }
         await client.close();
         client = null;
         setConnected(false);
         appendLog('Disconnected', 'success');
       } catch (err) {
         appendLog(`Disconnect error: ${err.message}`, 'error');
-      }
-    });
-
-    subscribeBtn.addEventListener('click', async () => {
-      if (!client) return;
-      
-      const stream = document.getElementById('streamName').value;
-      appendLog(`Subscribing to stream: ${stream}...`);
-
-      try {
-        subscription = await client.streams.subscribe(stream, (record) => {
-          const payload = decoder.decode(record.payload);
-          appendLog(`[seq=${record.seq}] ${payload}`, 'event');
-        });
-        // Options: { offset: 100n } or { from: Date.now() - 3600_000 } or { offset: 0n } for beginning
-
-        appendLog(`Subscribed! subscription_id=${subscription.subscriptionId}`, 'success');
-        unsubscribeBtn.disabled = false;
-      } catch (err) {
-        appendLog(`Subscribe failed: ${err.message}`, 'error');
-      }
-    });
-
-    unsubscribeBtn.addEventListener('click', async () => {
-      if (!subscription) return;
-
-      appendLog(`Unsubscribing from subscription ${subscription.subscriptionId}...`);
-      try {
-        await subscription.unsubscribe();
-        appendLog('Unsubscribed', 'success');
-        subscription = null;
-        unsubscribeBtn.disabled = true;
-      } catch (err) {
-        appendLog(`Unsubscribe failed: ${err.message}`, 'error');
       }
     });
 
@@ -373,7 +327,6 @@
     appendLog('');
     appendLog('Using @floruntime/web for WebSocket communication');
     appendLog('Available operations:');
-    appendLog('  • Subscribe: Real-time push via StreamSubscribe');
     appendLog('  • Publish: Append events to streams');
     appendLog('  • Read: Pull historical events');
     appendLog('  • KV Get/Scan: Read-only key-value access');

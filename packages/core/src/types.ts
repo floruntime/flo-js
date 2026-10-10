@@ -21,11 +21,6 @@ export const MAX_BLOCK_MS = 300_000;
 export const OpCode = {
   // ── System (0x000 – 0x00F) ──
   Ping: 0x000,
-  Pong: 0x001,
-  ErrorResponse: 0x002,
-  Auth: 0x003,
-  SetDurability: 0x004,
-  OK: 0x005,
 
   // ── Namespace (0x010 – 0x02F) ──
   NamespaceCreate: 0x010,
@@ -34,12 +29,6 @@ export const OpCode = {
   NamespaceInfo: 0x013,
   NamespaceConfigSet: 0x014,
   NamespaceConfigGet: 0x015,
-  NamespaceCreateResponse: 0x020,
-  NamespaceDeleteResponse: 0x021,
-  NamespaceListResponse: 0x022,
-  NamespaceInfoResponse: 0x023,
-  NamespaceConfigSetResponse: 0x024,
-  NamespaceConfigGetResponse: 0x025,
 
   // ── Cluster (0x030 – 0x04F) ──
   ClusterStatus: 0x030,
@@ -49,9 +38,6 @@ export const OpCode = {
   ClusterTransferLeader: 0x034,
   ClusterAddNode: 0x035,
   ClusterRemoveNode: 0x036,
-  ClusterStatusResponse: 0x040,
-  ClusterMembersResponse: 0x041,
-  ClusterJoinResponse: 0x042,
 
   // ── KV + Transactions + Snapshots (0x100 – 0x12F) ──
   KVPut: 0x100,
@@ -60,11 +46,6 @@ export const OpCode = {
   KVDelete: 0x103,
   KVScan: 0x104,
   KVHistory: 0x105,
-  KVGetResponse: 0x106,
-  KVMGetResponse: 0x107,
-  KVPutResponse: 0x108,
-  KVScanResponse: 0x109,
-  KVHistoryResponse: 0x10a,
   // KV extended (atomic counters, JSON ops)
   KVIncr: 0x10b,
   KVJsonGet: 0x10c,
@@ -78,27 +59,14 @@ export const OpCode = {
   KVTouch: 0x113,
   KVPersist: 0x114,
   KVExists: 0x115,
-  KVIncrResponse: 0x116,
-  KVJsonResponse: 0x117,
-  KVExistsResponse: 0x118,
-  KVTxnResponse: 0x119,
 
   // ── Streams (0x130 – 0x14F) ──
   StreamAppend: 0x130,
   StreamRead: 0x131,
   StreamTrim: 0x132,
   StreamInfo: 0x133,
-  StreamAppendResponse: 0x134,
-  StreamReadResponse: 0x135,
-  StreamEvent: 0x136,
-  StreamSubscribe: 0x137,
-  StreamUnsubscribe: 0x138,
-  StreamSubscribed: 0x139,
-  StreamUnsubscribed: 0x13a,
   StreamList: 0x13b,
-  StreamListResponse: 0x13c,
   StreamCreate: 0x13d,
-  StreamCreateResponse: 0x13e,
   StreamAlter: 0x13f,
 
   // ── Stream Consumer Groups (0x150 – 0x16F) ──
@@ -110,7 +78,6 @@ export const OpCode = {
   StreamGroupClaim: 0x155,
   StreamGroupPending: 0x156,
   StreamGroupConfigureSweeper: 0x157,
-  StreamGroupReadResponse: 0x158,
   StreamGroupNack: 0x159,
   StreamGroupTouch: 0x15a,
   StreamGroupInfo: 0x15b,
@@ -120,29 +87,14 @@ export const OpCode = {
   QueueEnqueue: 0x170,
   QueueDequeue: 0x171,
   QueueComplete: 0x172,
-  QueueExtendLease: 0x173,
   QueueFail: 0x174,
-  QueueFailAuto: 0x175,
   QueueDLQList: 0x176,
   QueueDLQDelete: 0x177,
   QueueDLQRequeue: 0x178,
-  QueueDLQStats: 0x179,
-  QueuePromoteDue: 0x17a,
   QueueStats: 0x17b,
   QueuePeek: 0x17c,
-  QueueTouch: 0x17d,
-  QueueBatchEnqueue: 0x17e,
   QueuePurge: 0x17f,
-  QueueEnqueueResponse: 0x190,
-  QueueDequeueResponse: 0x191,
-  QueueDLQListResponse: 0x192,
-  QueueStatsResponse: 0x193,
-  QueuePeekResponse: 0x194,
-  QueueTouchResponse: 0x195,
-  QueueBatchEnqueueResponse: 0x196,
-  QueuePurgeResponse: 0x197,
   QueueList: 0x198,
-  QueueListResponse: 0x199,
 
   // ── Time-Series (0x1A0 – 0x1BF) ──
   TSWrite: 0x1a0,
@@ -152,13 +104,6 @@ export const OpCode = {
   TSList: 0x1a4,
   TSDelete: 0x1a5,
   TSRetention: 0x1a6,
-  TSWriteResponse: 0x1a7,
-  TSReadResponse: 0x1a8,
-  TSQueryResponse: 0x1a9,
-  TSFloQLResponse: 0x1aa,
-  TSListResponse: 0x1ab,
-  TSDeleteResponse: 0x1ac,
-  TSRetentionResponse: 0x1ad,
 
   // ── Actions (0x300 – 0x31F) ──
   ActionRegister: 0x300,
@@ -171,12 +116,6 @@ export const OpCode = {
   ActionComplete: 0x307,
   ActionFail: 0x308,
   ActionTouch: 0x309,
-  ActionRegisterResponse: 0x310,
-  ActionInvokeResponse: 0x311,
-  ActionStatusResponse: 0x312,
-  ActionListResponse: 0x313,
-  ActionListRunsResponse: 0x314,
-  ActionTaskAssignment: 0x315,
 
   // ── Workers (0x320 – 0x33F) ──
   WorkerRegister: 0x320,
@@ -185,10 +124,6 @@ export const OpCode = {
   WorkerList: 0x323,
   WorkerInfo: 0x324,
   WorkerDrain: 0x325,
-  WorkerRegisterResponse: 0x330,
-  WorkerListResponse: 0x331,
-  WorkerInfoResponse: 0x332,
-  WorkerDrainResponse: 0x333,
 
   // ── Workflows (0x340 – 0x35F) ──
   WorkflowCreate: 0x340,
@@ -202,15 +137,6 @@ export const OpCode = {
   WorkflowDisable: 0x348,
   WorkflowEnable: 0x349,
   WorkflowListDefinitions: 0x34a,
-  WorkflowCreateResponse: 0x350,
-  WorkflowStartResponse: 0x351,
-  WorkflowStatusResponse: 0x352,
-  WorkflowHistoryResponse: 0x353,
-  WorkflowListRunsResponse: 0x354,
-  WorkflowGetDefinitionResponse: 0x355,
-  WorkflowDisableResponse: 0x356,
-  WorkflowEnableResponse: 0x357,
-  WorkflowListDefinitionsResponse: 0x358,
 
   // ── Processing (0x360 – 0x37F) ──
   ProcessingSubmit: 0x360,
@@ -221,14 +147,6 @@ export const OpCode = {
   ProcessingSavepoint: 0x365,
   ProcessingRestore: 0x366,
   ProcessingRescale: 0x367,
-  ProcessingSubmitResponse: 0x370,
-  ProcessingStopResponse: 0x371,
-  ProcessingCancelResponse: 0x372,
-  ProcessingStatusResponse: 0x373,
-  ProcessingListResponse: 0x374,
-  ProcessingSavepointResponse: 0x375,
-  ProcessingRestoreResponse: 0x376,
-  ProcessingRescaleResponse: 0x377,
 } as const;
 
 export type OpCode = (typeof OpCode)[keyof typeof OpCode];
@@ -296,20 +214,13 @@ export const OptionTag = {
   CASVersion: 0x02, // u64: Expected version for compare-and-swap
   IfNotExists: 0x03, // void: Only set if key doesn't exist (NX)
   IfExists: 0x04, // void: Only set if key exists (XX)
-  Limit: 0x05, // u32: Maximum number of results for scan/list operations
-  KeysOnly: 0x06, // u8: Skip values in scan response (0/1)
-  Cursor: 0x07, // bytes: Pagination cursor (ShardWalker format)
+  Limit: 0x05, // u32: Maximum results for KV history and TS read; list/scan ops take theirs in the value
   RoutingKey: 0x08, // string: Explicit routing key for shard co-location
   TxnID: 0x09, // u64: Transaction ID for per-shard transactions
 
   // Queue Options (0x10 - 0x1F)
-  Priority: 0x10, // u8: Message priority (0-255, higher = more urgent)
-  DelayMS: 0x11, // u64: Delay before message becomes visible
-  VisibilityTimeoutMS: 0x12, // u32: How long message is invisible after dequeue
-  DedupKey: 0x13, // string: Deduplication key
-  MaxRetries: 0x14, // u8: Maximum retry attempts before DLQ
+  Priority: 0x10, // u8: Message priority (0-255, lower is taken first; unset is 0)
   Count: 0x15, // u32: Number of messages to dequeue
-  SendToDLQ: 0x16, // u8: Whether to send failed messages to DLQ (0/1)
   BlockMS: 0x17, // u32: Blocking timeout (0 = don't wait, max 300000)
   WaitMS: 0x18, // u32: Watch timeout - wait for NEXT version change (0 = don't wait, max 300000)
 
@@ -326,27 +237,6 @@ export const OptionTag = {
   // Consumer Group Options (0x30 - 0x3F)
   AckTimeoutMS: 0x30, // u32: Time before unacked message auto-redelivers (overrides default)
   MaxDeliver: 0x31, // u8: Max delivery attempts before DLQ (default: 10, 0=unlimited)
-  SubscriptionMode: 0x32, // u8: 0=shared, 1=exclusive, 2=key_shared
-  RedeliveryDelayMS: 0x33, // u32: Delay before NACK'd message becomes visible again
-  ConsumerTimeoutMS: 0x34, // u32: Remove consumer from group if no activity (session timeout)
-  NoAck: 0x35, // void: Auto-ack on delivery (at-most-once semantics)
-  IdleTimeoutMS: 0x36, // u64: Min idle time for claiming stuck messages (XCLAIM-style)
-  MaxAckPending: 0x37, // u32: Max unacked messages per consumer (backpressure)
-  ExtendAckMS: 0x38, // u32: Amount of time to extend ack deadline (for touch)
-  MaxStandbys: 0x39, // u16: Max standby consumers in exclusive mode (0=singleton, null=unlimited)
-  NumSlots: 0x3a, // u16: Number of hash slots for key_shared mode (default: 256)
-
-  // Worker/Action Options (0x40 - 0x4F)
-  WorkerID: 0x40, // string: Worker identifier
-  ExtendMS: 0x41, // u32: Lease extension time in milliseconds
-  MaxTasks: 0x42, // u32: Maximum tasks to return in batch
-  Retry: 0x43, // u8: Whether to retry on failure (0/1)
-
-  // Workflow Options (0x50 - 0x5F)
-  TimeoutMS: 0x50, // u64: Workflow/activity timeout
-  RetryPolicy: 0x51, // bytes: Serialized retry policy
-  CorrelationID: 0x52, // string: Correlation ID for tracing
-  SubscriptionID: 0x53, // u64: Subscription ID for stream subscriptions
 
   // Time-Series Options (0x60 - 0x6F)
   TSFromMS: 0x60, // i64: Start of time range (inclusive, unix ms)
@@ -355,11 +245,9 @@ export const OptionTag = {
   TSAggregation: 0x63, // string: Aggregation function name (avg, sum, count, min, max)
   TSField: 0x64, // string: Field name filter (empty = "value")
   TSTags: 0x65, // string: Comma-separated tag filters "key=val,key2=val2"
-  TSPrecision: 0x66, // u8: Timestamp precision (0=ns, 1=us, 2=ms, 3=s)
   TSTimestamp: 0x67, // i64: Explicit timestamp for write (0 = server-assigned)
   TSRawTTL: 0x68, // string: Raw data TTL (e.g., "7d")
   TSDownsample: 0x69, // string: Downsample rule (e.g., "1m:avg:30d")
-  TSBatch: 0x6a, // void: Flag indicating batch/line-protocol mode
 } as const;
 
 export type OptionTag = (typeof OptionTag)[keyof typeof OptionTag];
@@ -369,7 +257,7 @@ export type OptionTag = (typeof OptionTag)[keyof typeof OptionTag];
  */
 export interface KVEntry {
   key: Uint8Array;
-  value: Uint8Array | null; // null if keys_only=true
+  value: Uint8Array | null;
 }
 
 /**
@@ -595,34 +483,6 @@ export interface StreamReadOptions {
 }
 
 /**
- * Options for subscribing to a stream.
- */
-export interface StreamSubscribeOptions {
-  namespace?: string;
-  /** Start position (inclusive). If undefined and tail is false, starts from beginning. */
-  start?: StreamID;
-  /** If true, start from end of stream (receive new records only). */
-  tail?: boolean;
-  /** Specific partition to subscribe to (optional). */
-  partition?: number;
-}
-
-/**
- * Callback for stream subscription events.
- */
-export type StreamEventCallback = (record: StreamRecord) => void;
-
-/**
- * Stream subscription handle.
- */
-export interface StreamSubscription {
-  /** Subscription ID (used for tracking/debugging) */
-  subscriptionId: number;
-  /** Unsubscribe from the stream */
-  unsubscribe(): Promise<void>;
-}
-
-/**
  * Options for stream consumer group operations.
  */
 export interface StreamGroupOptions {
@@ -661,8 +521,6 @@ export interface StreamNackOptions {
   group: string;
   /** Consumer ID (required for correct nack matching in multi-consumer groups) */
   consumer: string;
-  /** Delay in milliseconds before message becomes visible again */
-  redeliveryDelayMs?: number;
 }
 
 /**
@@ -711,7 +569,6 @@ export interface ScanOptions {
   namespace?: string;
   cursor?: Uint8Array;
   limit?: number;
-  keysOnly?: boolean;
 }
 
 /**
@@ -770,9 +627,8 @@ export interface KVMGetOptions {
  */
 export interface EnqueueOptions {
   namespace?: string;
+  /** 0-255; lower is taken first. Unset is 0, so it is taken before any explicit priority. */
   priority?: number;
-  delayMs?: bigint;
-  dedupKey?: string;
 }
 
 /**
@@ -780,7 +636,6 @@ export interface EnqueueOptions {
  */
 export interface DequeueOptions {
   namespace?: string;
-  visibilityTimeoutMs?: number;
   /** Wait for messages if the queue is empty, in ms. 0 = don't wait, max 300000. */
   blockMs?: number;
 }
@@ -797,7 +652,6 @@ export interface AckOptions {
  */
 export interface NackOptions {
   namespace?: string;
-  toDlq?: boolean;
 }
 
 /**
@@ -805,7 +659,6 @@ export interface NackOptions {
  */
 export interface DLQListOptions {
   namespace?: string;
-  limit?: number;
 }
 
 /**
@@ -820,14 +673,6 @@ export interface DLQRequeueOptions {
  * Peek reads messages without creating leases (non-consuming read).
  */
 export interface PeekOptions {
-  namespace?: string;
-}
-
-/**
- * Options for queue touch operations.
- * Touch extends the visibility timeout (lease) for in-flight messages.
- */
-export interface TouchOptions {
   namespace?: string;
 }
 
@@ -1135,7 +980,6 @@ export interface WorkerAwaitOptions {
   namespace?: string;
   /** Block waiting for task, in ms. Unset = 30000, 0 = don't wait, max 300000. */
   blockMs?: number;
-  timeoutMs?: number;
 }
 
 /**

@@ -373,15 +373,6 @@ describe("WebSocketTransport", () => {
     expect(idOf(await p)).toBe(1n);
   });
 
-  it("does not hand a timed-out request's late reply to the push handler", async () => {
-    const { t, ws } = await open(30);
-    const pushes: number[] = [];
-    t.onPushMessage((id) => pushes.push(id));
-    await expect(t.sendAndReceive(request(7n))).rejects.toThrow(TimeoutError);
-    ws.reply(7n);
-    expect(pushes).toEqual([]);
-  });
-
   it("warns when it drops a late reply that took items, and only then", async () => {
     vi.stubGlobal("WebSocket", FakeWebSocket);
     const logger = spyLogger();

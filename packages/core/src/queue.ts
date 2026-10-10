@@ -12,7 +12,6 @@ import {
   type EnqueueOptions,
   type NackOptions,
   type PeekOptions,
-  type TouchOptions,
   OpCode,
   OptionTag,
   type RawResponse,
@@ -65,14 +64,6 @@ export class QueueOperations {
       builder.addU8(OptionTag.Priority, opts.priority);
     }
 
-    if (opts?.delayMs !== undefined) {
-      builder.addU64(OptionTag.DelayMS, opts.delayMs);
-    }
-
-    if (opts?.dedupKey !== undefined && opts.dedupKey !== "") {
-      builder.addBytes(OptionTag.DedupKey, textEncoder.encode(opts.dedupKey));
-    }
-
     const resp = await this.sender.sendRequest(
       OpCode.QueueEnqueue,
       namespace,
@@ -100,10 +91,6 @@ export class QueueOperations {
 
     const builder = new OptionsBuilder();
     builder.addU32(OptionTag.Count, count);
-
-    if (opts?.visibilityTimeoutMs !== undefined) {
-      builder.addU32(OptionTag.VisibilityTimeoutMS, opts.visibilityTimeoutMs);
-    }
 
     if (opts?.blockMs !== undefined) {
       builder.addU32(OptionTag.BlockMS, opts.blockMs);
@@ -149,7 +136,9 @@ export class QueueOperations {
   }
 
   /**
-   * Nack negative acknowledges messages (retry or send to DLQ).
+   * Nack negatively acknowledges messages. Queues are at-most-once today:
+   * a dequeue consumes its messages, so a nack doesn't redeliver them
+   * (tracked in floruntime/flo#179).
    */
   async nack(queue: string, seqs: bigint[], opts?: NackOptions): Promise<void> {
     if (seqs.length === 0) {
@@ -157,13 +146,6 @@ export class QueueOperations {
     }
 
     const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const builder = new OptionsBuilder();
-
-    if (opts?.toDlq) {
-      builder.addU8(OptionTag.SendToDLQ, 1);
-    }
-
     const value = serializeSeqs(seqs);
 
     const resp = await this.sender.sendRequest(
@@ -171,7 +153,7 @@ export class QueueOperations {
       namespace,
       textEncoder.encode(queue),
       value,
-      builder.build()
+      new Uint8Array(0)
     );
 
     if (resp.status !== StatusCode.OK) {
@@ -184,17 +166,13 @@ export class QueueOperations {
    */
   async dlqList(queue: string, opts?: DLQListOptions): Promise<DequeueResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-    const limit = opts?.limit ?? 100;
-
-    const builder = new OptionsBuilder();
-    builder.addU32(OptionTag.Limit, limit);
 
     const resp = await this.sender.sendRequest(
       OpCode.QueueDLQList,
       namespace,
       textEncoder.encode(queue),
       new Uint8Array(0),
-      builder.build()
+      new OptionsBuilder().build()
     );
 
     if (resp.status !== StatusCode.OK) {
@@ -264,39 +242,5 @@ export class QueueOperations {
     }
 
     return parseDequeueResponse(resp.data);
-  }
-
-  /**
-   * Touch extends the visibility timeout (lease) for in-flight messages.
-   * Call this to prevent messages from being redelivered while still processing.
-   * Also known as "renew lease" or "extend lease".
-   *
-   * @param queue - Queue name
-   * @param seqs - Sequence numbers of messages to touch
-   * @param opts - Options
-   */
-  async touch(
-    queue: string,
-    seqs: bigint[],
-    opts?: TouchOptions
-  ): Promise<void> {
-    if (seqs.length === 0) {
-      return;
-    }
-
-    const namespace = this.sender.getNamespace(opts?.namespace);
-    const value = serializeSeqs(seqs);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.QueueTouch,
-      namespace,
-      textEncoder.encode(queue),
-      value,
-      new Uint8Array(0)
-    );
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
   }
 }

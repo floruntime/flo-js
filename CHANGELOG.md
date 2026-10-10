@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replies are routed to their request by request id, so concurrent requests on one connection are safe.
 - When the server cannot parse a request, every request in flight on that connection fails with the server's error.
 - KV TTLs are in milliseconds, as the server reads them: `PutOptions.ttlSeconds` is now `ttlMs`, `OptionTag.TTLSeconds` is now `OptionTag.TTLMs`, and `kv.touch` and a transaction's `touch` take milliseconds (0 clears the TTL).
+- List and scan requests carry their limit and cursor in the value as `[limit:u32][cursor]`; the web client's `kv.scan` sent them as an option and a bare cursor.
+- `kv.scan` reads the server's reply layout, `[count][entries][has_more:u8][cursor_len:u16][cursor]`; it parsed a header-first layout the server never sent.
+
+### Removed
+
+Opcodes and options the server never serves:
+
+- `queue.touch` and `TouchOptions`; `EnqueueOptions.delayMs` and `dedupKey`; `DequeueOptions.visibilityTimeoutMs`; `NackOptions.toDlq`.
+- `StreamNackOptions.redeliveryDelayMs`; `WorkerAwaitOptions.timeoutMs`.
+- The web client's `authenticate()` and `AuthResult`, `streams.subscribe()` and its types (`StreamSubscribeOptions`, `StreamEventCallback`, `StreamSubscription`, `StreamEventHandler`), and the transport's push handling.
+- Every `*Response` opcode (a reply header has no opcode), the unhandled opcodes (`Pong`, `Auth`, `SetDurability`, `OK`, stream subscribe/event, `QueueExtendLease`, `QueueFailAuto`, `QueueDLQStats`, `QueuePromoteDue`, `QueueTouch`, `QueueBatchEnqueue`, `ActionTaskAssignment`), and the option tags the server does not read.
+- `serializeActionListValue` and `serializeWorkerListValue`, replaced by `serializeListValue(limit, cursor)`.
 
 ## [0.1.0-dev.4] - 2026-05-04
 
