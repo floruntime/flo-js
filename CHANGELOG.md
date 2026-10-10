@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `ActionWorker` and `StreamWorker` reconnect after the connection drops (retrying 1 s apart, doubling to 30 s, until `stop()`), then register again (`ActionWorker`) or rejoin the group (`StreamWorker`) before polling. They used to retry on the dead connection forever. The lost connection and each failed attempt are logged at warn.
+
 ### Changed
 
 - Requests carry the op table hash (`TABLE_HASH`) under protocol version 2. An answer from a server built from another protocol version or table throws `TableMismatchError`, naming both tables, before its body is read, and the connection is closed. `UnsupportedVersionError` is gone.
