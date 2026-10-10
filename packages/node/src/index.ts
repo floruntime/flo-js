@@ -16,9 +16,7 @@ export {
   ActionResult,
   TimeoutError,
   NonRetryableError,
-  Worker,
   type ActionWorkerConfig,
-  type WorkerConfig,
   type ActionHandler,
 } from "./action-worker.js";
 export {

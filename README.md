@@ -184,10 +184,12 @@ await client.action.register("process-image", ActionType.User, {
   maxRetries: 3,
 });
 
-// Invoke an action
+// Invoke an action. `labels` (a JSON object) is optional: only workers whose
+// registered labels contain every key/value receive the run.
 const result = await client.action.invoke(
   "process-image",
-  encoder.encode(JSON.stringify({ imageUrl: "https://..." }))
+  encoder.encode(JSON.stringify({ imageUrl: "https://..." })),
+  { labels: JSON.stringify({ gpu: true }) }
 );
 console.log(`Run ID: ${result.runId}`);
 

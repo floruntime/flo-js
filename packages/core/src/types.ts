@@ -838,8 +838,11 @@ export interface ActionRegisterOptions {
  */
 export interface ActionInvokeOptions {
   namespace?: string;
-  priority?: number;
-  idempotencyKey?: string;
+  /**
+   * Required worker labels as a JSON object string, e.g. '{"gpu":true}'.
+   * Only workers whose registered labels contain every key/value receive the run.
+   */
+  labels?: string;
 }
 
 /**
