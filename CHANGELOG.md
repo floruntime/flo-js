@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Every refusal's body is `[reason:u16][ran:u8][message]`. `ServerError` gains `.reason` (`Reason`) and `.ran` (`Ran`): whether the request took effect, so retry logic reads a field, not the message. Its message names the reason when the server gave one. A body that isn't a refusal is an `IncompleteResponseError`.
 - Requests carry the op table hash (`TABLE_HASH`) under protocol version 2. An answer from a server built from another protocol version or table throws `TableMismatchError`, naming both tables, before its body is read, and the connection is closed. `UnsupportedVersionError` is gone.
 - Workers back off (50 ms, doubling to 1 s) when blocking polls keep coming back empty at once.
 - `blockMs: 0` now means don't wait, as on the server. An `ActionWorker` or `StreamWorker` given 0 or nothing uses 30000.

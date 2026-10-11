@@ -2,7 +2,7 @@
  * Flo SDK error types.
  */
 
-import { StatusCode, statusCodeToString, TABLE_HASH, VERSION } from "./types.js";
+import { Ran, Reason, reasonName, StatusCode, statusCodeToString, TABLE_HASH, VERSION } from "./types.js";
 
 /**
  * Base error class for Flo SDK errors.
@@ -171,6 +171,10 @@ export class TimeoutError extends FloError {
 export class ServerError extends FloError {
   readonly status: StatusCode;
   readonly serverMessage: string;
+  /** Why; `Reason.Unclassified` when the server didn't say. */
+  reason: Reason = Reason.Unclassified;
+  /** Whether the request took effect. */
+  ran: Ran = Ran.No;
 
   constructor(status: StatusCode, message?: string) {
     const statusStr = statusCodeToString(status);
@@ -272,9 +276,27 @@ export class InternalError extends ServerError {
 export function createServerError(
   status: StatusCode,
   data?: Uint8Array
-): ServerError {
-  const message = data && data.length > 0 ? new TextDecoder().decode(data) : "";
+): FloError {
+  // A refusal's body: [reason:u16][ran:u8][message].
+  if (!data || data.length < 3) {
+    return new IncompleteResponseError(`a refusal body of ${data?.length ?? 0} bytes`);
+  }
+  const reason = data[0]! | (data[1]! << 8);
+  const ran = data[2]!;
+  if (!(reason in Reason) || !(ran in Ran)) {
+    return new IncompleteResponseError(`a refusal with reason ${reason} and ran ${ran}`);
+  }
+  const err = serverErrorFor(status, new TextDecoder().decode(data.subarray(3)));
+  err.reason = reason as Reason;
+  err.ran = ran as Ran;
+  if (err.reason !== Reason.Unclassified) {
+    const codes = `${statusCodeToString(status)}/${reasonName(err.reason)}`;
+    err.message = err.serverMessage ? `flo: server error (${codes}): ${err.serverMessage}` : `flo: server error: ${codes}`;
+  }
+  return err;
+}
 
+function serverErrorFor(status: StatusCode, message: string): ServerError {
   switch (status) {
     case StatusCode.NotFound:
       return new NotFoundError(message);
