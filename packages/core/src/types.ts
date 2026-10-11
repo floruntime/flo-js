@@ -10,7 +10,56 @@ export const VERSION = 0x02;
  * request header. A server built from another table refuses the request,
  * and its answers carry its own hash, which this SDK refuses.
  */
-export const TABLE_HASH = 0x4e9243eeab771a02n;
+export const TABLE_HASH = 0x2827f6f0631754fen;
+
+/**
+ * Why the server refused a request. Mirrors the server's list; the table
+ * hash covers it, so a server can't send one this SDK doesn't know.
+ */
+export enum Reason {
+  UnknownOp = 1,
+  Malformed = 2,
+  FieldTooLong = 3,
+  OutOfRange = 4,
+  LeaderUnknown = 5,
+  ShardBusy = 6,
+  TableMismatch = 7,
+  UnknownFlag = 8,
+  Internal = 9,
+  CommittedNotApplied = 10,
+  AnswerLost = 11,
+  /** A refusal from an op family the server hasn't classified yet. */
+  Unclassified = 12,
+}
+
+/** Whether a refused request took effect: retry logic reads this, not the message. */
+export enum Ran {
+  No = 0,
+  /** It took effect; don't resend it. */
+  Yes = 1,
+  /** It may still take effect; check before resending. */
+  Unknown = 2,
+}
+
+const REASON_NAMES: Record<Reason, string> = {
+  [Reason.UnknownOp]: "unknown_op",
+  [Reason.Malformed]: "malformed",
+  [Reason.FieldTooLong]: "field_too_long",
+  [Reason.OutOfRange]: "out_of_range",
+  [Reason.LeaderUnknown]: "leader_unknown",
+  [Reason.ShardBusy]: "shard_busy",
+  [Reason.TableMismatch]: "table_mismatch",
+  [Reason.UnknownFlag]: "unknown_flag",
+  [Reason.Internal]: "internal",
+  [Reason.CommittedNotApplied]: "committed_not_applied",
+  [Reason.AnswerLost]: "answer_lost",
+  [Reason.Unclassified]: "unclassified",
+};
+
+/** The server's name for a reason, as it appears in messages. */
+export function reasonName(r: Reason): string {
+  return REASON_NAMES[r];
+}
 export const HEADER_SIZE = 32;
 
 // Size limits (for client-side validation)

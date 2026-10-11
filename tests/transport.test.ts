@@ -13,6 +13,8 @@ import {
   TimeoutError,
   BadRequestError,
   FloError,
+  Ran,
+  Reason,
   InvalidChecksumError,
   InvalidMagicError,
   UnexpectedEOFError,
@@ -33,6 +35,17 @@ function request(id: bigint, blockMs?: number): Uint8Array {
   const opts = new OptionsBuilder().addU32(OptionTag.Count, 1);
   if (blockMs !== undefined) opts.addU32(OptionTag.BlockMS, blockMs);
   return serializeRequest(id, OpCode.QueueDequeue, enc.encode("ns"), enc.encode("q"), new Uint8Array(0), opts.build());
+}
+
+/** A refusal's body as the server writes it: [reason:u16][ran:u8][message]. */
+function refusal(message: string, reason: Reason = Reason.Unclassified, ran: Ran = Ran.No): Uint8Array {
+  const text = enc.encode(message);
+  const b = new Uint8Array(3 + text.length);
+  b[0] = reason & 0xff;
+  b[1] = reason >> 8;
+  b[2] = ran;
+  b.set(text, 3);
+  return b;
 }
 
 function response(id: bigint, data: Uint8Array = new Uint8Array(0), status = 0): Uint8Array {
@@ -286,7 +299,7 @@ describe("TcpTransport framing and failures", () => {
   it("fails waiting requests with the server's error for a request it could not parse", async () => {
     let seen = 0;
     const t = await connect((sock) => {
-      if (++seen === 2) sock.end(response(0n, enc.encode("Invalid request"), 3));
+      if (++seen === 2) sock.end(response(0n, refusal("Invalid request", Reason.Malformed), 3));
     });
     const results = await Promise.allSettled([t.sendAndReceive(request(1n)), t.sendAndReceive(request(2n))]);
     for (const r of results) {
