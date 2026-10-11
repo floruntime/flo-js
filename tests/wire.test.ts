@@ -137,7 +137,7 @@ describe("Wire Protocol", () => {
 
       // Version, then the pinned table hash at 24-31
       expect(request[22]).toBe(VERSION);
-      expect(view.getBigUint64(24, true)).toBe(0x2827f6f0631754fen);
+      expect(view.getBigUint64(24, true)).toBe(0x28d9c77cf6f88fd5n);
     });
 
     it("should include namespace in payload", () => {
@@ -366,26 +366,28 @@ describe("Wire Protocol", () => {
   describe("KV TTL", () => {
     const ok: RawResponse = { status: StatusCode.OK, data: new Uint8Array(), requestId: 0n };
 
-    function capture() {
+    function capture(answer: RawResponse = ok) {
       const sent: { value?: Uint8Array; options?: Uint8Array } = {};
       const sender: KVRequestSender = {
         getNamespace: (ns) => ns ?? "default",
         sendRequest: async (_op, _ns, _key, value, options) => {
           sent.value = value;
           sent.options = options;
-          return ok;
+          return answer;
         },
       };
       return { sender, sent };
     }
 
-    it("encodes put ttlMs as option 0x01 with an 8-byte millisecond value", async () => {
-      const { sender, sent } = capture();
-      await new KVOperations(sender).put("k", new Uint8Array([1]), { ttlMs: 90_000n });
-      // 90000 = 0x015F90, little-endian u64
-      expect(sent.options).toEqual(
-        new Uint8Array([0x01, 8, 0x90, 0x5f, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00])
+    it("encodes put ttlMs as kv.set's ttl_ms field: present, then a u64 of milliseconds", async () => {
+      const { sender, sent } = capture({ status: StatusCode.OK, data: new Uint8Array([1, 3, 0, 0, 0, 0, 0, 0, 0]), requestId: 0n });
+      const r = await new KVOperations(sender).put("k", new Uint8Array([1]), { ttlMs: 90_000n });
+      expect(r.version).toBe(3n);
+      // value [len:u32][1], ttl_ms present 90000, condition always, no cas, routing key or txn
+      expect(sent.value).toEqual(
+        new Uint8Array([1, 0, 0, 0, 1, 1, 0x90, 0x5f, 0x01, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0])
       );
+      expect(sent.options).toEqual(new Uint8Array(0));
     });
 
     it("encodes touch's value as an 8-byte u64 LE of milliseconds", async () => {

@@ -55,11 +55,14 @@ function response(id: bigint, data: Uint8Array = new Uint8Array(0), status = 0):
 }
 
 /** A KV get reply body: [version:u64 LE][value]. */
+/** A kv.get answer: [version:u64][value_len:u32][value]. */
 function getBody(version: bigint, value: string): Uint8Array {
   const v = enc.encode(value);
-  const buf = new Uint8Array(8 + v.length);
-  new DataView(buf.buffer).setBigUint64(0, version, true);
-  buf.set(v, 8);
+  const buf = new Uint8Array(12 + v.length);
+  const view = new DataView(buf.buffer);
+  view.setBigUint64(0, version, true);
+  view.setUint32(8, v.length, true);
+  buf.set(v, 12);
   return buf;
 }
 
