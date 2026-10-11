@@ -162,7 +162,8 @@ describe("a refusal's reason and ran", () => {
   });
 
   it("a body that isn't a refusal is refused, not guessed at", () => {
-    for (const body of [new Uint8Array([1, 0]), new Uint8Array([0xff, 0xff, 0]), new Uint8Array([1, 0, 9])]) {
+    // [0x01, 0x01] is reason 257: read as a byte it would pass as unknown_op.
+    for (const body of [new Uint8Array([1, 0]), new Uint8Array([0xff, 0xff, 0]), new Uint8Array([1, 0, 9]), new Uint8Array([1, 1, 0])]) {
       expect(createServerError(StatusCode.BadRequest, body)).not.toBeInstanceOf(ServerError);
     }
   });
