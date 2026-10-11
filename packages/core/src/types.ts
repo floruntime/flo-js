@@ -10,7 +10,7 @@ export const VERSION = 0x02;
  * request header. A server built from another table refuses the request,
  * and its answers carry its own hash, which this SDK refuses.
  */
-export const TABLE_HASH = 0x28d9c77cf6f88fd5n;
+export const TABLE_HASH = 0x02e15ee74c0ad72cn;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -41,7 +41,7 @@ export enum Reason {
   /** No open transaction has this id here. */
   NoSuchTransaction = 17,
   /** The routing key (the key, when none is given) isn't the one the transaction was begun with. */
-  TxnRoutingKey = 18,
+  WrongRoutingKey = 18,
   /** The transaction holds as many ops or bytes as it may. */
   TxnTooLarge = 19,
   /** The shard holds as many waiting reads as it may. */
@@ -81,7 +81,7 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.CasMismatch]: "cas_mismatch",
   [Reason.ConditionFailed]: "condition_failed",
   [Reason.NoSuchTransaction]: "no_such_transaction",
-  [Reason.TxnRoutingKey]: "txn_routing_key",
+  [Reason.WrongRoutingKey]: "wrong_routing_key",
   [Reason.TxnTooLarge]: "txn_too_large",
   [Reason.TooManyWaiters]: "too_many_waiters",
   [Reason.ConflictingFields]: "conflicting_fields",
