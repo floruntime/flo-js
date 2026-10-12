@@ -41,8 +41,12 @@ export const MAX_JSON_DOCUMENT = 252_819;
 const MAX_SCAN_CURSOR = 64;
 /** The longest key in a kv.mget. */
 export const MAX_MGET_KEY = 4096;
-/** The longest kv.mget body that fits one request frame. */
-export const MAX_MGET_BODY = 257_949;
+/**
+ * The most bytes a kv.mget request's key elements (each u16 length + key)
+ * may total: what fits one request frame after the count and the largest
+ * routing key.
+ */
+export const MAX_MGET_KEYS_BYTES = 253_848;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -275,15 +279,16 @@ export function encodeHistoryBody(limit: number, opts?: { routingKey?: string })
  * Split mget's keys into runs whose bodies each fit one request frame;
  * returns each run's end index. Refuses a bad key list.
  */
-export function splitMGetKeys(keys: readonly Uint8Array[]): number[] {
+export function splitMGetKeys(keys: readonly Uint8Array[], routingKey?: string): number[] {
   if (keys.length === 0 || keys.length > MAX_MGET_KEYS) throw new FloError(`flo: mget takes 1 to ${MAX_MGET_KEYS} keys, got ${keys.length}`);
+  new BodyWriter().routingKey(routingKey); // refuses one too long
   const ends: number[] = [];
-  let size = 2;
+  let size = 0;
   keys.forEach((k, i) => {
     if (k.length > MAX_MGET_KEY) throw new FloError(`flo: mget key is ${k.length} bytes, at most ${MAX_MGET_KEY}`);
-    if (size + 2 + k.length > MAX_MGET_BODY) {
+    if (size + 2 + k.length > MAX_MGET_KEYS_BYTES) {
       ends.push(i);
-      size = 2;
+      size = 0;
     }
     size += 2 + k.length;
   });
@@ -291,8 +296,8 @@ export function splitMGetKeys(keys: readonly Uint8Array[]): number[] {
   return ends;
 }
 
-/** kv.mget's request: the keys, 1 to 256. */
-export function encodeMGetBody(keys: readonly Uint8Array[]): Uint8Array {
+/** kv.mget's request: the keys (1 to 256), routing_key for the whole batch. */
+export function encodeMGetBody(keys: readonly Uint8Array[], routingKey?: string): Uint8Array {
   if (keys.length === 0 || keys.length > MAX_MGET_KEYS) throw new FloError(`flo: mget takes 1 to ${MAX_MGET_KEYS} keys, got ${keys.length}`);
   const w = new BodyWriter();
   w.u16(keys.length);
@@ -300,6 +305,7 @@ export function encodeMGetBody(keys: readonly Uint8Array[]): Uint8Array {
     if (k.length > MAX_MGET_KEY) throw new FloError(`flo: mget key is ${k.length} bytes, at most ${MAX_MGET_KEY}`);
     w.bytes16(k);
   }
+  w.routingKey(routingKey);
   return w.build();
 }
 

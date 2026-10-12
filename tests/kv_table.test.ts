@@ -12,7 +12,7 @@ import {
   MAX_HISTORY_LIMIT,
   MAX_JSON_DOCUMENT,
   MAX_KV_VALUE_SIZE,
-  MAX_MGET_BODY,
+  MAX_MGET_KEYS_BYTES,
   MAX_MGET_KEY,
   MAX_SCAN_LIMIT,
   MAX_TTL_MS,
@@ -216,7 +216,16 @@ describe("request bodies match the server's vectors", () => {
       { key: "a", found: true, version: 2n, value: enc.encode("x") },
       { key: "b", found: false, version: 0n, value: new Uint8Array(0) },
     ]);
-    expect(sent[0]).toEqual({ op: OpCode.KVMGet, key: "", value: hex("0200010061010062"), options: new Uint8Array(0) });
+    expect(sent[0]).toEqual({ op: OpCode.KVMGet, key: "", value: hex("020001006101006200"), options: new Uint8Array(0) });
+  });
+
+  it("mget with a routing key", async () => {
+    const { s, sent } = seq(ok("0100" + "00" + "00".repeat(12) + "00"));
+    await new KVOperations(s).mget(["a"], { routingKey: "rk" });
+    expect(sent[0]!.value).toEqual(hex("0100010061" + "010200726b"));
+    const both = seq(ok("0200" + ("00" + "00".repeat(12)).repeat(2) + "00"));
+    await new KVOperations(both.s).mget(["a", "b"], { routingKey: "rk" });
+    expect(both.sent[0]!.value).toEqual(hex("0200010061010062" + "01" + "0200" + "726b"));
   });
 });
 
@@ -265,22 +274,25 @@ describe("kv.mget", () => {
       ["c", true, 3n],
     ]);
     expect(sent).toHaveLength(2);
-    expect(sent[0]!.value).toEqual(hex("030001006101006201006" + "3"));
-    expect(sent[1]!.value).toEqual(hex("0100010063"));
+    expect(sent[0]!.value).toEqual(hex("03000100610100620100" + "63" + "00"));
+    expect(sent[1]!.value).toEqual(hex("010001006300"));
   });
 
   it("splits keys across requests so each body fits the frame, following next within each", async () => {
     const keys = Array.from({ length: 200 }, (_, i) => `${i}`.padStart(2000, "k"));
-    const perRequest = Math.floor((MAX_MGET_BODY - 2) / 2002); // 128 keys of 2000 bytes
+    const perRequest = Math.floor(MAX_MGET_KEYS_BYTES / 2002);
+    expect(perRequest).toBe(126);
     const entry = "01" + "00".repeat(12); // found, version 0, empty value
     const answer = (n: number, next: number | null) =>
       ok(n.toString(16).padStart(2, "0") + "00" + entry.repeat(n) + (next === null ? "00" : "01" + next.toString(16).padStart(2, "0") + "00"));
     // The first request's answer fills up after 100 keys.
     const { s, sent } = seq(answer(100, 100), answer(perRequest - 100, null), answer(200 - perRequest, null));
-    const got = await new KVOperations(s).mget(keys);
+    const got = await new KVOperations(s).mget(keys, { routingKey: "rk" });
     expect(got.map((e) => e.key)).toEqual(keys);
+    // Every request of the split carries the routing key, after the keys.
+    for (const x of sent) expect(x.value.subarray(-5)).toEqual(hex("010200726b"));
     expect(sent.map((x) => new DataView(x.value.buffer).getUint16(0, true))).toEqual([perRequest, perRequest - 100, 200 - perRequest]);
-    for (const x of sent) expect(x.value.length).toBeLessThanOrEqual(MAX_MGET_BODY);
+    for (const x of sent) expect(x.value.length - 2 - 5).toBeLessThanOrEqual(MAX_MGET_KEYS_BYTES);
     expect(new TextDecoder().decode(sent[1]!.value.subarray(4, 4 + 2000))).toBe(keys[100]);
     expect(new TextDecoder().decode(sent[2]!.value.subarray(4, 4 + 2000))).toBe(keys[perRequest]);
   });
@@ -335,6 +347,7 @@ describe("bounds are refused before a round trip", () => {
   const refused: [string, (kv: KVOperations) => Promise<unknown>][] = [
     ["mget of 257 keys", (kv) => kv.mget(Array.from({ length: 257 }, (_, i) => `k${i}`))],
     ["an mget key over 4096 bytes", (kv) => kv.mget(["a", "k".repeat(MAX_MGET_KEY + 1)])],
+    ["an mget routing key over 4096 bytes", (kv) => kv.mget(["a"], { routingKey: "r".repeat(4097) })],
     ["scan limit 0", (kv) => kv.scan("", { limit: 0 })],
     ["scan limit 1025", (kv) => kv.scan("", { limit: MAX_SCAN_LIMIT + 1 })],
     ["scan cursor of 65 bytes", (kv) => kv.scan("", { cursor: new Uint8Array(65) })],

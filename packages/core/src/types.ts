@@ -12,7 +12,7 @@ export const VERSION = 0x02;
  * request header. A server built from another table refuses the request,
  * and its answers carry its own hash, which this SDK refuses.
  */
-export const TABLE_HASH = 0x5194dd26f737dba9n;
+export const TABLE_HASH = 0xc8a2c3c65e95d11dn;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -738,6 +738,11 @@ export interface KVJsonOptions {
  */
 export interface KVMGetOptions {
   namespace?: string;
+  /**
+   * The routing key every key was written with: all are looked up on its
+   * shard. Unset, each key is looked up on its own shard.
+   */
+  routingKey?: string;
 }
 
 /**
