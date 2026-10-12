@@ -138,20 +138,12 @@ async function scriptedServer(
 }
 
 describe("requestBlockMs", () => {
-  it("reads BlockMS or WaitMS from a serialized request", () => {
+  it("reads BlockMS from a serialized request, and a kv.get's wait_ms from its body", () => {
     expect(requestBlockMs(request(1n))).toBe(0);
     expect(requestBlockMs(request(1n, 30000))).toBe(30000);
-    const watch = serializeRequest(1n, OpCode.Get, enc.encode("ns"), enc.encode("k"), new Uint8Array(0),
-      new OptionsBuilder().addU32(OptionTag.WaitMS, 1234).build());
+    const body = new Uint8Array([1, 0xd2, 0x04, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0]); // wait_ms 1234, change
+    const watch = serializeRequest(1n, OpCode.KVGet, enc.encode("ns"), enc.encode("k"), body, new Uint8Array(0));
     expect(requestBlockMs(watch)).toBe(1234);
-  });
-
-  it("takes the larger of BlockMS and WaitMS, in either order", () => {
-    const both = (first: number, second: number) =>
-      serializeRequest(1n, OpCode.Get, enc.encode("ns"), enc.encode("k"), new Uint8Array(0),
-        new OptionsBuilder().addU32(first, 2000).addU32(second, 1000).build());
-    expect(requestBlockMs(both(OptionTag.BlockMS, OptionTag.WaitMS))).toBe(2000);
-    expect(requestBlockMs(both(OptionTag.WaitMS, OptionTag.BlockMS))).toBe(2000);
   });
 
   it("counts an await with no BlockMS as the server's 30000 default", () => {

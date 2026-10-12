@@ -31,6 +31,7 @@ import {
   TABLE_HASH,
   type VersionEntry,
 } from "./types.js";
+import { isTableOp } from "./kv_body.js";
 
 /**
  * CRC32 lookup table (IEEE polynomial).
@@ -101,8 +102,8 @@ export function workerBlockMs(blockMs: number | undefined): number {
 }
 
 /**
- * How long the server may hold a serialized request before answering: its
- * BlockMS or WaitMS option, the larger if both are set; else 30000 for an
+ * How long the server may hold a serialized request before answering: a
+ * kv.get's wait_ms, or its BlockMS option; else 30000 for an
  * action await, which the server holds that long by default; else 0.
  * Transports add this to their timeout so a long poll is not cut off
  * client-side while the server is still waiting.
@@ -116,6 +117,11 @@ export function requestBlockMs(request: Uint8Array): number {
   off += 2 + view.getUint16(off, true); // namespace
   if (request.length < off + 2) return 0;
   off += 2 + view.getUint16(off, true); // key
+  if (view.getUint16(20, true) === OpCode.KVGet) {
+    // kv.get's body opens with wait_ms: [present:u8][u64].
+    if (request.length < off + 9 || request[off] !== 1) return 0;
+    return Number(view.getBigUint64(off + 1, true));
+  }
   if (request.length < off + 4) return 0;
   off += 4 + view.getUint32(off, true); // value
   if (request.length < off + 2) return 0;
@@ -127,8 +133,8 @@ export function requestBlockMs(request: Uint8Array): number {
     const len = request[off + 1]!;
     off += 2;
     if (off + len > end) break;
-    if ((tag === OptionTag.BlockMS || tag === OptionTag.WaitMS) && len === 4) {
-      blockMs = Math.max(blockMs ?? 0, view.getUint32(off, true));
+    if (tag === OptionTag.BlockMS && len === 4) {
+      blockMs = view.getUint32(off, true);
     }
     off += len;
   }
@@ -169,11 +175,11 @@ export class OptionsBuilder {
   }
 
   /**
-   * Add a u32 option (little-endian). Throws for a BlockMS or WaitMS the
-   * server would refuse (see checkBlockMs).
+   * Add a u32 option (little-endian). Throws for a BlockMS the server would
+   * refuse (see checkBlockMs).
    */
   addU32(tag: OptionTag, value: number): this {
-    if (tag === OptionTag.BlockMS || tag === OptionTag.WaitMS) checkBlockMs(value);
+    if (tag === OptionTag.BlockMS) checkBlockMs(value);
     this.buf.push(tag, 4);
     this.buf.push(value & 0xff);
     this.buf.push((value >>> 8) & 0xff);
@@ -267,16 +273,19 @@ export function serializeRequest(
     throw new ValueTooLargeError();
   }
 
+  // A table op's payload is [namespace][key][body]: its body, coded by the
+  // op's schema, is `value`, and it takes no options.
+  const table = isTableOp(opCode);
+  if (table && options.length > 0) throw new FloError(`flo: op ${opCode} takes a body, not options`);
+
   // Calculate payload size
   const payloadLen =
     2 +
     namespace.length + // namespace: [len:u16][data]
     2 +
     key.length + // key: [len:u16][data]
-    4 +
-    value.length + // value: [len:u32][data]
-    2 +
-    options.length; // options: [len:u16][data]
+    value.length +
+    (table ? 0 : 4 + 2 + options.length); // value length, options: [len:u16][data]
 
   // Allocate buffer for header + payload
   const buf = new Uint8Array(HEADER_SIZE + payloadLen);
@@ -307,16 +316,20 @@ export function serializeRequest(
   buf.set(key, offset);
   offset += key.length;
 
-  // Value
-  view.setUint32(offset, value.length, true);
-  offset += 4;
-  buf.set(value, offset);
-  offset += value.length;
+  if (table) {
+    buf.set(value, offset);
+  } else {
+    // Value
+    view.setUint32(offset, value.length, true);
+    offset += 4;
+    buf.set(value, offset);
+    offset += value.length;
 
-  // Options
-  view.setUint16(offset, options.length, true);
-  offset += 2;
-  buf.set(options, offset);
+    // Options
+    view.setUint16(offset, options.length, true);
+    offset += 2;
+    buf.set(options, offset);
+  }
 
   // Compute and fill CRC32
   const crcValue = computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE));

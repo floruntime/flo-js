@@ -26,9 +26,6 @@ describe("OptionsBuilder blockMs", () => {
     expect(addBlockMs(MAX_BLOCK_MS + 1)).toThrow(/at most 300000 ms/);
   });
 
-  it("refuses more than 300000 ms of wait_ms too", () => {
-    expect(() => new OptionsBuilder().addU32(OptionTag.WaitMS, MAX_BLOCK_MS + 1)).toThrow(BlockTooLongError);
-  });
 
   it("refuses values the u32 encoding would mangle", () => {
     for (const v of [-1, 0.5, NaN]) {

@@ -70,11 +70,22 @@ interface ClientOptions {
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `get` | `get(key, opts?) → Promise<Uint8Array \| null>` | Get value, null if not found |
-| `put` | `put(key, value, opts?) → Promise<void>` | Set key-value |
+| `get` | `get(key, opts?) → Promise<GetResult \| null>` | Value and version; null if not found |
+| `put` | `put(key, value, opts?) → Promise<PutResult>` | Set key-value; returns the new version |
 | `delete` | `delete(key, opts?) → Promise<void>` | Delete key |
 | `scan` | `scan(prefix, opts?) → Promise<ScanResult>` | Prefix scan with pagination |
 | `history` | `history(key, opts?) → Promise<VersionEntry[]>` | Get version history |
+
+#### Get Options
+
+```typescript
+interface GetOptions {
+  namespace?: string;      // Override default namespace
+  waitMs?: number;         // Wait up to this long (at most 300000; 0 = don't wait)
+  waitFor?: WaitFor;       // WaitFor.Exists (default: answers at once if present) or WaitFor.Change (the next version)
+  routingKey?: string;     // Route by this instead of the key
+}
+```
 
 #### Put Options
 
@@ -82,9 +93,9 @@ interface ClientOptions {
 interface PutOptions {
   namespace?: string;      // Override default namespace
   ttlMs?: bigint;          // Time-to-live in milliseconds (0 = no expiry)
-  casVersion?: bigint;     // CAS version for optimistic locking
-  ifNotExists?: boolean;   // Only put if key doesn't exist
-  ifExists?: boolean;      // Only put if key exists
+  condition?: Condition;   // Condition.Always (default), Condition.IfAbsent or Condition.IfPresent
+  casVersion?: bigint;     // Only write if this is the key's version (0n = it doesn't exist)
+  routingKey?: string;     // Route by this instead of the key
 }
 ```
 
@@ -302,7 +313,7 @@ try {
 | `NotConnectedError` | Client not connected |
 | `ConnectionError` | Connection failed |
 | `TimeoutError` | Operation timed out |
-| `BlockTooLongError` | `blockMs` over 300000, refused before sending |
+| `BlockTooLongError` | `blockMs` or `waitMs` over 300000, refused before sending |
 | `NotFoundError` | Resource not found |
 | `ConflictError` | CAS version mismatch |
 | `BadRequestError` | Invalid request |

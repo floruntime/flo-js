@@ -26,6 +26,7 @@ import {
   type RawResponse,
   StatusCode,
 } from "./types.js";
+import { kvGet, kvSet } from "./kv.js";
 import { OptionsBuilder } from "./wire.js";
 
 const textEncoder = new TextEncoder();
@@ -97,65 +98,16 @@ export class Transaction {
     if (this.done) throw new TxnFinishedError();
   }
 
-  /** Buffer a put inside the transaction. */
-  async put(
-    key: string,
-    value: Uint8Array,
-    opts?: PutOptions
-  ): Promise<PutResult> {
+  /** Buffer a put inside the transaction; it has no version until commit (0n). */
+  async put(key: string, value: Uint8Array, opts?: PutOptions): Promise<PutResult> {
     this.checkAlive();
-    const builder = this.txnOptions();
-    if (opts?.ttlMs !== undefined) {
-      builder.addU64(OptionTag.TTLMs, opts.ttlMs);
-    }
-    if (opts?.casVersion !== undefined) {
-      builder.addU64(OptionTag.CASVersion, opts.casVersion);
-    }
-    if (opts?.ifNotExists) builder.addFlag(OptionTag.IfNotExists);
-    if (opts?.ifExists) builder.addFlag(OptionTag.IfExists);
-    const resp = await this.sender.sendRequest(
-      OpCode.KVPut,
-      this.namespace,
-      textEncoder.encode(key),
-      value,
-      builder.build()
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-    let version = 0n;
-    if (resp.data.length >= 8) {
-      const view = new DataView(
-        resp.data.buffer,
-        resp.data.byteOffset,
-        resp.data.byteLength
-      );
-      version = view.getBigUint64(0, true);
-    }
-    return { version };
+    return kvSet(this.sender, this.namespace, key, value, { ...opts, routingKey: this.routingKey }, this.id);
   }
 
   /** Read a key inside the transaction (sees buffered writes). */
   async get(key: string): Promise<GetResult | null> {
     this.checkAlive();
-    const resp = await this.sender.sendRequest(
-      OpCode.KVGet,
-      this.namespace,
-      textEncoder.encode(key),
-      new Uint8Array(0),
-      this.txnOptions().build()
-    );
-    if (resp.status === StatusCode.NotFound) return null;
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-    if (resp.data.length < 8) return { value: new Uint8Array(0), version: 0n };
-    const view = new DataView(
-      resp.data.buffer,
-      resp.data.byteOffset,
-      resp.data.byteLength
-    );
-    return { value: resp.data.subarray(8), version: view.getBigUint64(0, true) };
+    return kvGet(this.sender, this.namespace, key, { routingKey: this.routingKey }, this.id);
   }
 
   /** Buffer a delete inside the transaction. */
@@ -286,14 +238,11 @@ export class Transaction {
     this.checkAlive();
     this.done = true;
     const builder = new OptionsBuilder();
-    if (this.routingKey) {
-      builder.addBytes(OptionTag.RoutingKey, textEncoder.encode(this.routingKey));
-    }
     builder.addU64(OptionTag.TxnID, this.id);
     const resp = await this.sender.sendRequest(
       OpCode.KVCommitTxn,
       this.namespace,
-      textEncoder.encode(this.routingKey),
+      new Uint8Array(0),
       new Uint8Array(0),
       builder.build()
     );
@@ -323,14 +272,11 @@ export class Transaction {
     if (this.done) return;
     this.done = true;
     const builder = new OptionsBuilder();
-    if (this.routingKey) {
-      builder.addBytes(OptionTag.RoutingKey, textEncoder.encode(this.routingKey));
-    }
     builder.addU64(OptionTag.TxnID, this.id);
     const resp = await this.sender.sendRequest(
       OpCode.KVRollbackTxn,
       this.namespace,
-      textEncoder.encode(this.routingKey),
+      new Uint8Array(0),
       new Uint8Array(0),
       builder.build()
     );

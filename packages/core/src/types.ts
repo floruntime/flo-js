@@ -10,7 +10,7 @@ export const VERSION = 0x02;
  * request header. A server built from another table refuses the request,
  * and its answers carry its own hash, which this SDK refuses.
  */
-export const TABLE_HASH = 0x2827f6f0631754fen;
+export const TABLE_HASH = 0x02e15ee74c0ad72cn;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -30,6 +30,28 @@ export enum Reason {
   AnswerLost = 11,
   /** A refusal from an op family the server hasn't classified yet. */
   Unclassified = 12,
+  /** What the request names doesn't exist. */
+  NotFound = 13,
+  /** The key is in a prefix the server keeps for itself. */
+  ReservedKey = 14,
+  /** The write's casVersion isn't the key's version. */
+  CasMismatch = 15,
+  /** The write's condition didn't hold. */
+  ConditionFailed = 16,
+  /** No open transaction has this id here. */
+  NoSuchTransaction = 17,
+  /** The routing key (the key, when none is given) isn't the one the transaction was begun with. */
+  WrongRoutingKey = 18,
+  /** The transaction holds as many ops or bytes as it may. */
+  TxnTooLarge = 19,
+  /** The shard holds as many waiting reads as it may. */
+  TooManyWaiters = 20,
+  /** Two fields given together that don't go together. */
+  ConflictingFields = 21,
+  /** The shard stopped taking writes until the node restarts. */
+  WritesStopped = 22,
+  /** Too many writes wait for commit. */
+  TooManyProposals = 23,
 }
 
 /** Whether a refused request took effect: retry logic reads this, not the message. */
@@ -54,6 +76,17 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.CommittedNotApplied]: "committed_not_applied",
   [Reason.AnswerLost]: "answer_lost",
   [Reason.Unclassified]: "unclassified",
+  [Reason.NotFound]: "not_found",
+  [Reason.ReservedKey]: "reserved_key",
+  [Reason.CasMismatch]: "cas_mismatch",
+  [Reason.ConditionFailed]: "condition_failed",
+  [Reason.NoSuchTransaction]: "no_such_transaction",
+  [Reason.WrongRoutingKey]: "wrong_routing_key",
+  [Reason.TxnTooLarge]: "txn_too_large",
+  [Reason.TooManyWaiters]: "too_many_waiters",
+  [Reason.ConflictingFields]: "conflicting_fields",
+  [Reason.WritesStopped]: "writes_stopped",
+  [Reason.TooManyProposals]: "too_many_proposals",
 };
 
 /** The server's name for a reason, as it appears in messages. */
@@ -68,6 +101,25 @@ export const MAX_KEY_SIZE = 64 * 1024; // 64 KB
 export const MAX_VALUE_SIZE = 16 * 1024 * 1024; // 16 MB practical limit
 /** Longest blocking wait (blockMs) the server accepts: 5 minutes. */
 export const MAX_BLOCK_MS = 300_000;
+/** Longest a KV get may wait (waitMs). */
+export const MAX_WAIT_MS = 300_000;
+/** Longest value a KV put takes. */
+export const MAX_KV_VALUE_SIZE = 253_817;
+
+/** What a KV get with waitMs waits for. */
+export enum WaitFor {
+  /** The key to exist; one that exists answers at once. */
+  Exists = 0,
+  /** The key's next version. */
+  Change = 1,
+}
+
+/** When a KV put may write. */
+export enum Condition {
+  Always = 0,
+  IfAbsent = 1,
+  IfPresent = 2,
+}
 
 /**
  * Operation codes for Flo protocol requests.
@@ -281,7 +333,6 @@ export const OptionTag = {
   Priority: 0x10, // u8: Message priority (0-255, lower is taken first; unset is 0)
   Count: 0x15, // u32: Number of messages to dequeue
   BlockMS: 0x17, // u32: Blocking timeout (0 = don't wait, max 300000)
-  WaitMS: 0x18, // u32: Watch timeout - wait for NEXT version change (0 = don't wait, max 300000)
 
   // Stream Options (0x20 - 0x2F) - StreamID-native ONLY
   // 0x20 reserved
@@ -588,12 +639,14 @@ export interface StreamNackOptions {
 export interface GetOptions {
   namespace?: string;
   /**
-   * Block for up to this many milliseconds if the key doesn't exist.
-   * Useful for waiting on a key to be set by another process.
-   * - undefined/not set or 0: don't wait (immediate return)
-   * - up to 300000 (5 minutes); more throws BlockTooLongError
+   * Wait up to this many milliseconds for what `waitFor` names: 0 or unset
+   * doesn't wait; at most 300000 (5 minutes), more throws BlockTooLongError.
    */
-  blockMs?: number;
+  waitMs?: number;
+  /** What a wait waits for: the key to exist (the default) or its next version. */
+  waitFor?: WaitFor;
+  /** Routes the request in place of the key. */
+  routingKey?: string;
 }
 
 /**
@@ -603,9 +656,12 @@ export interface PutOptions {
   namespace?: string;
   /** Time-to-live in milliseconds (0 = no expiration). */
   ttlMs?: bigint;
+  /** When the write may happen; Always when unset. */
+  condition?: Condition;
+  /** The key's version the write requires; 0n means it doesn't exist. */
   casVersion?: bigint;
-  ifNotExists?: boolean;
-  ifExists?: boolean;
+  /** Routes the request in place of the key. */
+  routingKey?: string;
 }
 
 /**

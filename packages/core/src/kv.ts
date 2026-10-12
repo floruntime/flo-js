@@ -2,7 +2,8 @@
  * KV operations for Flo SDK.
  */
 
-import { createServerError } from "./errors.js";
+import { createServerError, ServerError } from "./errors.js";
+import { decodeGetAnswer, decodeSetAnswer, encodeGetBody, encodeSetBody } from "./kv_body.js";
 import { beginTxn, Transaction } from "./kv_txn.js";
 import {
   type DeleteOptions,
@@ -20,6 +21,7 @@ import {
   type PutOptions,
   type PutResult,
   type RawResponse,
+  Reason,
   type ScanOptions,
   type ScanResult,
   StatusCode,
@@ -49,6 +51,26 @@ export interface RequestSender {
 
 const textEncoder = new TextEncoder();
 
+/** kv.get, inside transaction `txn` when given. */
+export async function kvGet(sender: Pick<RequestSender, "sendRequest">, namespace: string, key: string, opts?: GetOptions, txn?: bigint): Promise<GetResult | null> {
+  const resp = await sender.sendRequest(OpCode.KVGet, namespace, textEncoder.encode(key), encodeGetBody(opts, txn), new Uint8Array(0));
+  if (resp.status === StatusCode.NotFound) {
+    // Absent; any other not-found (no such transaction) is an error.
+    const err = createServerError(resp.status, resp.data);
+    if (err instanceof ServerError && err.reason === Reason.NotFound) return null;
+    throw err;
+  }
+  if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
+  return decodeGetAnswer(resp.data);
+}
+
+/** kv.set, inside transaction `txn` when given. */
+export async function kvSet(sender: Pick<RequestSender, "sendRequest">, namespace: string, key: string, value: Uint8Array, opts?: PutOptions, txn?: bigint): Promise<PutResult> {
+  const resp = await sender.sendRequest(OpCode.KVPut, namespace, textEncoder.encode(key), encodeSetBody(value, opts, txn), new Uint8Array(0));
+  if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
+  return decodeSetAnswer(resp.data);
+}
+
 /**
  * KV client operations.
  */
@@ -56,105 +78,20 @@ export class KVOperations {
   constructor(private readonly sender: RequestSender) {}
 
   /**
-   * Get retrieves the value and version for a key.
-   * Returns null if the key is not found.
-   *
-   * @param key - The key to retrieve
-   * @param opts - Options including optional blocking behavior
-   * @param opts.blockMs - If set, block for up to this many milliseconds waiting for the key.
-   *                       0 means don't wait; the longest wait is 300000 ms (5 minutes).
+   * Get retrieves the value and version for a key. Returns null if the key
+   * is not found, also when a wait (`waitMs`) ends without it.
    */
   async get(key: string, opts?: GetOptions): Promise<GetResult | null> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const builder = new OptionsBuilder();
-
-    if (opts?.blockMs !== undefined) {
-      builder.addU32(OptionTag.BlockMS, opts.blockMs);
-    }
-
-    const resp = await this.sender.sendRequest(
-      OpCode.KVGet,
-      namespace,
-      textEncoder.encode(key),
-      new Uint8Array(0),
-      builder.build()
-    );
-
-    if (resp.status === StatusCode.NotFound) {
-      return null;
-    }
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-
-    // Wire body: [version:u64 LE][value bytes]
-    if (resp.data.length < 8) {
-      return { value: new Uint8Array(0), version: 0n };
-    }
-    const view = new DataView(
-      resp.data.buffer,
-      resp.data.byteOffset,
-      resp.data.byteLength
-    );
-    const version = view.getBigUint64(0, true);
-    const value = resp.data.subarray(8);
-    return { value, version };
+    return kvGet(this.sender, this.sender.getNamespace(opts?.namespace), key, opts);
   }
 
   /**
-   * Put sets a key-value pair and returns the new version.
-   *
-   * The returned `version` may be passed to {@link PutOptions.casVersion} on
-   * the next write to enforce optimistic concurrency.
+   * Put sets a key-value pair and returns the new version. A `casVersion`
+   * that isn't the key's, or a `condition` that doesn't hold, throws a
+   * conflict with reason CasMismatch or ConditionFailed.
    */
-  async put(
-    key: string,
-    value: Uint8Array,
-    opts?: PutOptions
-  ): Promise<PutResult> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const builder = new OptionsBuilder();
-
-    if (opts?.ttlMs !== undefined) {
-      builder.addU64(OptionTag.TTLMs, opts.ttlMs);
-    }
-
-    if (opts?.casVersion !== undefined) {
-      builder.addU64(OptionTag.CASVersion, opts.casVersion);
-    }
-
-    if (opts?.ifNotExists) {
-      builder.addFlag(OptionTag.IfNotExists);
-    }
-
-    if (opts?.ifExists) {
-      builder.addFlag(OptionTag.IfExists);
-    }
-
-    const resp = await this.sender.sendRequest(
-      OpCode.KVPut,
-      namespace,
-      textEncoder.encode(key),
-      value,
-      builder.build()
-    );
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-
-    if (resp.data.length < 8) {
-      return { version: 0n };
-    }
-    const view = new DataView(
-      resp.data.buffer,
-      resp.data.byteOffset,
-      resp.data.byteLength
-    );
-    return { version: view.getBigUint64(0, true) };
+  async put(key: string, value: Uint8Array, opts?: PutOptions): Promise<PutResult> {
+    return kvSet(this.sender, this.sender.getNamespace(opts?.namespace), key, value, opts);
   }
 
   /**

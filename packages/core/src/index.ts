@@ -19,6 +19,10 @@ export {
   MAX_KEY_SIZE,
   MAX_VALUE_SIZE,
   MAX_BLOCK_MS,
+  MAX_WAIT_MS,
+  MAX_KV_VALUE_SIZE,
+  WaitFor,
+  Condition,
   // Enums
   OpCode,
   StatusCode,
