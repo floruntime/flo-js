@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replies are routed to their request by request id, so concurrent requests on one connection are safe.
 - When the server cannot parse a request, every request in flight on that connection fails with the server's error.
 - KV TTLs are in milliseconds, as the server reads them: `PutOptions.ttlSeconds` is now `ttlMs`, `OptionTag.TTLSeconds` is now `OptionTag.TTLMs`, and `kv.touch` and a transaction's `touch` take milliseconds (0 clears the TTL).
+- Every KV op sends its schema-coded body (`[namespace][key][body]`, no options) and reads its op's response schema whole. `kv.delete` returns whether the key existed and takes `casVersion` (was `ifMatch`) and `routingKey`; `kv.scan` returns `{ keys, cursor }` (names only, cursor null on the last page, limit 1–1024, default 100); `VersionEntry.timestamp` is now `atMs`; `kv.mget` follows the server's `next` until every key is answered; `kv.incr` returns `{ value, version }`; `kv.jsonDel` returns the new version or null; `incr`, `exists` and the JSON ops take `routingKey`. `kv.expire(key, ttlMs, { casVersion?, routingKey? })` replaces `touch` and `persist` (0 clears the TTL), and `OpCode.KVTouch` is now `KVExpire`. Inside a transaction, `delete` and `incr` return nothing. New reasons `WrongType` and `TooManyTransactions`; the table hash moves with the server.
 - List and scan requests carry their limit and cursor in the value as `[limit:u32][cursor]`; the web client's `kv.scan` sent them as an option and a bare cursor.
 - `kv.scan` reads the server's reply layout, `[count][entries][has_more:u8][cursor_len:u16][cursor]`; it parsed a header-first layout the server never sent.
 
@@ -34,6 +35,7 @@ Opcodes and options the server never serves:
 - `serializeActionListValue` and `serializeWorkerListValue`, replaced by `serializeListValue(limit, cursor)`.
 - `ActionInvokeOptions.priority` and `idempotencyKey`, which the server ignores; invoke now sends `[has_labels:u8]([labels_len:u16][labels])?[input]` and takes a `labels` option (a JSON object string naming required worker labels). Invoke priority, delay and idempotency are deferred: https://github.com/floruntime/flo/issues/181.
 - The deprecated `Worker` and `WorkerConfig` aliases; use `ActionWorker` and `ActionWorkerConfig`.
+- `kv.touch`, `kv.persist`, `KVTouchOptions`, `OpCode.KVPersist`, `KVEntry`, `KVBeginResult`, `parseScanResponse`, `parseHistoryResponse`, and the KV option tags (`TTLMs`, `CASVersion`, `IfNotExists`, `IfExists`, `RoutingKey`, `TxnID`).
 
 ## [0.1.0-dev.4] - 2026-05-04
 

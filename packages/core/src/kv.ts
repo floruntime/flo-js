@@ -2,8 +2,32 @@
  * KV operations for Flo SDK.
  */
 
-import { createServerError, ServerError } from "./errors.js";
-import { decodeGetAnswer, decodeSetAnswer, encodeGetBody, encodeSetBody } from "./kv_body.js";
+import { createServerError, IncompleteResponseError, ServerError } from "./errors.js";
+import {
+  decodeDeleteAnswer,
+  decodeEmptyAnswer,
+  decodeExistsAnswer,
+  decodeGetAnswer,
+  decodeHistoryAnswer,
+  decodeIncrResult,
+  decodeJsonDelAnswer,
+  decodeJsonGetAnswer,
+  decodeJsonSetAnswer,
+  decodeMGetAnswer,
+  decodeScanAnswer,
+  decodeSetAnswer,
+  encodeDeleteBody,
+  encodeExistsBody,
+  encodeExpireBody,
+  encodeGetBody,
+  encodeHistoryBody,
+  encodeIncrBody,
+  encodeJsonPathBody,
+  encodeJsonSetBody,
+  encodeMGetBody,
+  encodeScanBody,
+  encodeSetBody,
+} from "./kv_body.js";
 import { beginTxn, Transaction } from "./kv_txn.js";
 import {
   type DeleteOptions,
@@ -11,13 +35,13 @@ import {
   type GetResult,
   type HistoryOptions,
   type KVExistsOptions,
+  type KVExpireOptions,
   type KVIncrOptions,
+  type KVIncrResult,
   type KVJsonOptions,
   type KVMGetOptions,
-  type KVTouchOptions,
   type MGetEntry,
   OpCode,
-  OptionTag,
   type PutOptions,
   type PutResult,
   type RawResponse,
@@ -27,12 +51,6 @@ import {
   StatusCode,
   type VersionEntry,
 } from "./types.js";
-import {
-  OptionsBuilder,
-  parseHistoryResponse,
-  parseScanResponse,
-  serializeListValue,
-} from "./wire.js";
 
 /**
  * Interface for sending requests (implemented by client).
@@ -51,15 +69,17 @@ export interface RequestSender {
 
 const textEncoder = new TextEncoder();
 
+/** Null for a not-found whose reason is not_found; any other (no such transaction) throws. */
+function absent(resp: RawResponse): null {
+  const err = createServerError(resp.status, resp.data);
+  if (err instanceof ServerError && err.reason === Reason.NotFound) return null;
+  throw err;
+}
+
 /** kv.get, inside transaction `txn` when given. */
 export async function kvGet(sender: Pick<RequestSender, "sendRequest">, namespace: string, key: string, opts?: GetOptions, txn?: bigint): Promise<GetResult | null> {
   const resp = await sender.sendRequest(OpCode.KVGet, namespace, textEncoder.encode(key), encodeGetBody(opts, txn), new Uint8Array(0));
-  if (resp.status === StatusCode.NotFound) {
-    // Absent; any other not-found (no such transaction) is an error.
-    const err = createServerError(resp.status, resp.data);
-    if (err instanceof ServerError && err.reason === Reason.NotFound) return null;
-    throw err;
-  }
+  if (resp.status === StatusCode.NotFound) return absent(resp);
   if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
   return decodeGetAnswer(resp.data);
 }
@@ -69,6 +89,14 @@ export async function kvSet(sender: Pick<RequestSender, "sendRequest">, namespac
   const resp = await sender.sendRequest(OpCode.KVPut, namespace, textEncoder.encode(key), encodeSetBody(value, opts, txn), new Uint8Array(0));
   if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
   return decodeSetAnswer(resp.data);
+}
+
+/** kv.scan: one page of names under `prefix`. */
+export async function kvScan(sender: Pick<RequestSender, "sendRequest">, namespace: string, prefix: string, opts?: { cursor?: Uint8Array; limit?: number }): Promise<ScanResult> {
+  const body = encodeScanBody(opts?.limit ?? 100, opts?.cursor);
+  const resp = await sender.sendRequest(OpCode.KVScan, namespace, textEncoder.encode(prefix), body, new Uint8Array(0));
+  if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
+  return decodeScanAnswer(resp.data);
 }
 
 /**
@@ -94,313 +122,112 @@ export class KVOperations {
     return kvSet(this.sender, this.sender.getNamespace(opts?.namespace), key, value, opts);
   }
 
-  /**
-   * MGet looks up many keys in a single round trip. Keys may live on different
-   * shards — the server gathers results in parallel and returns one entry per
-   * requested key in the same order. The `found` flag distinguishes missing
-   * keys from keys whose value is empty.
+    /**
+   * MGet looks up many keys and returns one entry per requested key, in the
+   * same order. The `found` flag tells a missing key from one whose value is
+   * empty. When the server's answer fills up before every key is answered,
+   * mget asks again from the first key it didn't answer.
    *
    * Limited to 256 keys per call.
    */
   async mget(keys: string[], opts?: KVMGetOptions): Promise<MGetEntry[]> {
     if (keys.length === 0) return [];
-    if (keys.length > 256) throw new Error("mget: too many keys (max 256)");
     const namespace = this.sender.getNamespace(opts?.namespace);
-
-    // Pack request: [count:u16 LE]([key_len:u16 LE][key])*
     const encoded = keys.map((k) => textEncoder.encode(k));
-    let size = 2;
-    for (const k of encoded) {
-      if (k.length > 0xffff) throw new Error("mget: key too long");
-      size += 2 + k.length;
-    }
-    const value = new Uint8Array(size);
-    const w = new DataView(value.buffer);
-    w.setUint16(0, encoded.length, true);
-    let off = 2;
-    for (const k of encoded) {
-      w.setUint16(off, k.length, true);
-      off += 2;
-      value.set(k, off);
-      off += k.length;
-    }
-
-    const resp = await this.sender.sendRequest(
-      OpCode.KVMGet,
-      namespace,
-      new Uint8Array(0),
-      value,
-      new Uint8Array(0)
-    );
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-
-    if (resp.data.length < 4) return [];
-    const r = new DataView(
-      resp.data.buffer,
-      resp.data.byteOffset,
-      resp.data.byteLength
-    );
-    const count = r.getUint32(0, true);
-    const decoder = new TextDecoder();
+    encodeMGetBody(encoded); // refuse a bad key list before any round trip
     const out: MGetEntry[] = [];
-    let p = 4;
-    for (let i = 0; i < count; i++) {
-      if (p + 1 + 2 > resp.data.length) break;
-      const status = resp.data[p];
-      p += 1;
-      const klen = r.getUint16(p, true);
-      p += 2;
-      if (p + klen + 8 + 4 > resp.data.length) break;
-      const key = decoder.decode(resp.data.subarray(p, p + klen));
-      p += klen;
-      const version = r.getBigUint64(p, true);
-      p += 8;
-      const vlen = r.getUint32(p, true);
-      p += 4;
-      if (p + vlen > resp.data.length) break;
-      const val =
-        vlen > 0 ? resp.data.slice(p, p + vlen) : new Uint8Array(0);
-      p += vlen;
-      out.push({ key, value: val, version, found: status === 0 });
+    while (out.length < keys.length) {
+      const from = out.length;
+      const resp = await this.sender.sendRequest(OpCode.KVMGet, namespace, new Uint8Array(0), encodeMGetBody(encoded.slice(from)), new Uint8Array(0));
+      if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
+      const page = decodeMGetAnswer(resp.data);
+      const asked = keys.length - from;
+      // Without next the answer covers every key asked; with it, exactly the
+      // keys before next, and at least one, or the loop would not end.
+      const answered = page.next ?? asked;
+      if (page.entries.length !== answered || answered === 0 || answered > asked || (page.next !== null && answered === asked)) {
+        throw new IncompleteResponseError(`kv.mget answered ${page.entries.length} entries, next ${page.next}, for ${asked} keys`);
+      }
+      for (const e of page.entries) out.push({ key: keys[out.length]!, ...e });
     }
     return out;
   }
 
   /**
-   * Delete removes a key.
-   * This operation succeeds even if the key doesn't exist (unless `ifMatch`
-   * is set, in which case a missing key is treated as a CAS mismatch).
+   * Delete removes a key and says whether it existed; deleting a missing key
+   * is not an error. A `casVersion` that isn't the key's throws a conflict
+   * with reason CasMismatch.
    */
-  async delete(key: string, opts?: DeleteOptions): Promise<void> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const builder = new OptionsBuilder();
-    if (opts?.ifMatch !== undefined) {
-      builder.addU64(OptionTag.CASVersion, opts.ifMatch);
-    }
-
-    const resp = await this.sender.sendRequest(
-      OpCode.KVDelete,
-      namespace,
-      textEncoder.encode(key),
-      new Uint8Array(0),
-      builder.build()
-    );
-
-    // Delete succeeds for both OK and NOT_FOUND when no CAS guard is set.
-    const allowNotFound = opts?.ifMatch === undefined;
-    if (resp.status !== StatusCode.OK && !(allowNotFound && resp.status === StatusCode.NotFound)) {
-      throw createServerError(resp.status, resp.data);
-    }
+  async delete(key: string, opts?: DeleteOptions): Promise<boolean> {
+    const resp = await this.send(OpCode.KVDelete, opts?.namespace, key, encodeDeleteBody(opts));
+    const existed = decodeDeleteAnswer(resp.data);
+    if (existed === null) throw new IncompleteResponseError("kv.delete answered no existed");
+    return existed;
   }
 
   /**
-   * Scan retrieves keys with a prefix.
+   * Scan returns one page of the key names that start with `prefix` ("" for
+   * all), and the cursor for the next page, null on the last.
    */
   async scan(prefix: string, opts?: ScanOptions): Promise<ScanResult> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const value = serializeListValue(opts?.limit, opts?.cursor);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.KVScan,
-      namespace,
-      textEncoder.encode(prefix),
-      value,
-      new OptionsBuilder().build()
-    );
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-
-    return parseScanResponse(resp.data);
+    return kvScan(this.sender, this.sender.getNamespace(opts?.namespace), prefix, opts);
   }
 
   /**
-   * History retrieves the version history for a key.
+   * History returns a key's versions, newest first, each with its write time.
    */
   async history(key: string, opts?: HistoryOptions): Promise<VersionEntry[]> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const builder = new OptionsBuilder();
-
-    if (opts?.limit !== undefined) {
-      builder.addU32(OptionTag.Limit, opts.limit);
-    }
-
-    const resp = await this.sender.sendRequest(
-      OpCode.KVHistory,
-      namespace,
-      textEncoder.encode(key),
-      new Uint8Array(0),
-      builder.build()
-    );
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-
-    return parseHistoryResponse(resp.data);
+    const resp = await this.send(OpCode.KVHistory, opts?.namespace, key, encodeHistoryBody(opts?.limit ?? 10));
+    return decodeHistoryAnswer(resp.data);
   }
 
-  // ─── Extended ops: counters, TTL lifecycle, exists, JSON paths ─────
+  // ─── Counters, TTLs, exists, JSON paths ─────
 
   /**
-   * Atomically add `delta` (default +1) to the i64 counter at `key`.
+   * Atomically add `delta` (default +1) to the i64 counter at `key`, and
+   * return its new value and version.
    *
-   * The first incr on a missing key creates it at the delta value. Throws if
-   * the key already holds a non-counter value.
-   *
-   * @returns The new counter value.
+   * The first incr on a missing key creates it at the delta value. A key
+   * that holds something other than a counter throws reason WrongType.
    */
-  async incr(key: string, opts?: KVIncrOptions): Promise<bigint> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-    let value = new Uint8Array(0);
-    if (opts?.delta !== undefined) {
-      value = new Uint8Array(8);
-      new DataView(value.buffer).setBigInt64(0, opts.delta, true);
-    }
-    const resp = await this.sender.sendRequest(
-      OpCode.KVIncr,
-      namespace,
-      textEncoder.encode(key),
-      value,
-      new Uint8Array(0)
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-    if (resp.data.length < 16) {
-      throw new Error("incr: short response");
-    }
-    const view = new DataView(
-      resp.data.buffer,
-      resp.data.byteOffset,
-      resp.data.byteLength
-    );
-    return view.getBigInt64(8, true);
+  async incr(key: string, opts?: KVIncrOptions): Promise<KVIncrResult> {
+    const resp = await this.send(OpCode.KVIncr, opts?.namespace, key, encodeIncrBody(opts));
+    return decodeIncrResult(resp.data);
   }
 
   /**
-   * Update the TTL on an existing key, in milliseconds. `ttlMs = 0` clears
-   * the TTL.
+   * Set the TTL of an existing key, in milliseconds; `ttlMs = 0` clears it,
+   * making the key permanent.
    *
-   * When `opts.ifMatch` is set, the touch only succeeds if the current key
-   * version equals it — enabling race-free lease renewal.
+   * When `opts.casVersion` is set, the expire only succeeds if the key's
+   * version equals it, for race-free lease renewal.
    */
-  async touch(
-    key: string,
-    ttlMs: bigint | number,
-    opts?: KVTouchOptions
-  ): Promise<void> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-    const ttl = typeof ttlMs === "bigint" ? ttlMs : BigInt(ttlMs);
-    const value = new Uint8Array(8);
-    new DataView(value.buffer).setBigUint64(0, ttl, true);
-    const builder = new OptionsBuilder();
-    if (opts?.ifMatch !== undefined) {
-      builder.addU64(OptionTag.CASVersion, opts.ifMatch);
-    }
-    const resp = await this.sender.sendRequest(
-      OpCode.KVTouch,
-      namespace,
-      textEncoder.encode(key),
-      value,
-      builder.build()
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
+  async expire(key: string, ttlMs: bigint | number, opts?: KVExpireOptions): Promise<void> {
+    const resp = await this.send(OpCode.KVExpire, opts?.namespace, key, encodeExpireBody(ttlMs, opts));
+    decodeEmptyAnswer(resp.data);
   }
 
   /**
-   * Clear the TTL on an existing key, making it permanent.
-   *
-   * When `opts.ifMatch` is set, the persist only succeeds if the current key
-   * version equals it.
-   */
-  async persist(key: string, opts?: KVTouchOptions): Promise<void> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-    const builder = new OptionsBuilder();
-    if (opts?.ifMatch !== undefined) {
-      builder.addU64(OptionTag.CASVersion, opts.ifMatch);
-    }
-    const resp = await this.sender.sendRequest(
-      OpCode.KVPersist,
-      namespace,
-      textEncoder.encode(key),
-      new Uint8Array(0),
-      builder.build()
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-  }
-
-  /**
-   * Returns true if `key` is present without transferring its value.
+   * Returns true if `key` is present, without transferring its value.
    */
   async exists(key: string, opts?: KVExistsOptions): Promise<boolean> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-    const resp = await this.sender.sendRequest(
-      OpCode.KVExists,
-      namespace,
-      textEncoder.encode(key),
-      new Uint8Array(0),
-      new Uint8Array(0)
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-    // Wire body: [version:u64][1 byte 0/1]
-    return resp.data.length >= 9 && resp.data[8] === 1;
+    const resp = await this.send(OpCode.KVExists, opts?.namespace, key, encodeExistsBody(opts));
+    return decodeExistsAnswer(resp.data).exists;
   }
 
   /**
-   * Extract the value at `path` from the JSON document at `key`.
-   *
-   * Returns the JSON-encoded value as bytes, or `null` if the key or path
-   * is missing.
-   */
-  /**
-   * Extract the value at `path` from the JSON document at `key`.
+   * Extract the value at `path` (default "$", the whole document) from the
+   * JSON document at `key`.
    *
    * Returns a {@link GetResult} carrying the JSON-encoded bytes and the
    * document's current version, or `null` if the key or path is missing.
    */
-  async jsonGet(
-    key: string,
-    path: string = "$",
-    opts?: KVJsonOptions
-  ): Promise<GetResult | null> {
+  async jsonGet(key: string, path: string = "$", opts?: KVJsonOptions): Promise<GetResult | null> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-    const resp = await this.sender.sendRequest(
-      OpCode.KVJsonGet,
-      namespace,
-      textEncoder.encode(key),
-      textEncoder.encode(path),
-      new Uint8Array(0)
-    );
-    if (resp.status === StatusCode.NotFound) {
-      return null;
-    }
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-    if (resp.data.length < 8) {
-      return null;
-    }
-    const view = new DataView(
-      resp.data.buffer,
-      resp.data.byteOffset,
-      resp.data.byteLength
-    );
-    const version = view.getBigUint64(0, true);
-    return { value: resp.data.subarray(8), version };
+    const resp = await this.sender.sendRequest(OpCode.KVJsonGet, namespace, textEncoder.encode(key), encodeJsonPathBody(path, opts), new Uint8Array(0));
+    if (resp.status === StatusCode.NotFound) return absent(resp);
+    if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
+    return decodeJsonGetAnswer(resp.data);
   }
 
   /**
@@ -410,82 +237,32 @@ export class KVOperations {
    * Sub-paths require the key to already exist. Returns a {@link PutResult}
    * with the new document version.
    */
-  async jsonSet(
-    key: string,
-    path: string,
-    jsonValue: Uint8Array,
-    opts?: KVJsonOptions
-  ): Promise<PutResult> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-    const pathBytes = textEncoder.encode(path || "$");
-    if (pathBytes.length > 0xffff) {
-      throw new Error("jsonSet: path too long");
-    }
-    const value = new Uint8Array(2 + pathBytes.length + jsonValue.length);
-    new DataView(value.buffer).setUint16(0, pathBytes.length, true);
-    value.set(pathBytes, 2);
-    value.set(jsonValue, 2 + pathBytes.length);
-    const resp = await this.sender.sendRequest(
-      OpCode.KVJsonSet,
-      namespace,
-      textEncoder.encode(key),
-      value,
-      new Uint8Array(0)
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-    let version = 0n;
-    if (resp.data.length >= 8) {
-      const view = new DataView(
-        resp.data.buffer,
-        resp.data.byteOffset,
-        resp.data.byteLength
-      );
-      version = view.getBigUint64(0, true);
-    }
-    return { version };
+  async jsonSet(key: string, path: string, jsonValue: Uint8Array, opts?: KVJsonOptions): Promise<PutResult> {
+    const resp = await this.send(OpCode.KVJsonSet, opts?.namespace, key, encodeJsonSetBody(path, jsonValue, opts));
+    return decodeJsonSetAnswer(resp.data);
   }
 
   /**
-   * Remove the value at `path` from the JSON document at `key`.
+   * Remove the value at `path` (default "$") from the JSON document at `key`.
    *
-   * Sub-paths return a {@link PutResult} with the new document version. For
-   * `"$"` (whole document delete) the version is `0n` since the key is gone.
+   * Returns the document's new version, or null for `"$"`, which deletes
+   * the key.
    */
-  async jsonDel(
-    key: string,
-    path: string = "$",
-    opts?: KVJsonOptions
-  ): Promise<PutResult> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-    const resp = await this.sender.sendRequest(
-      OpCode.KVJsonDel,
-      namespace,
-      textEncoder.encode(key),
-      textEncoder.encode(path || "$"),
-      new Uint8Array(0)
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-    let version = 0n;
-    if (resp.data.length >= 8) {
-      const view = new DataView(
-        resp.data.buffer,
-        resp.data.byteOffset,
-        resp.data.byteLength
-      );
-      version = view.getBigUint64(0, true);
-    }
-    return { version };
+  async jsonDel(key: string, path: string = "$", opts?: KVJsonOptions): Promise<bigint | null> {
+    const resp = await this.send(OpCode.KVJsonDel, opts?.namespace, key, encodeJsonPathBody(path, opts));
+    return decodeJsonDelAnswer(resp.data);
+  }
+
+  /** Send a table op and throw on any status but OK. */
+  private async send(op: OpCode, namespace: string | undefined, key: string, body: Uint8Array): Promise<RawResponse> {
+    const resp = await this.sender.sendRequest(op, this.sender.getNamespace(namespace), textEncoder.encode(key), body, new Uint8Array(0));
+    if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
+    return resp;
   }
 
   /**
-   * Open a per-shard KV transaction pinned to `routingKey`'s partition.
-   *
-   * Every key written or read inside the transaction must hash to the same
-   * partition; otherwise the server returns a "kv_txn_cross_shard" error.
+   * Open a per-shard KV transaction pinned to `routingKey`'s shard. Every
+   * op inside it is routed by `routingKey`, so its keys share that shard.
    *
    * Returns a {@link Transaction} handle. Use `try/finally` for safe cleanup:
    *

@@ -72,9 +72,21 @@ interface ClientOptions {
 |--------|-----------|-------------|
 | `get` | `get(key, opts?) → Promise<GetResult \| null>` | Value and version; null if not found |
 | `put` | `put(key, value, opts?) → Promise<PutResult>` | Set key-value; returns the new version |
-| `delete` | `delete(key, opts?) → Promise<void>` | Delete key |
-| `scan` | `scan(prefix, opts?) → Promise<ScanResult>` | Prefix scan with pagination |
-| `history` | `history(key, opts?) → Promise<VersionEntry[]>` | Get version history |
+| `delete` | `delete(key, opts?) → Promise<boolean>` | Delete key; whether it existed (a missing key is not an error) |
+| `mget` | `mget(keys, opts?) → Promise<MGetEntry[]>` | Up to 256 keys; one entry per key, in order |
+| `scan` | `scan(prefix, opts?) → Promise<ScanResult>` | One page of key names (`keys`) and the next page's `cursor` (null on the last) |
+| `history` | `history(key, opts?) → Promise<VersionEntry[]>` | Versions newest first: `version`, `atMs` (write time), `value` |
+| `incr` | `incr(key, opts?) → Promise<KVIncrResult>` | Add `delta` (default 1) to a counter; its new `value` and `version` |
+| `expire` | `expire(key, ttlMs, opts?) → Promise<void>` | Set a key's TTL in ms; 0 clears it |
+| `exists` | `exists(key, opts?) → Promise<boolean>` | Whether the key is present |
+| `jsonGet` | `jsonGet(key, path = "$", opts?) → Promise<GetResult \| null>` | The JSON at `path`; null if the key or path is missing |
+| `jsonSet` | `jsonSet(key, path, json, opts?) → Promise<PutResult>` | Set the JSON at `path` ("$" replaces the document) |
+| `jsonDel` | `jsonDel(key, path = "$", opts?) → Promise<bigint \| null>` | Remove the JSON at `path`; the new version, or null when "$" deleted the key |
+| `begin` | `begin(routingKey, opts?) → Promise<Transaction>` | Open a transaction on `routingKey`'s shard |
+
+Every op takes `namespace` in its options; every op but `mget`, `scan` and
+`history` takes `routingKey`, which routes the request in place of the key.
+`delete` and `expire` take `casVersion`: the key's version they require.
 
 #### Get Options
 
@@ -104,10 +116,32 @@ interface PutOptions {
 ```typescript
 interface ScanOptions {
   namespace?: string;
-  cursor?: Uint8Array;     // Pagination cursor
-  limit?: number;          // Max entries to return
+  cursor?: Uint8Array;     // The previous page's cursor; unset for the first page
+  limit?: number;          // Most names per page, 1 to 1024 (default 100)
 }
 ```
+
+`history` takes `limit` too: 1 to 65 versions (default 10).
+
+#### Transactions
+
+```typescript
+const txn = await client.kv.begin("user:123");
+try {
+  await txn.put("user:123:name", encoder.encode("Jane"));
+  await txn.incr("user:123:visits");
+  await txn.expire("user:123:session", 60_000);
+  await txn.commit();
+} catch (err) {
+  await txn.rollback();
+  throw err;
+}
+```
+
+Inside a transaction, `get`, `put`, `delete`, `incr`, `expire` and `exists`
+are routed by the transaction's routing key; `delete` and `incr` answer
+nothing until commit. `scan`, `mget`, `history` and the JSON ops throw
+`TxnUnsupportedOpError`.
 
 ### Queue Operations
 

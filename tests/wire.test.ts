@@ -14,14 +14,11 @@ import {
   OptionTag,
   OptionsBuilder,
   KVOperations,
-  Transaction,
   type KVRequestSender,
   type RawResponse,
   computeCRC32,
   serializeRequest,
   parseResponseHeader,
-  parseScanResponse,
-  parseHistoryResponse,
   parseDequeueResponse,
   parseEnqueueResponse,
   serializeSeqs,
@@ -70,19 +67,19 @@ describe("Wire Protocol", () => {
 
     it("should build u64 option", () => {
       const builder = new OptionsBuilder();
-      builder.addU64(OptionTag.CASVersion, 3600n);
+      builder.addU64(OptionTag.MaxAgeSeconds, 3600n);
       const options = builder.build();
       // 3600 = 0x0E10 in little-endian
       expect(options).toEqual(
-        new Uint8Array([0x02, 8, 0x10, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        new Uint8Array([0x26, 8, 0x10, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
       );
     });
 
     it("should build flag option", () => {
       const builder = new OptionsBuilder();
-      builder.addFlag(OptionTag.IfNotExists);
+      builder.addFlag(OptionTag.DryRun);
       const options = builder.build();
-      expect(options).toEqual(new Uint8Array([0x03, 0]));
+      expect(options).toEqual(new Uint8Array([0x28, 0]));
     });
 
     it("should chain multiple options", () => {
@@ -137,7 +134,7 @@ describe("Wire Protocol", () => {
 
       // Version, then the pinned table hash at 24-31
       expect(request[22]).toBe(VERSION);
-      expect(view.getBigUint64(24, true)).toBe(0x02e15ee74c0ad72cn);
+      expect(view.getBigUint64(24, true)).toBe(0x8aa29e7a0c35fd78n);
     });
 
     it("should include namespace in payload", () => {
@@ -208,42 +205,6 @@ describe("Wire Protocol", () => {
         expect(() => parseResponseHeader(header)).toThrow(TableMismatchError);
         expect(() => parseResponseHeader(header)).toThrow(message);
       }
-    });
-  });
-
-  describe("parseScanResponse", () => {
-    // Wire format: [count:u32] ([key_len:u16][key][value_len:u32][value])*
-    //              [has_more:u8][cursor_len:u16][cursor]
-    it("should parse empty scan response", () => {
-      const data = new Uint8Array(7); // count=0, has_more=0, cursor_len=0
-
-      const result = parseScanResponse(data);
-
-      expect(result.hasMore).toBe(false);
-      expect(result.cursor).toBeNull();
-      expect(result.entries).toEqual([]);
-    });
-
-    it("should parse scan response with entries and a cursor", () => {
-      const data = new Uint8Array(4 + (2 + 1 + 4 + 1) + 1 + 2 + 3);
-      const view = new DataView(data.buffer);
-
-      view.setUint32(0, 1, true); // count = 1
-      view.setUint16(4, 1, true); // keyLen = 1
-      data[6] = 107; // 'k'
-      view.setUint32(7, 1, true); // valueLen = 1
-      data[11] = 118; // 'v'
-      data[12] = 1; // hasMore = true
-      view.setUint16(13, 3, true); // cursorLen = 3
-      data.set([99, 117, 114], 15); // "cur"
-
-      const result = parseScanResponse(data);
-
-      expect(result.hasMore).toBe(true);
-      expect(new TextDecoder().decode(result.cursor!)).toBe("cur");
-      expect(result.entries.length).toBe(1);
-      expect(new TextDecoder().decode(result.entries[0]!.key)).toBe("k");
-      expect(new TextDecoder().decode(result.entries[0]!.value!)).toBe("v");
     });
   });
 
@@ -333,36 +294,6 @@ describe("Wire Protocol", () => {
     });
   });
 
-  describe("parseHistoryResponse", () => {
-    it("should parse empty history response", () => {
-      const data = new Uint8Array(4);
-      const view = new DataView(data.buffer);
-      view.setUint32(0, 0, true);
-
-      const result = parseHistoryResponse(data);
-      expect(result).toEqual([]);
-    });
-
-    it("should parse history response with entries", () => {
-      // Build response: count=1, entry: version=1, timestamp=1000, value="v"
-      const data = new Uint8Array(25);
-      const view = new DataView(data.buffer);
-
-      view.setUint32(0, 1, true); // count
-      view.setBigUint64(4, 1n, true); // version
-      view.setBigInt64(12, 1000n, true); // timestamp
-      view.setUint32(20, 1, true); // valueLen
-      data[24] = 118; // 'v'
-
-      const result = parseHistoryResponse(data);
-
-      expect(result.length).toBe(1);
-      expect(result[0]!.version).toBe(1n);
-      expect(result[0]!.timestamp).toBe(1000n);
-      expect(new TextDecoder().decode(result[0]!.value)).toBe("v");
-    });
-  });
-
   describe("KV TTL", () => {
     const ok: RawResponse = { status: StatusCode.OK, data: new Uint8Array(), requestId: 0n };
 
@@ -390,26 +321,13 @@ describe("Wire Protocol", () => {
       expect(sent.options).toEqual(new Uint8Array(0));
     });
 
-    it("encodes touch's value as an 8-byte u64 LE of milliseconds", async () => {
+    it("encodes expire's ttl_ms as a u64 of milliseconds, 0 clearing the TTL", async () => {
       const { sender, sent } = capture();
-      await new KVOperations(sender).touch("k", 90_000n);
-      expect(sent.value).toEqual(
-        new Uint8Array([0x90, 0x5f, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00])
-      );
-    });
-
-    it("encodes touch with 0 (clear TTL) as eight zero bytes", async () => {
-      const { sender, sent } = capture();
-      await new KVOperations(sender).touch("k", 0n);
-      expect(sent.value).toEqual(new Uint8Array(8));
-    });
-
-    it("encodes a transaction touch's value as milliseconds", async () => {
-      const { sender, sent } = capture();
-      await new Transaction(sender, "default", "", 1n, 0n).touch("k", 90_000n);
-      expect(sent.value).toEqual(
-        new Uint8Array([0x90, 0x5f, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00])
-      );
+      await new KVOperations(sender).expire("k", 90_000n);
+      expect(sent.value).toEqual(new Uint8Array([0x90, 0x5f, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]));
+      await new KVOperations(sender).expire("k", 0);
+      expect(sent.value).toEqual(new Uint8Array(11));
+      expect(sent.options).toEqual(new Uint8Array(0));
     });
   });
 

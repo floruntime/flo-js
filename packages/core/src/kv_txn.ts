@@ -1,10 +1,9 @@
 /**
  * Flo KV Per-Shard Transactions
  *
- * Transactions are pinned to a single partition (chosen by the routing key
- * passed to `begin`). Every key written or read inside the transaction must
- * hash to the same partition; otherwise the server returns a
- * "kv_txn_cross_shard" error.
+ * A transaction is pinned to the shard of the routing key passed to `begin`.
+ * Every op inside it carries that routing key and the transaction's id, so
+ * its keys live on that shard.
  *
  * Server-enforced caps:
  *   - 256 ops per transaction
@@ -15,19 +14,31 @@
  * `jsonGet`, `jsonSet`, `jsonDel`, `history`.
  */
 
-import { createServerError } from "./errors.js";
+import { createServerError, FloError } from "./errors.js";
+import {
+  decodeDeleteAnswer,
+  decodeEmptyAnswer,
+  decodeExistsAnswer,
+  decodeIncrAnswer,
+  decodeTxnBeginAnswer,
+  decodeTxnCommitAnswer,
+  encodeDeleteBody,
+  encodeExistsBody,
+  encodeExpireBody,
+  encodeIncrBody,
+  encodeTxnBody,
+  MAX_ROUTING_KEY,
+} from "./kv_body.js";
 import {
   type GetResult,
   type KVCommitResult,
   OpCode,
-  OptionTag,
   type PutOptions,
   type PutResult,
   type RawResponse,
   StatusCode,
 } from "./types.js";
 import { kvGet, kvSet } from "./kv.js";
-import { OptionsBuilder } from "./wire.js";
 
 const textEncoder = new TextEncoder();
 
@@ -53,6 +64,13 @@ export class TxnFinishedError extends Error {
     super("transaction already committed or rolled back");
     this.name = "TxnFinishedError";
   }
+}
+
+/** Send a table op and throw on any status but OK. */
+async function send(sender: TxnRequestSender, op: OpCode, namespace: string, key: string, body: Uint8Array): Promise<RawResponse> {
+  const resp = await sender.sendRequest(op, namespace, textEncoder.encode(key), body, new Uint8Array(0));
+  if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
+  return resp;
 }
 
 /**
@@ -85,15 +103,6 @@ export class Transaction {
     public readonly pinnedHash: bigint
   ) {}
 
-  private txnOptions(): OptionsBuilder {
-    const b = new OptionsBuilder();
-    if (this.routingKey) {
-      b.addBytes(OptionTag.RoutingKey, textEncoder.encode(this.routingKey));
-    }
-    b.addU64(OptionTag.TxnID, this.id);
-    return b;
-  }
-
   private checkAlive(): void {
     if (this.done) throw new TxnFinishedError();
   }
@@ -110,96 +119,41 @@ export class Transaction {
     return kvGet(this.sender, this.namespace, key, { routingKey: this.routingKey }, this.id);
   }
 
-  /** Buffer a delete inside the transaction. */
-  async delete(key: string): Promise<void> {
+  /**
+   * Buffer a delete inside the transaction. Whether the key existed isn't
+   * known until commit.
+   */
+  async delete(key: string, opts?: { casVersion?: bigint }): Promise<void> {
     this.checkAlive();
-    const resp = await this.sender.sendRequest(
-      OpCode.KVDelete,
-      this.namespace,
-      textEncoder.encode(key),
-      new Uint8Array(0),
-      this.txnOptions().build()
-    );
-    if (resp.status !== StatusCode.OK && resp.status !== StatusCode.NotFound) {
-      throw createServerError(resp.status, resp.data);
-    }
-  }
-
-  /** Buffer an atomic counter increment inside the transaction. */
-  async incr(key: string, delta: bigint = 1n): Promise<bigint> {
-    this.checkAlive();
-    const value = new Uint8Array(8);
-    new DataView(value.buffer).setBigInt64(0, delta, true);
-    const resp = await this.sender.sendRequest(
-      OpCode.KVIncr,
-      this.namespace,
-      textEncoder.encode(key),
-      value,
-      this.txnOptions().build()
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-    if (resp.data.length < 8) return 0n;
-    const view = new DataView(
-      resp.data.buffer,
-      resp.data.byteOffset,
-      resp.data.byteLength
-    );
-    return view.getBigInt64(0, true);
+    const body = encodeDeleteBody({ casVersion: opts?.casVersion, routingKey: this.routingKey }, this.id);
+    decodeDeleteAnswer((await send(this.sender, OpCode.KVDelete, this.namespace, key, body)).data);
   }
 
   /**
-   * Update the TTL on an existing key inside the transaction, in
-   * milliseconds. `ttlMs = 0` clears the TTL.
+   * Buffer an atomic counter increment inside the transaction. The new value
+   * isn't known until commit.
    */
-  async touch(key: string, ttlMs: bigint): Promise<void> {
+  async incr(key: string, delta: bigint = 1n): Promise<void> {
     this.checkAlive();
-    const value = new Uint8Array(8);
-    new DataView(value.buffer).setBigUint64(0, ttlMs, true);
-    const resp = await this.sender.sendRequest(
-      OpCode.KVTouch,
-      this.namespace,
-      textEncoder.encode(key),
-      value,
-      this.txnOptions().build()
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
+    const body = encodeIncrBody({ delta, routingKey: this.routingKey }, this.id);
+    decodeIncrAnswer((await send(this.sender, OpCode.KVIncr, this.namespace, key, body)).data);
   }
 
-  /** Remove the TTL on a key inside the transaction. */
-  async persist(key: string): Promise<void> {
+  /**
+   * Set the TTL of a key inside the transaction, in milliseconds;
+   * `ttlMs = 0` clears it.
+   */
+  async expire(key: string, ttlMs: bigint | number, opts?: { casVersion?: bigint }): Promise<void> {
     this.checkAlive();
-    const resp = await this.sender.sendRequest(
-      OpCode.KVPersist,
-      this.namespace,
-      textEncoder.encode(key),
-      new Uint8Array(0),
-      this.txnOptions().build()
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
+    const body = encodeExpireBody(ttlMs, { casVersion: opts?.casVersion, routingKey: this.routingKey }, this.id);
+    decodeEmptyAnswer((await send(this.sender, OpCode.KVExpire, this.namespace, key, body)).data);
   }
 
-  /** Check key existence inside the transaction. */
+  /** Check key existence inside the transaction (sees buffered writes). */
   async exists(key: string): Promise<boolean> {
     this.checkAlive();
-    const resp = await this.sender.sendRequest(
-      OpCode.KVExists,
-      this.namespace,
-      textEncoder.encode(key),
-      new Uint8Array(0),
-      this.txnOptions().build()
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-    // Wire body: [version:u64 LE][1 byte 0/1]
-    if (resp.data.length < 9) return false;
-    return resp.data[8] === 1;
+    const body = encodeExistsBody({ routingKey: this.routingKey }, this.id);
+    return decodeExistsAnswer((await send(this.sender, OpCode.KVExists, this.namespace, key, body)).data).exists;
   }
 
   // ── Disallowed inside a transaction ───────────────────────────────
@@ -237,31 +191,8 @@ export class Transaction {
   async commit(): Promise<KVCommitResult> {
     this.checkAlive();
     this.done = true;
-    const builder = new OptionsBuilder();
-    builder.addU64(OptionTag.TxnID, this.id);
-    const resp = await this.sender.sendRequest(
-      OpCode.KVCommitTxn,
-      this.namespace,
-      new Uint8Array(0),
-      new Uint8Array(0),
-      builder.build()
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-    // Wire body: [variant:u8=1][commit_index:u64 LE][op_count:u16 LE]
-    if (resp.data.length < 11) {
-      throw new Error(`flo: short KV commit reply (${resp.data.length} bytes)`);
-    }
-    const view = new DataView(
-      resp.data.buffer,
-      resp.data.byteOffset,
-      resp.data.byteLength
-    );
-    return {
-      commitIndex: view.getBigUint64(1, true),
-      opCount: view.getUint16(9, true),
-    };
+    const resp = await send(this.sender, OpCode.KVCommitTxn, this.namespace, "", encodeTxnBody(this.id));
+    return decodeTxnCommitAnswer(resp.data);
   }
 
   /**
@@ -271,55 +202,21 @@ export class Transaction {
   async rollback(): Promise<void> {
     if (this.done) return;
     this.done = true;
-    const builder = new OptionsBuilder();
-    builder.addU64(OptionTag.TxnID, this.id);
-    const resp = await this.sender.sendRequest(
-      OpCode.KVRollbackTxn,
-      this.namespace,
-      new Uint8Array(0),
-      new Uint8Array(0),
-      builder.build()
-    );
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
+    const resp = await send(this.sender, OpCode.KVRollbackTxn, this.namespace, "", encodeTxnBody(this.id));
+    decodeEmptyAnswer(resp.data);
   }
 }
 
-/** Open a new per-shard KV transaction. */
+/** Open a new per-shard KV transaction; the routing key is the request's key. */
 export async function beginTxn(
   sender: TxnRequestSender,
   namespace: string,
   routingKey: string
 ): Promise<Transaction> {
-  const builder = new OptionsBuilder();
-  if (routingKey) {
-    builder.addBytes(OptionTag.RoutingKey, textEncoder.encode(routingKey));
-  }
-  const resp = await sender.sendRequest(
-    OpCode.KVBeginTxn,
-    namespace,
-    textEncoder.encode(routingKey),
-    new Uint8Array(0),
-    builder.build()
-  );
-  if (resp.status !== StatusCode.OK) {
-    throw createServerError(resp.status, resp.data);
-  }
-  // Wire body: [variant:u8=0][txn_id:u64 LE][pinned_hash:u64 LE]
-  if (resp.data.length < 17) {
-    throw new Error(`flo: short KV begin reply (${resp.data.length} bytes)`);
-  }
-  const view = new DataView(
-    resp.data.buffer,
-    resp.data.byteOffset,
-    resp.data.byteLength
-  );
-  return new Transaction(
-    sender,
-    namespace,
-    routingKey,
-    view.getBigUint64(1, true),
-    view.getBigUint64(9, true)
-  );
+  const n = textEncoder.encode(routingKey).length;
+  if (n === 0) throw new FloError("flo: a transaction needs a routing key");
+  if (n > MAX_ROUTING_KEY) throw new FloError(`flo: routing key is ${n} bytes, at most ${MAX_ROUTING_KEY}`);
+  const resp = await send(sender, OpCode.KVBeginTxn, namespace, routingKey, new Uint8Array(0));
+  const { txn, pinned } = decodeTxnBeginAnswer(resp.data);
+  return new Transaction(sender, namespace, routingKey, txn, pinned);
 }
