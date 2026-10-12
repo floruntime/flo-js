@@ -73,9 +73,9 @@ interface ClientOptions {
 | `get` | `get(key, opts?) → Promise<GetResult \| null>` | Value and version; null if not found |
 | `put` | `put(key, value, opts?) → Promise<PutResult>` | Set key-value; returns the new version |
 | `delete` | `delete(key, opts?) → Promise<boolean>` | Delete key; whether it existed (a missing key is not an error) |
-| `mget` | `mget(keys, opts?) → Promise<MGetEntry[]>` | Up to 256 keys; one entry per key, in order |
+| `mget` | `mget(keys, opts?) → Promise<MGetEntry[]>` | Up to 256 keys of at most 4096 bytes; one entry per key, in order |
 | `scan` | `scan(prefix, opts?) → Promise<ScanResult>` | One page of key names (`keys`) and the next page's `cursor` (null on the last) |
-| `history` | `history(key, opts?) → Promise<VersionEntry[]>` | Versions newest first: `version`, `atMs` (write time), `value` |
+| `history` | `history(key, opts?) → Promise<VersionEntry[]>` | Versions newest first: `version`, `atMs` (write time), `value`; none for a missing key |
 | `incr` | `incr(key, opts?) → Promise<KVIncrResult>` | Add `delta` (default 1) to a counter; its new `value` and `version` |
 | `expire` | `expire(key, ttlMs, opts?) → Promise<void>` | Set a key's TTL in ms; 0 clears it |
 | `exists` | `exists(key, opts?) → Promise<boolean>` | Whether the key is present |
@@ -84,8 +84,8 @@ interface ClientOptions {
 | `jsonDel` | `jsonDel(key, path = "$", opts?) → Promise<bigint \| null>` | Remove the JSON at `path`; the new version, or null when "$" deleted the key |
 | `begin` | `begin(routingKey, opts?) → Promise<Transaction>` | Open a transaction on `routingKey`'s shard |
 
-Every op takes `namespace` in its options; every op but `mget`, `scan` and
-`history` takes `routingKey`, which routes the request in place of the key.
+Every op takes `namespace` in its options; every op but `mget` and `scan`
+takes `routingKey`, which routes the request in place of the key.
 `delete` and `expire` take `casVersion`: the key's version they require.
 
 #### Get Options
@@ -117,7 +117,7 @@ interface PutOptions {
 interface ScanOptions {
   namespace?: string;
   cursor?: Uint8Array;     // The previous page's cursor; unset for the first page
-  limit?: number;          // Most names per page, 1 to 1024 (default 100)
+  limit?: number;          // Most names per page, 1 to 1024 (default 1024)
 }
 ```
 

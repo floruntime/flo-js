@@ -26,7 +26,9 @@ import {
   encodeJsonSetBody,
   encodeMGetBody,
   encodeScanBody,
+  splitMGetKeys,
   encodeSetBody,
+  MAX_SCAN_LIMIT,
 } from "./kv_body.js";
 import { beginTxn, Transaction } from "./kv_txn.js";
 import {
@@ -93,7 +95,7 @@ export async function kvSet(sender: Pick<RequestSender, "sendRequest">, namespac
 
 /** kv.scan: one page of names under `prefix`. */
 export async function kvScan(sender: Pick<RequestSender, "sendRequest">, namespace: string, prefix: string, opts?: { cursor?: Uint8Array; limit?: number }): Promise<ScanResult> {
-  const body = encodeScanBody(opts?.limit ?? 100, opts?.cursor);
+  const body = encodeScanBody(opts?.limit ?? MAX_SCAN_LIMIT, opts?.cursor);
   const resp = await sender.sendRequest(OpCode.KVScan, namespace, textEncoder.encode(prefix), body, new Uint8Array(0));
   if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
   return decodeScanAnswer(resp.data);
@@ -126,29 +128,32 @@ export class KVOperations {
    * MGet looks up many keys and returns one entry per requested key, in the
    * same order. The `found` flag tells a missing key from one whose value is
    * empty. When the server's answer fills up before every key is answered,
-   * mget asks again from the first key it didn't answer.
+   * mget asks again from the first key it didn't answer; keys too many bytes
+   * for one request go in several.
    *
-   * Limited to 256 keys per call.
+   * Limited to 256 keys per call, each at most 4096 bytes.
    */
   async mget(keys: string[], opts?: KVMGetOptions): Promise<MGetEntry[]> {
     if (keys.length === 0) return [];
     const namespace = this.sender.getNamespace(opts?.namespace);
     const encoded = keys.map((k) => textEncoder.encode(k));
-    encodeMGetBody(encoded); // refuse a bad key list before any round trip
     const out: MGetEntry[] = [];
-    while (out.length < keys.length) {
-      const from = out.length;
-      const resp = await this.sender.sendRequest(OpCode.KVMGet, namespace, new Uint8Array(0), encodeMGetBody(encoded.slice(from)), new Uint8Array(0));
-      if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
-      const page = decodeMGetAnswer(resp.data);
-      const asked = keys.length - from;
-      // Without next the answer covers every key asked; with it, exactly the
-      // keys before next, and at least one, or the loop would not end.
-      const answered = page.next ?? asked;
-      if (page.entries.length !== answered || answered === 0 || answered > asked || (page.next !== null && answered === asked)) {
-        throw new IncompleteResponseError(`kv.mget answered ${page.entries.length} entries, next ${page.next}, for ${asked} keys`);
+    // Each run of keys fits one request frame; within a run, follow next.
+    for (const end of splitMGetKeys(encoded)) {
+      while (out.length < end) {
+        const from = out.length;
+        const resp = await this.sender.sendRequest(OpCode.KVMGet, namespace, new Uint8Array(0), encodeMGetBody(encoded.slice(from, end)), new Uint8Array(0));
+        if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
+        const page = decodeMGetAnswer(resp.data);
+        const asked = end - from;
+        // Without next the answer covers every key asked; with it, exactly the
+        // keys before next, and at least one, or the loop would not end.
+        const answered = page.next ?? asked;
+        if (page.entries.length !== answered || answered === 0 || answered > asked || (page.next !== null && answered === asked)) {
+          throw new IncompleteResponseError(`kv.mget answered ${page.entries.length} entries, next ${page.next}, for ${asked} keys`);
+        }
+        for (const e of page.entries) out.push({ key: keys[out.length]!, ...e });
       }
-      for (const e of page.entries) out.push({ key: keys[out.length]!, ...e });
     }
     return out;
   }
@@ -174,10 +179,14 @@ export class KVOperations {
   }
 
   /**
-   * History returns a key's versions, newest first, each with its write time.
+   * History returns a key's versions, newest first, each with its write
+   * time; a missing key has none.
    */
   async history(key: string, opts?: HistoryOptions): Promise<VersionEntry[]> {
-    const resp = await this.send(OpCode.KVHistory, opts?.namespace, key, encodeHistoryBody(opts?.limit ?? 10));
+    const namespace = this.sender.getNamespace(opts?.namespace);
+    const resp = await this.sender.sendRequest(OpCode.KVHistory, namespace, textEncoder.encode(key), encodeHistoryBody(opts?.limit ?? 10, opts), new Uint8Array(0));
+    if (resp.status === StatusCode.NotFound) return absent(resp) ?? [];
+    if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
     return decodeHistoryAnswer(resp.data);
   }
 

@@ -10,7 +10,7 @@ export const VERSION = 0x02;
  * request header. A server built from another table refuses the request,
  * and its answers carry its own hash, which this SDK refuses.
  */
-export const TABLE_HASH = 0x8aa29e7a0c35fd78n;
+export const TABLE_HASH = 0xc93e40aa0f2795fen;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -672,7 +672,7 @@ export interface ScanOptions {
   namespace?: string;
   /** The cursor the previous page returned; unset for the first page. */
   cursor?: Uint8Array;
-  /** Most names to return, 1 to 1024; 100 when unset. */
+  /** Most names to return, 1 to 1024; 1024 when unset. */
   limit?: number;
 }
 
@@ -683,6 +683,8 @@ export interface HistoryOptions {
   namespace?: string;
   /** Most versions to return, 1 to 65; 10 when unset. */
   limit?: number;
+  /** Routes the request in place of the key. */
+  routingKey?: string;
 }
 
 /**

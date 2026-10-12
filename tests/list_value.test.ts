@@ -105,9 +105,9 @@ describe("list requests", () => {
     }
   });
 
-  it("kv.scan asks for 100 names from the first page by default", async () => {
+  it("kv.scan asks for 1024 names (the server's default) from the first page by default", async () => {
     const { sender, sent } = capture();
     await expect(new KVOperations(sender).scan("p")).rejects.toThrow("captured");
-    expect(Array.from(sent[0]!.value)).toEqual([1, 100, 0, 0, 0, 0]);
+    expect(Array.from(sent[0]!.value)).toEqual([1, 0, 4, 0, 0, 0]);
   });
 });

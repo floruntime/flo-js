@@ -12,6 +12,8 @@ import {
   MAX_HISTORY_LIMIT,
   MAX_JSON_DOCUMENT,
   MAX_KV_VALUE_SIZE,
+  MAX_MGET_BODY,
+  MAX_MGET_KEY,
   MAX_SCAN_LIMIT,
   MAX_TTL_MS,
   MAX_WAIT_MS,
@@ -22,6 +24,7 @@ import {
   reasonName,
   ServerError,
   StatusCode,
+  KVReadOnlyOperations,
   Transaction,
   WaitFor,
 } from "../packages/core/src/index.js";
@@ -166,7 +169,7 @@ describe("request bodies match the server's vectors", () => {
   const cases: [string, OpCode, string, string, (kv: KVOperations) => Promise<unknown>, string, unknown][] = [
     ["delete", OpCode.KVDelete, "k", "010700000000000000010200726b00", (kv) => kv.delete("k", { casVersion: 7n, routingKey: "rk" }), "0101", true],
     ["scan", OpCode.KVScan, "p", "0102000000026331", (kv) => kv.scan("p", { limit: 2, cursor: enc.encode("c1") }), "02000100610200626201026332", { keys: ["a", "bb"], cursor: enc.encode("c2") }],
-    ["history", OpCode.KVHistory, "k", "0102000000", (kv) => kv.history("k", { limit: 2 }), "010300000000000000e803000000000000020000007633", [{ version: 3n, atMs: 1000n, value: enc.encode("v3") }]],
+    ["history", OpCode.KVHistory, "k", "010200000000", (kv) => kv.history("k", { limit: 2 }), "010300000000000000e803000000000000020000007633", [{ version: 3n, atMs: 1000n, value: enc.encode("v3") }]],
     ["incr", OpCode.KVIncr, "k", "01fbffffffffffffff0000", (kv) => kv.incr("k", { delta: -5n }), "010400000000000000012a00000000000000", { version: 4n, value: 42n }],
     ["expire", OpCode.KVExpire, "k", "60ea000000000000000000", (kv) => kv.expire("k", 60000), "", undefined],
     ["exists", OpCode.KVExists, "k", "0000", (kv) => kv.exists("k"), "010500000000000000", true],
@@ -181,6 +184,18 @@ describe("request bodies match the server's vectors", () => {
       expect(sent[0]).toEqual({ op, key, value: hex(body), options: new Uint8Array(0) });
     });
   }
+
+  it("history with a routing key", async () => {
+    const { s, sent } = seq(ok("00"));
+    expect(await new KVOperations(s).history("k", { limit: 2, routingKey: "rk" })).toEqual([]);
+    expect(sent[0]!.value).toEqual(hex("0102000000" + "01" + "0200" + "726b"));
+  });
+
+  it("history of a missing key is empty", async () => {
+    expect(await new KVOperations(seq(refusal(StatusCode.NotFound, Reason.NotFound)).s).history("k")).toEqual([]);
+    const err = await new KVOperations(seq(refusal(StatusCode.NotFound, Reason.NoSuchTransaction)).s).history("k").catch((e) => e);
+    expect((err as ServerError).reason).toBe(Reason.NoSuchTransaction);
+  });
 
   it("jsonGet and jsonDel default the path to $", async () => {
     const { s, sent } = seq(ok("0300000000000000020000007b7d"), ok("00"));
@@ -220,6 +235,16 @@ describe("the vectors inside a transaction", () => {
   });
 });
 
+describe("the read-only client's get", () => {
+  it("sends kv.get's schema body and reads its answer", async () => {
+    const { s, sent } = seq(getAnswer(4n, "hi"));
+    expect(await new KVReadOnlyOperations(s).get("k")).toEqual(enc.encode("hi"));
+    // wait_ms 0 and wait_for exists, both present; no routing key or txn.
+    expect(sent[0]).toEqual({ op: OpCode.KVGet, key: "k", value: new Uint8Array([1, ...u64(0n), 1, 0, 0, 0]), options: new Uint8Array(0) });
+    expect(await new KVReadOnlyOperations(seq(refusal(StatusCode.NotFound, Reason.NotFound)).s).get("k")).toBeNull();
+  });
+});
+
 describe("kv.delete", () => {
   it("of a missing key is not an error: it didn't exist", async () => {
     expect(await new KVOperations(seq(ok("0100")).s).delete("k")).toBe(false);
@@ -242,6 +267,22 @@ describe("kv.mget", () => {
     expect(sent).toHaveLength(2);
     expect(sent[0]!.value).toEqual(hex("030001006101006201006" + "3"));
     expect(sent[1]!.value).toEqual(hex("0100010063"));
+  });
+
+  it("splits keys across requests so each body fits the frame, following next within each", async () => {
+    const keys = Array.from({ length: 200 }, (_, i) => `${i}`.padStart(2000, "k"));
+    const perRequest = Math.floor((MAX_MGET_BODY - 2) / 2002); // 128 keys of 2000 bytes
+    const entry = "01" + "00".repeat(12); // found, version 0, empty value
+    const answer = (n: number, next: number | null) =>
+      ok(n.toString(16).padStart(2, "0") + "00" + entry.repeat(n) + (next === null ? "00" : "01" + next.toString(16).padStart(2, "0") + "00"));
+    // The first request's answer fills up after 100 keys.
+    const { s, sent } = seq(answer(100, 100), answer(perRequest - 100, null), answer(200 - perRequest, null));
+    const got = await new KVOperations(s).mget(keys);
+    expect(got.map((e) => e.key)).toEqual(keys);
+    expect(sent.map((x) => new DataView(x.value.buffer).getUint16(0, true))).toEqual([perRequest, perRequest - 100, 200 - perRequest]);
+    for (const x of sent) expect(x.value.length).toBeLessThanOrEqual(MAX_MGET_BODY);
+    expect(new TextDecoder().decode(sent[1]!.value.subarray(4, 4 + 2000))).toBe(keys[100]);
+    expect(new TextDecoder().decode(sent[2]!.value.subarray(4, 4 + 2000))).toBe(keys[perRequest]);
   });
 
   it("refuses an answer that makes no progress", async () => {
@@ -293,9 +334,11 @@ describe("transaction ops", () => {
 describe("bounds are refused before a round trip", () => {
   const refused: [string, (kv: KVOperations) => Promise<unknown>][] = [
     ["mget of 257 keys", (kv) => kv.mget(Array.from({ length: 257 }, (_, i) => `k${i}`))],
+    ["an mget key over 4096 bytes", (kv) => kv.mget(["a", "k".repeat(MAX_MGET_KEY + 1)])],
     ["scan limit 0", (kv) => kv.scan("", { limit: 0 })],
     ["scan limit 1025", (kv) => kv.scan("", { limit: MAX_SCAN_LIMIT + 1 })],
     ["scan cursor of 65 bytes", (kv) => kv.scan("", { cursor: new Uint8Array(65) })],
+    ["history limit 0", (kv) => kv.history("k", { limit: 0 })],
     ["history limit 66", (kv) => kv.history("k", { limit: MAX_HISTORY_LIMIT + 1 })],
     ["expire past MAX_TTL_MS", (kv) => kv.expire("k", MAX_TTL_MS + 1n)],
     ["expire negative", (kv) => kv.expire("k", -1)],

@@ -39,8 +39,10 @@ export const MAX_JSON_PATH = 1024;
 export const MAX_JSON_DOCUMENT = 252_819;
 /** The longest scan cursor; its length prefix is a u8. */
 const MAX_SCAN_CURSOR = 64;
-/** The longest key in a kv.mget; its length prefix is a u16. */
-const MAX_MGET_KEY = 0xffff;
+/** The longest key in a kv.mget. */
+export const MAX_MGET_KEY = 4096;
+/** The longest kv.mget body that fits one request frame. */
+export const MAX_MGET_BODY = 257_949;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -259,13 +261,34 @@ export function encodeScanBody(limit: number, cursor: Uint8Array | undefined): U
   return w.build();
 }
 
-/** kv.history's request: limit (1 to 65). */
-export function encodeHistoryBody(limit: number): Uint8Array {
+/** kv.history's request: limit (1 to 65), routing_key. */
+export function encodeHistoryBody(limit: number, opts?: { routingKey?: string }): Uint8Array {
   checkLimit("limit", limit, MAX_HISTORY_LIMIT);
   const w = new BodyWriter();
   w.u8(1);
   w.u32(limit);
+  w.routingKey(opts?.routingKey);
   return w.build();
+}
+
+/**
+ * Split mget's keys into runs whose bodies each fit one request frame;
+ * returns each run's end index. Refuses a bad key list.
+ */
+export function splitMGetKeys(keys: readonly Uint8Array[]): number[] {
+  if (keys.length === 0 || keys.length > MAX_MGET_KEYS) throw new FloError(`flo: mget takes 1 to ${MAX_MGET_KEYS} keys, got ${keys.length}`);
+  const ends: number[] = [];
+  let size = 2;
+  keys.forEach((k, i) => {
+    if (k.length > MAX_MGET_KEY) throw new FloError(`flo: mget key is ${k.length} bytes, at most ${MAX_MGET_KEY}`);
+    if (size + 2 + k.length > MAX_MGET_BODY) {
+      ends.push(i);
+      size = 2;
+    }
+    size += 2 + k.length;
+  });
+  ends.push(keys.length);
+  return ends;
 }
 
 /** kv.mget's request: the keys, 1 to 256. */
