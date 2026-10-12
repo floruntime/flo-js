@@ -66,7 +66,7 @@ async function main() {
     // Example 4: Using scan() directly (low-level, single page)
     console.log("\n4. Low-level scan() (single page):");
     const scanResult = await client.kv.scan("user:", { limit: 2 });
-    console.log(`  Found ${scanResult.entries.length} entries, hasMore: ${scanResult.hasMore}`);
+    console.log(`  Found ${scanResult.keys.length} keys, more: ${scanResult.cursor !== null}`);
 
     // Clean up
     await client.kv.delete("user:1");

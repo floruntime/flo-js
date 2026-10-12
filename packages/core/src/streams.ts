@@ -9,6 +9,7 @@ import {
   OpCode,
   OptionTag,
   type RawResponse,
+  type ScanResult,
   StatusCode,
   StorageTier,
   StreamID,
@@ -22,7 +23,8 @@ import {
   type StreamAckOptions,
   type StreamNackOptions,
 } from "./types.js";
-import { OptionsBuilder, serializeListValue } from "./wire.js";
+import { kvGet, kvScan } from "./kv.js";
+import { OptionsBuilder } from "./wire.js";
 
 /**
  * Interface for sending requests (implemented by client).
@@ -558,7 +560,7 @@ export class StreamOperations {
 
 /**
  * Read-only KV operations for web clients.
- * Only exposes get, scan, and history - no mutations.
+ * Only exposes get and scan - no mutations.
  */
 export class KVReadOnlyOperations {
   constructor(private readonly sender: StreamRequestSender) {}
@@ -568,56 +570,15 @@ export class KVReadOnlyOperations {
    * Returns null if the key is not found.
    */
   async get(key: string, opts?: { namespace?: string }): Promise<Uint8Array | null> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.KVGet,
-      namespace,
-      textEncoder.encode(key),
-      new Uint8Array(0),
-      new Uint8Array(0)
-    );
-
-    if (resp.status === StatusCode.NotFound) {
-      return null;
-    }
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-
-    if (resp.data.length === 0) {
-      return null;
-    }
-
-    return resp.data;
+    const got = await kvGet(this.sender, this.sender.getNamespace(opts?.namespace), key);
+    return got?.value ?? null;
   }
 
   /**
-   * Scan retrieves keys with a prefix.
+   * Scan returns one page of the key names that start with `prefix`, and
+   * the cursor for the next page, null on the last.
    */
-  async scan(
-    prefix: string,
-    opts?: { namespace?: string; cursor?: Uint8Array; limit?: number }
-  ): Promise<import("./types.js").ScanResult> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const value = serializeListValue(opts?.limit, opts?.cursor);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.KVScan,
-      namespace,
-      textEncoder.encode(prefix),
-      value,
-      new OptionsBuilder().build()
-    );
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-
-    // Import and use parseScanResponse from wire.ts
-    const { parseScanResponse } = await import("./wire.js");
-    return parseScanResponse(resp.data);
+  async scan(prefix: string, opts?: { namespace?: string; cursor?: Uint8Array; limit?: number }): Promise<ScanResult> {
+    return kvScan(this.sender, this.sender.getNamespace(opts?.namespace), prefix, opts);
   }
 }

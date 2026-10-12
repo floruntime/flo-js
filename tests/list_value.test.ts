@@ -1,6 +1,7 @@
 /**
- * Every list/scan op carries its page size and cursor in the request value as
- * [limit:u32 LE][cursor bytes], not as options.
+ * Every list op carries its page size and cursor in the request value as
+ * [limit:u32 LE][cursor bytes], not as options. kv.scan is a table op and
+ * codes them as its schema's fields.
  */
 
 import { describe, it, expect } from "vitest";
@@ -58,8 +59,6 @@ describe("serializeListValue", () => {
 
 describe("list requests", () => {
   const cases: [string, number, (s: never) => Promise<unknown>][] = [
-    ["kv.scan", OpCode.KVScan, (s) => new KVOperations(s).scan("p", { limit: 5, cursor })],
-    ["web kv.scan", OpCode.KVScan, (s) => new KVReadOnlyOperations(s).scan("p", { limit: 5, cursor })],
     ["processing.list", OpCode.ProcessingList, (s) => new ProcessingOperations(s).list({ limit: 5, cursor })],
     [
       "workflow.listDefinitions",
@@ -93,10 +92,22 @@ describe("list requests", () => {
     }
   });
 
-  it("kv.scan sends no options", async () => {
+  it("kv.scan and the web kv.scan send limit (present) then a u8-prefixed cursor, and no options", async () => {
+    for (const call of [
+      (s: never) => new KVOperations(s).scan("p", { limit: 5, cursor }),
+      (s: never) => new KVReadOnlyOperations(s).scan("p", { limit: 5, cursor }),
+    ]) {
+      const { sender, sent } = capture();
+      await expect(call(sender)).rejects.toThrow("captured");
+      expect(sent[0]!.op).toBe(OpCode.KVScan);
+      expect(Array.from(sent[0]!.value)).toEqual([1, 5, 0, 0, 0, 4, ...cursor]);
+      expect(sent[0]!.options.length).toBe(0);
+    }
+  });
+
+  it("kv.scan asks for 1024 names (the server's default) from the first page by default", async () => {
     const { sender, sent } = capture();
     await expect(new KVOperations(sender).scan("p")).rejects.toThrow("captured");
-    expect(tagsOf(sent[0]!.options)).toEqual([]);
-    expect(Array.from(sent[0]!.value)).toEqual([0, 0, 0, 0]);
+    expect(Array.from(sent[0]!.value)).toEqual([1, 0, 4, 0, 0, 0]);
   });
 });

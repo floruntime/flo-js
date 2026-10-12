@@ -29,13 +29,12 @@ export {
   statusCodeToString,
   OptionTag,
   // KV Result types
-  type KVEntry,
   type ScanResult,
   type VersionEntry,
+  type KVIncrResult,
   type PutResult,
   type GetResult,
   type MGetEntry,
-  type KVBeginResult,
   type KVCommitResult,
   // Queue types (for Node.js backend use)
   type Message,
@@ -59,7 +58,7 @@ export {
   type ScanOptions,
   type HistoryOptions,
   type KVIncrOptions,
-  type KVTouchOptions,
+  type KVExpireOptions,
   type KVExistsOptions,
   type KVJsonOptions,
   type KVMGetOptions,
@@ -191,8 +190,6 @@ export {
   serializeRequest,
   parseResponseHeader,
   parseRawResponse,
-  parseScanResponse,
-  parseHistoryResponse,
   parseDequeueResponse,
   parseEnqueueResponse,
   serializeSeqs,
@@ -200,6 +197,17 @@ export {
 
 // Operations
 export { KVOperations, type RequestSender as KVRequestSender } from "./kv.js";
+export {
+  MAX_HISTORY_LIMIT,
+  MAX_JSON_DOCUMENT,
+  MAX_JSON_PATH,
+  MAX_MGET_BODY,
+  MAX_MGET_KEY,
+  MAX_MGET_KEYS,
+  MAX_ROUTING_KEY,
+  MAX_SCAN_LIMIT,
+  MAX_TTL_MS,
+} from "./kv_body.js";
 export {
   Transaction,
   TxnFinishedError,

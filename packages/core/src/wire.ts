@@ -15,7 +15,6 @@ import {
 import {
   DequeueResult,
   HEADER_SIZE,
-  type KVEntry,
   MAGIC,
   MAX_BLOCK_MS,
   MAX_KEY_SIZE,
@@ -25,11 +24,9 @@ import {
   OpCode,
   OptionTag,
   type RawResponse,
-  ScanResult,
   type StatusCode,
   VERSION,
   TABLE_HASH,
-  type VersionEntry,
 } from "./types.js";
 import { isTableOp } from "./kv_body.js";
 
@@ -117,9 +114,10 @@ export function requestBlockMs(request: Uint8Array): number {
   off += 2 + view.getUint16(off, true); // namespace
   if (request.length < off + 2) return 0;
   off += 2 + view.getUint16(off, true); // key
-  if (view.getUint16(20, true) === OpCode.KVGet) {
-    // kv.get's body opens with wait_ms: [present:u8][u64].
-    if (request.length < off + 9 || request[off] !== 1) return 0;
+  const op = view.getUint16(20, true) as OpCode;
+  if (isTableOp(op)) {
+    // Of the table ops only kv.get waits; its body opens with wait_ms: [present:u8][u64].
+    if (op !== OpCode.KVGet || request.length < off + 9 || request[off] !== 1) return 0;
     return Number(view.getBigUint64(off + 1, true));
   }
   if (request.length < off + 4) return 0;
@@ -383,113 +381,6 @@ export function parseRawResponse(
 ): RawResponse {
   const [status, , requestId] = parseResponseHeader(header);
   return { status, data, requestId };
-}
-
-/**
- * Parse scan response data.
- * Format: [count:u32] ([key_len:u16][key][value_len:u32][value])*
- *         [has_more:u8][cursor_len:u16][cursor]
- */
-export function parseScanResponse(data: Uint8Array): ScanResult {
-  if (data.length < 4) {
-    throw new IncompleteResponseError("scan response too short");
-  }
-
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  let offset = 0;
-
-  const count = view.getUint32(offset, true);
-  offset += 4;
-
-  const entries: KVEntry[] = [];
-  for (let i = 0; i < count; i++) {
-    if (data.length < offset + 2) {
-      throw new IncompleteResponseError("scan response truncated at key length");
-    }
-    const keyLen = view.getUint16(offset, true);
-    offset += 2;
-
-    if (data.length < offset + keyLen) {
-      throw new IncompleteResponseError("scan response truncated at key data");
-    }
-    const key = data.slice(offset, offset + keyLen);
-    offset += keyLen;
-
-    if (data.length < offset + 4) {
-      throw new IncompleteResponseError("scan response truncated at value length");
-    }
-    const valueLen = view.getUint32(offset, true);
-    offset += 4;
-
-    let value: Uint8Array | null = null;
-    if (valueLen > 0) {
-      if (data.length < offset + valueLen) {
-        throw new IncompleteResponseError("scan response truncated at value data");
-      }
-      value = data.slice(offset, offset + valueLen);
-      offset += valueLen;
-    }
-
-    entries.push({ key, value });
-  }
-
-  if (data.length < offset + 3) {
-    throw new IncompleteResponseError("scan response truncated at cursor");
-  }
-  const hasMore = data[offset]! !== 0;
-  offset += 1;
-  const cursorLen = view.getUint16(offset, true);
-  offset += 2;
-  if (data.length < offset + cursorLen) {
-    throw new IncompleteResponseError("scan response truncated at cursor");
-  }
-  const cursor = cursorLen > 0 ? data.slice(offset, offset + cursorLen) : null;
-
-  return { entries, cursor, hasMore };
-}
-
-/**
- * Parse history response data.
- */
-export function parseHistoryResponse(data: Uint8Array): VersionEntry[] {
-  if (data.length < 4) {
-    throw new IncompleteResponseError("history response too short");
-  }
-
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  let offset = 0;
-
-  const count = view.getUint32(offset, true);
-  offset += 4;
-
-  const entries: VersionEntry[] = [];
-  for (let i = 0; i < count; i++) {
-    if (data.length < offset + 20) {
-      throw new IncompleteResponseError("history response truncated at entry");
-    }
-
-    const version = view.getBigUint64(offset, true);
-    offset += 8;
-
-    const timestamp = view.getBigInt64(offset, true);
-    offset += 8;
-
-    const valueLen = view.getUint32(offset, true);
-    offset += 4;
-
-    if (data.length < offset + valueLen) {
-      throw new IncompleteResponseError(
-        "history response truncated at value data"
-      );
-    }
-
-    const value = data.slice(offset, offset + valueLen);
-    offset += valueLen;
-
-    entries.push({ version, timestamp, value });
-  }
-
-  return entries;
 }
 
 /**

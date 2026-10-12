@@ -10,7 +10,7 @@ export const VERSION = 0x02;
  * request header. A server built from another table refuses the request,
  * and its answers carry its own hash, which this SDK refuses.
  */
-export const TABLE_HASH = 0x02e15ee74c0ad72cn;
+export const TABLE_HASH = 0xc93e40aa0f2795fen;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -52,6 +52,10 @@ export enum Reason {
   WritesStopped = 22,
   /** Too many writes wait for commit. */
   TooManyProposals = 23,
+  /** The key's value isn't the kind the op works on (a counter, a JSON document). */
+  WrongType = 24,
+  /** The shard holds as many open transactions as it may. */
+  TooManyTransactions = 25,
 }
 
 /** Whether a refused request took effect: retry logic reads this, not the message. */
@@ -87,6 +91,8 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.ConflictingFields]: "conflicting_fields",
   [Reason.WritesStopped]: "writes_stopped",
   [Reason.TooManyProposals]: "too_many_proposals",
+  [Reason.WrongType]: "wrong_type",
+  [Reason.TooManyTransactions]: "too_many_transactions",
 };
 
 /** The server's name for a reason, as it appears in messages. */
@@ -162,9 +168,8 @@ export const OpCode = {
   KVBeginTxn: 0x110,
   KVCommitTxn: 0x111,
   KVRollbackTxn: 0x112,
-  // KV extended (TTL lifecycle, exists)
-  KVTouch: 0x113,
-  KVPersist: 0x114,
+  // KV extended (TTL, exists)
+  KVExpire: 0x113,
   KVExists: 0x115,
 
   // ── Streams (0x130 – 0x14F) ──
@@ -320,14 +325,7 @@ export function statusCodeToString(status: StatusCode): string {
  * Option tags for TLV-encoded operation parameters.
  */
 export const OptionTag = {
-  // KV Options (0x01 - 0x0F)
-  TTLMs: 0x01, // u64: Time-to-live in milliseconds (0 = no expiration)
-  CASVersion: 0x02, // u64: Expected version for compare-and-swap
-  IfNotExists: 0x03, // void: Only set if key doesn't exist (NX)
-  IfExists: 0x04, // void: Only set if key exists (XX)
-  Limit: 0x05, // u32: Maximum results for KV history and TS read; list/scan ops take theirs in the value
-  RoutingKey: 0x08, // string: Explicit routing key for shard co-location
-  TxnID: 0x09, // u64: Transaction ID for per-shard transactions
+  Limit: 0x05, // u32: Maximum results for TS read; list/scan ops take theirs in the value
 
   // Queue Options (0x10 - 0x1F)
   Priority: 0x10, // u8: Message priority (0-255, lower is taken first; unset is 0)
@@ -363,29 +361,30 @@ export const OptionTag = {
 export type OptionTag = (typeof OptionTag)[keyof typeof OptionTag];
 
 /**
- * KV entry from scan results.
- */
-export interface KVEntry {
-  key: Uint8Array;
-  value: Uint8Array | null;
-}
-
-/**
- * Result of a KV scan operation.
+ * One page of a KV scan: the key names, and the cursor for the next page
+ * (null on the last page).
  */
 export interface ScanResult {
-  entries: KVEntry[];
-  cursor: Uint8Array | null; // null if no more pages
-  hasMore: boolean;
+  keys: string[];
+  cursor: Uint8Array | null;
 }
 
 /**
- * KV version entry from history.
+ * One version of a key, from KV history.
  */
 export interface VersionEntry {
   version: bigint;
-  timestamp: bigint;
+  /** When the version was written, in ms since the Unix epoch. */
+  atMs: bigint;
   value: Uint8Array;
+}
+
+/**
+ * Result of a KV incr: the counter's new value and the key's new version.
+ */
+export interface KVIncrResult {
+  value: bigint;
+  version: bigint;
 }
 
 /**
@@ -396,18 +395,6 @@ export interface VersionEntry {
  */
 export interface PutResult {
   version: bigint;
-}
-
-/**
- * Result of a successful KV transaction begin.
- *
- * `txnId` is the server-assigned transaction handle. `pinnedHash` is the
- * partition hash this transaction is bound to — every key written or read
- * inside the transaction must hash to the same partition.
- */
-export interface KVBeginResult {
-  txnId: bigint;
-  pinnedHash: bigint;
 }
 
 /**
@@ -670,11 +657,12 @@ export interface PutOptions {
 export interface DeleteOptions {
   namespace?: string;
   /**
-   * CAS guard — when set, the delete only succeeds if the current key
-   * version equals `ifMatch`. Throws on mismatch (CAS failed). Use this
-   * for race-free "only the owner deletes" patterns (locks, leases).
+   * The key's version the delete requires; a mismatch throws a conflict with
+   * reason CasMismatch. For race-free "only the owner deletes" (locks, leases).
    */
-  ifMatch?: bigint;
+  casVersion?: bigint;
+  /** Routes the request in place of the key. */
+  routingKey?: string;
 }
 
 /**
@@ -682,7 +670,9 @@ export interface DeleteOptions {
  */
 export interface ScanOptions {
   namespace?: string;
+  /** The cursor the previous page returned; unset for the first page. */
   cursor?: Uint8Array;
+  /** Most names to return, 1 to 1024; 1024 when unset. */
   limit?: number;
 }
 
@@ -691,7 +681,10 @@ export interface ScanOptions {
  */
 export interface HistoryOptions {
   namespace?: string;
+  /** Most versions to return, 1 to 65; 10 when unset. */
   limit?: number;
+  /** Routes the request in place of the key. */
+  routingKey?: string;
 }
 
 /**
@@ -701,19 +694,23 @@ export interface KVIncrOptions {
   namespace?: string;
   /** Defaults to +1 when omitted. Negative values decrement. */
   delta?: bigint;
+  /** Routes the request in place of the key. */
+  routingKey?: string;
 }
 
 /**
- * Options for KV touch / persist operations.
+ * Options for KV expire operations.
  */
-export interface KVTouchOptions {
+export interface KVExpireOptions {
   namespace?: string;
   /**
-   * CAS guard — when set, the touch/persist only succeeds if the current
-   * key version equals `ifMatch`. Use this for race-free lease renewal
-   * ("only the owner extends the TTL").
+   * The key's version the expire requires; a mismatch throws a conflict with
+   * reason CasMismatch. For race-free lease renewal ("only the owner extends
+   * the TTL").
    */
-  ifMatch?: bigint;
+  casVersion?: bigint;
+  /** Routes the request in place of the key. */
+  routingKey?: string;
 }
 
 /**
@@ -721,13 +718,17 @@ export interface KVTouchOptions {
  */
 export interface KVExistsOptions {
   namespace?: string;
+  /** Routes the request in place of the key. */
+  routingKey?: string;
 }
 
 /**
- * Options for KV JSON.* operations.
+ * Options for KV JSON operations.
  */
 export interface KVJsonOptions {
   namespace?: string;
+  /** Routes the request in place of the key. */
+  routingKey?: string;
 }
 
 /**
