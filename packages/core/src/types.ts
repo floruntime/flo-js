@@ -2,6 +2,8 @@
  * Flo protocol constants and types.
  */
 
+import type { RetryPolicy } from "./retry.js";
+
 // Protocol constants
 export const MAGIC = 0x004f4c46; // "FLO\0" in little-endian
 export const VERSION = 0x02;
@@ -864,6 +866,14 @@ export interface ClientOptions {
    * - Logger object: use custom logger implementation
    */
   logger?: boolean | Logger;
+
+  /**
+   * How requests the server refused without running them (overloaded or
+   * unavailable, ran = no) are sent again. Unset fields take the defaults:
+   * `{ maxAttempts: 4, initialBackoffMs: 50, maxBackoffMs: 1000 }`.
+   * `{ maxAttempts: 1 }` turns retrying off.
+   */
+  retry?: Partial<RetryPolicy>;
 }
 
 /**

@@ -36,10 +36,11 @@ import {
   consoleLogger,
   silentLogger,
   type ProcessEntry,
+  type RetryPolicy,
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff, pause } from "./poll-backoff.js";
+import { EmptyPollBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -79,6 +80,9 @@ export interface ActionWorkerConfig {
    * Set to 0 to disable heartbeats.
    */
   heartbeatIntervalMs?: number;
+
+  /** How its connection retries refused-but-not-run requests (default: the client default). */
+  retry?: Partial<RetryPolicy>;
 
   /**
    * Logger for worker messages.
@@ -327,6 +331,7 @@ export class ActionWorker {
       blockMs: workerBlockMs(config.blockMs),
       machineId: config.machineId ?? (os.hostname() || ""),
       heartbeatIntervalMs: config.heartbeatIntervalMs ?? 30000,
+      retry: config.retry ?? {},
     };
 
     // Setup logger
@@ -386,6 +391,7 @@ export class ActionWorker {
     this.client = new FloClient(this.config.endpoint, {
       namespace: this.config.namespace,
       logger: this.logger,
+      retry: this.config.retry,
     });
     await this.client.connect();
 
@@ -450,6 +456,7 @@ export class ActionWorker {
 
   private async pollLoop(actionNames: string[]): Promise<void> {
     const backoff = new EmptyPollBackoff();
+    const failed = newWorkerBackoff();
     while (this.running && !this.stopRequested) {
       try {
         // Check concurrency limit
@@ -471,6 +478,7 @@ export class ActionWorker {
           actionNames,
           { blockMs: this.config.blockMs }
         );
+        failed.reset();
 
         const wait = backoff.next(result.task === null, performance.now() - started, this.config.blockMs);
         if (result.task === null) {
@@ -487,8 +495,9 @@ export class ActionWorker {
         this.pendingTasks.add(taskPromise);
       } catch (err) {
         if (!this.stopRequested) {
-          this.log(`Await error: ${err}, retrying...`);
-          await this.sleep(1000);
+          const d = failed.next();
+          this.log(`Await error: ${err}, retrying in ${d}ms...`);
+          await pause(d, this.stopSignal.signal);
         }
       }
     }

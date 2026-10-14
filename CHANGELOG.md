@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A request refused as overloaded or unavailable with `ran === Ran.No` is sent again as a new request, up to 4 tries with a jittered wait doubling from 50 ms to 1 s (`retry` client option; `{ maxAttempts: 1 }` turns it off). Workers back off from 100 ms to 5 s after a failed poll (was a flat 1 s that `stop()` couldn't cut short), and a `StreamWorker` retries a group join refused this way instead of failing `start()`.
 - Every refusal's body is `[reason:u16][ran:u8][message]`. `ServerError` gains `.reason` (`Reason`) and `.ran` (`Ran`): whether the request took effect, so retry logic reads a field, not the message. Its message names the reason when the server gave one. A body that isn't a refusal is an `IncompleteResponseError`.
 - Requests carry the op table hash (`TABLE_HASH`) under protocol version 2. An answer from a server built from another protocol version or table throws `TableMismatchError`, naming both tables, before its body is read, and the connection is closed. `UnsupportedVersionError` is gone.
 - Workers back off (50 ms, doubling to 1 s) when blocking polls keep coming back empty at once.

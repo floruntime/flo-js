@@ -127,7 +127,8 @@ describe("a non-ok reply leaves the connection framed for the next one", () => {
     });
     await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
     const { port } = server.address() as net.AddressInfo;
-    client = new FloClient(`127.0.0.1:${port}`, { timeoutMs: 2000 });
+    // Not retried, so the first call gets the refusal the server sent.
+    client = new FloClient(`127.0.0.1:${port}`, { timeoutMs: 2000, retry: { maxAttempts: 1 } });
     await client.connect();
     return client;
   }

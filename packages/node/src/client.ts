@@ -4,6 +4,7 @@
 
 import {
   ActionOperations,
+  Backoff,
   type ClientOptions,
   type Logger,
   consoleLogger,
@@ -17,6 +18,7 @@ import {
   type ProcessingSyncDirFile,
   QueueOperations,
   type RawResponse,
+  type RetryPolicy,
   StreamOperations,
   type Transport,
   WorkerOperations,
@@ -24,7 +26,9 @@ import {
   type WorkflowSyncOptions,
   type WorkflowSyncResult,
   type WorkflowSyncDirFile,
+  normalizeRetryPolicy,
   parseRawResponse,
+  refusedUnrun,
   serializeRequest,
 } from "@floruntime/core";
 import { readdir, readFile } from "node:fs/promises";
@@ -38,6 +42,7 @@ export class FloClient {
   private readonly transport: Transport;
   private readonly defaultNamespace: string;
   private readonly logger: Logger;
+  private readonly retry: RetryPolicy;
   private requestId: bigint = 0n;
 
   /** KV operations */
@@ -69,6 +74,7 @@ export class FloClient {
    */
   constructor(endpoint: string, options?: ClientOptions) {
     this.defaultNamespace = options?.namespace ?? "default";
+    this.retry = normalizeRetryPolicy(options?.retry);
     
     // Resolve logger: explicit logger option > debug flag > silent
     if (options?.logger === true) {
@@ -133,10 +139,31 @@ export class FloClient {
   }
 
   /**
-   * Send a request to the server.
+   * Send a request to the server, sending it again as the retry policy
+   * allows while the server refuses it without running it.
    * Used internally by KV and Queue operations.
    */
   async sendRequest(
+    opCode: OpCode,
+    namespace: string,
+    key: Uint8Array,
+    value: Uint8Array,
+    options: Uint8Array
+  ): Promise<RawResponse> {
+    const wait = new Backoff(this.retry.initialBackoffMs, this.retry.maxBackoffMs);
+    for (let attempt = 1; ; attempt++) {
+      const resp = await this.sendOnce(opCode, namespace, key, value, options);
+      if (attempt >= this.retry.maxAttempts || !refusedUnrun(resp)) {
+        return resp;
+      }
+      const d = wait.next();
+      this.logger.debug(`${opCode} refused (status ${resp.status}), not run: retrying in ${d}ms`);
+      await new Promise((r) => setTimeout(r, d));
+    }
+  }
+
+  /** Send a request, under a new request id, and receive its response. */
+  private async sendOnce(
     opCode: OpCode,
     namespace: string,
     key: Uint8Array,
