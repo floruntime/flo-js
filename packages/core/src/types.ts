@@ -12,7 +12,7 @@ export const VERSION = 0x02;
  * request header. A server built from another table refuses the request,
  * and its answers carry its own hash, which this SDK refuses.
  */
-export const TABLE_HASH = 0xc93e40aa0f2795fen;
+export const TABLE_HASH = 0x5194dd26f737dba9n;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -58,6 +58,8 @@ export enum Reason {
   WrongType = 24,
   /** The shard holds as many open transactions as it may. */
   TooManyTransactions = 25,
+  /** An action complete or fail for a run that has moved on (another worker holds it, or it finished). It was dropped; resending it is refused the same way. */
+  StaleReport = 26,
 }
 
 /** Whether a refused request took effect: retry logic reads this, not the message. */
@@ -95,6 +97,7 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.TooManyProposals]: "too_many_proposals",
   [Reason.WrongType]: "wrong_type",
   [Reason.TooManyTransactions]: "too_many_transactions",
+  [Reason.StaleReport]: "stale_report",
 };
 
 /** The server's name for a reason, as it appears in messages. */
@@ -258,9 +261,6 @@ export const OpCode = {
   ProcessingCancel: 0x362,
   ProcessingStatus: 0x363,
   ProcessingList: 0x364,
-  ProcessingSavepoint: 0x365,
-  ProcessingRestore: 0x366,
-  ProcessingRescale: 0x367,
 } as const;
 
 export type OpCode = (typeof OpCode)[keyof typeof OpCode];
@@ -1384,34 +1384,12 @@ export interface ProcessingCancelOptions {
 }
 
 /**
- * Options for triggering a processing savepoint.
- */
-export interface ProcessingSavepointOptions {
-  namespace?: string;
-}
-
-/**
- * Options for restoring a processing job from a savepoint.
- */
-export interface ProcessingRestoreOptions {
-  namespace?: string;
-}
-
-/**
- * Options for rescaling a processing job's parallelism.
- */
-export interface ProcessingRescaleOptions {
-  namespace?: string;
-}
-
-/**
  * Status of a processing job.
  */
 export interface ProcessingStatusResult {
   job_id: string;
   name: string;
   status: string;
-  parallelism: number;
   batch_size: number;
   records_processed: number;
   created_at: number;
@@ -1424,7 +1402,6 @@ export interface ProcessingListEntry {
   name: string;
   job_id: string;
   status: string;
-  parallelism: number;
   created_at: number;
 }
 

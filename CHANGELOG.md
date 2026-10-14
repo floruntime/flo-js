@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Reason.StaleReport` (26): an action complete or fail for a run that has moved on (another worker holds it, or it finished) is refused with it; resending it is refused the same way. The table hash moves with the server.
+
 ### Fixed
 
 - `StorageTier` is `Hot = 0, Warm = 1`, the two tiers the server sends. It was `Hot, Pending, Warm, Cold` with `Warm = 2`, so a record served from the warm store read as `Pending`. `StorageTier.Pending` and `StorageTier.Cold` are removed.
@@ -46,6 +50,7 @@ Opcodes and options the server never serves:
 - `ActionInvokeOptions.priority` and `idempotencyKey`, which the server ignores; invoke now sends `[has_labels:u8]([labels_len:u16][labels])?[input]` and takes a `labels` option (a JSON object string naming required worker labels). Invoke priority, delay and idempotency are deferred: https://github.com/floruntime/flo/issues/181.
 - The deprecated `Worker` and `WorkerConfig` aliases; use `ActionWorker` and `ActionWorkerConfig`.
 - `kv.touch`, `kv.persist`, `KVTouchOptions`, `OpCode.KVPersist`, `KVEntry`, `KVBeginResult`, `parseScanResponse`, `parseHistoryResponse`, and the KV option tags (`TTLMs`, `CASVersion`, `IfNotExists`, `IfExists`, `RoutingKey`, `TxnID`).
+- `processing.savepoint`, `processing.restore`, `processing.rescale`, their options types and opcodes, and `parallelism` on `ProcessingStatusResult` and `ProcessingListEntry`: the server no longer has savepoints, rescaling or job parallelism, and its status and list answers dropped the field.
 
 ## [0.1.0-dev.4] - 2026-05-04
 

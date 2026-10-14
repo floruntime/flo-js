@@ -81,6 +81,3 @@ sinks:
     stream:
       name: txn.reversal
     match: [reversal]
-
-checkpointing:
-  interval_ms: 30000
