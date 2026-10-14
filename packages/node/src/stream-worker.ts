@@ -37,6 +37,7 @@ import {
   isRefusedUnrun,
   silentLogger,
   type ProcessEntry,
+  type RetryPolicy,
   type StreamID,
   type StreamRecord,
   workerBlockMs,
@@ -85,6 +86,13 @@ export interface StreamWorkerConfig {
 
   /** Heartbeat interval in milliseconds (default: 30000). Set to 0 to disable. */
   heartbeatIntervalMs?: number;
+
+  /**
+   * How the client it creates for an endpoint retries refused-but-not-run
+   * requests (default: the client default). A worker given a client uses
+   * that client's policy.
+   */
+  retry?: Partial<RetryPolicy>;
 
   /**
    * Logger for worker messages.
@@ -232,12 +240,13 @@ export class StreamWorker {
       blockMs: workerBlockMs(config.blockMs),
       messageTimeoutMs: config.messageTimeoutMs ?? 300000,
       heartbeatIntervalMs: config.heartbeatIntervalMs ?? 30000,
+      retry: config.retry ?? {},
     };
 
     this.handler = handler;
 
     if (typeof clientOrEndpoint === "string") {
-      this.client = new FloClient(clientOrEndpoint, { namespace: "default" });
+      this.client = new FloClient(clientOrEndpoint, { namespace: "default", retry: this.config.retry });
       this.ownedClient = true;
     } else {
       this.client = clientOrEndpoint;

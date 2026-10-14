@@ -380,8 +380,9 @@ connection; the server routes it afresh.
 `ActionWorker` and `StreamWorker` wait the same way between failed polls, from
 100 ms up to 5 s, starting again from 100 ms after a poll that succeeds; `stop()`
 ends a wait at once. A stream worker retries a group join refused this way
-instead of stopping. A stream worker's requests use its client's `retry`; an
-`ActionWorker` takes its own `retry` option, with the same fields.
+instead of stopping. `ActionWorker`, and a `StreamWorker` given an endpoint, take a `retry`
+option, with the same fields, for the client they create; a `StreamWorker`
+given a client uses that client's.
 
 ```typescript
 // Up to 8 tries, waiting at most 2 s between them
@@ -390,7 +391,7 @@ const client = new FloClient("localhost:9000", {
 });
 
 // No retries
-const client = new FloClient("localhost:9000", { retry: { maxAttempts: 1 } });
+const noRetries = new FloClient("localhost:9000", { retry: { maxAttempts: 1 } });
 ```
 
 ## Development

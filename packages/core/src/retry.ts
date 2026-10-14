@@ -31,18 +31,26 @@ export const DEFAULT_RETRY_POLICY: Readonly<RetryPolicy> = Object.freeze({
 });
 
 /**
- * Fills unset fields from the defaults, clamps negative waits to 0, and
- * raises a max below the initial wait to the initial, so a wait's bound is
- * never negative and the ceiling only ever grows.
+ * Fills unset fields from the defaults, and makes the rest safe: a
+ * negative or non-finite initial wait is 0, a non-finite or lower max is the
+ * initial wait, and a non-finite maxAttempts is the default (a fractional
+ * one is floored). So a wait's bound is never negative or infinite, the
+ * ceiling only ever grows, and the tries always end.
  */
 export function normalizeRetryPolicy(p?: Partial<RetryPolicy>): RetryPolicy {
-  const initial = Math.max(0, p?.initialBackoffMs ?? DEFAULT_RETRY_POLICY.initialBackoffMs);
-  const max = Math.max(initial, p?.maxBackoffMs ?? DEFAULT_RETRY_POLICY.maxBackoffMs);
+  const initial = Math.max(0, finiteOr(p?.initialBackoffMs, DEFAULT_RETRY_POLICY.initialBackoffMs, 0));
+  const max = Math.max(initial, finiteOr(p?.maxBackoffMs, DEFAULT_RETRY_POLICY.maxBackoffMs, initial));
   return {
-    maxAttempts: p?.maxAttempts ?? DEFAULT_RETRY_POLICY.maxAttempts,
+    maxAttempts: Math.floor(finiteOr(p?.maxAttempts, DEFAULT_RETRY_POLICY.maxAttempts, DEFAULT_RETRY_POLICY.maxAttempts)),
     initialBackoffMs: initial,
     maxBackoffMs: max,
   };
+}
+
+/** `v`, or `unset` when it is undefined, or `bad` when it isn't a finite number. */
+function finiteOr(v: number | undefined, unset: number, bad: number): number {
+  if (v === undefined) return unset;
+  return Number.isFinite(v) ? v : bad;
 }
 
 /**

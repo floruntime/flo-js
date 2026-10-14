@@ -213,6 +213,18 @@ describe("Backoff", () => {
     expect(q).toMatchObject({ initialBackoffMs: 0, maxBackoffMs: 300 });
   });
 
+  it("makes non-finite settings safe", () => {
+    expect(normalizeRetryPolicy({ maxAttempts: NaN, initialBackoffMs: NaN, maxBackoffMs: NaN })).toEqual({
+      maxAttempts: 4, initialBackoffMs: 0, maxBackoffMs: 0,
+    });
+    expect(normalizeRetryPolicy({ maxAttempts: Infinity, initialBackoffMs: Infinity, maxBackoffMs: 20 })).toEqual({
+      maxAttempts: 4, initialBackoffMs: 0, maxBackoffMs: 20,
+    });
+    expect(normalizeRetryPolicy({ maxAttempts: 2.9, initialBackoffMs: 40, maxBackoffMs: Infinity })).toEqual({
+      maxAttempts: 2, initialBackoffMs: 40, maxBackoffMs: 40,
+    });
+  });
+
   it("raises a max below the initial wait to the initial", () => {
     const p = normalizeRetryPolicy({ initialBackoffMs: 200, maxBackoffMs: 50 });
     expect(p.maxBackoffMs).toBe(200);
@@ -273,6 +285,14 @@ describe("ActionWorker", () => {
     const policy = (w as unknown as { client: { retry: unknown } }).client.retry;
     w.stop();
     await done;
+    expect(policy).toEqual({ maxAttempts: 7, initialBackoffMs: 50, maxBackoffMs: 50 });
+  });
+});
+
+describe("StreamWorker given an endpoint", () => {
+  it("gives the client it creates the retry policy it is configured with", () => {
+    const w = new StreamWorker("127.0.0.1:1", { stream: "s", retry: { maxAttempts: 7, maxBackoffMs: 9 } }, async () => {});
+    const policy = (w as unknown as { client: { retry: unknown } }).client.retry;
     expect(policy).toEqual({ maxAttempts: 7, initialBackoffMs: 50, maxBackoffMs: 50 });
   });
 });
