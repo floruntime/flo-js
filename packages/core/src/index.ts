@@ -180,6 +180,16 @@ export {
   isInternal,
 } from "./errors.js";
 
+// Retries
+export {
+  type RetryPolicy,
+  DEFAULT_RETRY_POLICY,
+  normalizeRetryPolicy,
+  isRefusedUnrun,
+  refusedUnrun,
+  Backoff,
+} from "./retry.js";
+
 // Wire protocol
 export {
   OptionsBuilder,

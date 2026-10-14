@@ -63,6 +63,7 @@ interface ClientOptions {
   namespace?: string;           // Default namespace for operations (default: "default")
   timeoutMs?: number;           // Connection and operation timeout in ms (default: 5000)
   logger?: boolean | Logger;    // true = console logging, false = silent, or custom Logger
+  retry?: Partial<RetryPolicy>; // Retries of refused, not-run requests (see Retries)
 }
 ```
 
@@ -352,9 +353,46 @@ try {
 | `ConflictError` | CAS version mismatch |
 | `BadRequestError` | Invalid request |
 | `UnauthorizedError` | Authentication failed |
-| `OverloadedError` | Server overloaded |
-| `UnavailableError` | No leader, or the shard isn't taking writes; retryable |
+| `OverloadedError` | Server overloaded, and the client's retries ran out |
+| `UnavailableError` | No leader, or the shard isn't taking writes, and the client's retries ran out |
 | `InternalError` | Internal server error |
+
+### Retries
+
+When the server refuses a request as `overloaded` or `unavailable` and says it
+didn't run it (`err.ran === Ran.No`), the client sends it again itself, as a
+new request, after a jittered wait. Because the server never ran it, this is
+safe for writes too. Any other refusal, or one that may have run, comes
+straight back.
+
+| `retry` field | Default | |
+|---|---|---|
+| `maxAttempts` | 4 | Tries in all, the first included; 1 turns retrying off |
+| `initialBackoffMs` | 50 | Ceiling of the first wait; it doubles each retry |
+| `maxBackoffMs` | 1000 | Largest ceiling |
+
+Unset fields take the defaults; a negative wait counts as 0, and a
+`maxBackoffMs` below `initialBackoffMs` is raised to it. Each wait is uniform
+between 0 and its ceiling, so with the defaults a refused request is given
+back after at most about 350 ms of waiting. The request goes again on the same
+connection; the server routes it afresh.
+
+`ActionWorker` and `StreamWorker` wait the same way between failed polls, from
+100 ms up to 5 s, starting again from 100 ms after a poll that succeeds; `stop()`
+ends a wait at once. A stream worker retries a group join refused this way
+instead of stopping. `ActionWorker`, and a `StreamWorker` given an endpoint, take a `retry`
+option, with the same fields, for the client they create; a `StreamWorker`
+given a client uses that client's.
+
+```typescript
+// Up to 8 tries, waiting at most 2 s between them
+const client = new FloClient("localhost:9000", {
+  retry: { maxAttempts: 8, initialBackoffMs: 100, maxBackoffMs: 2000 },
+});
+
+// No retries
+const noRetries = new FloClient("localhost:9000", { retry: { maxAttempts: 1 } });
+```
 
 ## Development
 

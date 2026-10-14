@@ -34,14 +34,16 @@ import {
   WorkerStatus,
   WorkerType,
   consoleLogger,
+  isRefusedUnrun,
   silentLogger,
   type ProcessEntry,
+  type RetryPolicy,
   type StreamID,
   type StreamRecord,
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff, pause } from "./poll-backoff.js";
+import { EmptyPollBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -84,6 +86,13 @@ export interface StreamWorkerConfig {
 
   /** Heartbeat interval in milliseconds (default: 30000). Set to 0 to disable. */
   heartbeatIntervalMs?: number;
+
+  /**
+   * How the client it creates for an endpoint retries refused-but-not-run
+   * requests (default: the client default). A worker given a client uses
+   * that client's policy.
+   */
+  retry?: Partial<RetryPolicy>;
 
   /**
    * Logger for worker messages.
@@ -231,12 +240,13 @@ export class StreamWorker {
       blockMs: workerBlockMs(config.blockMs),
       messageTimeoutMs: config.messageTimeoutMs ?? 300000,
       heartbeatIntervalMs: config.heartbeatIntervalMs ?? 30000,
+      retry: config.retry ?? {},
     };
 
     this.handler = handler;
 
     if (typeof clientOrEndpoint === "string") {
-      this.client = new FloClient(clientOrEndpoint, { namespace: "default" });
+      this.client = new FloClient(clientOrEndpoint, { namespace: "default", retry: this.config.retry });
       this.ownedClient = true;
     } else {
       this.client = clientOrEndpoint;
@@ -273,13 +283,12 @@ export class StreamWorker {
       throw new Error("Client not available");
     }
 
+    // Set before the join so stop() can end a join's retry wait.
+    this.stopRequested = false;
+    this.stopSignal = new AbortController();
+
     try {
-      // Join consumer group
-      await this.client.stream.groupJoin(
-        this.config.stream,
-        this.config.group,
-        this.config.consumer
-      );
+      if (!(await this.joinGroup())) return;
       this.log("Joined consumer group");
 
       // Register in worker registry
@@ -304,8 +313,6 @@ export class StreamWorker {
 
       // Initialize state
       this.running = true;
-      this.stopRequested = false;
-      this.stopSignal = new AbortController();
 
       // Start heartbeat
       this.startHeartbeat();
@@ -351,8 +358,31 @@ export class StreamWorker {
     }
   }
 
+  /**
+   * Join the consumer group. A join the server refused without running it
+   * (overloaded or unavailable, past the client's own retries) is tried
+   * again with the worker backoff; any other error is thrown. Returns false
+   * if stop() came first.
+   */
+  private async joinGroup(): Promise<boolean> {
+    const failed = newWorkerBackoff();
+    while (!this.stopRequested) {
+      try {
+        await this.client!.stream.groupJoin(this.config.stream, this.config.group, this.config.consumer);
+        return true;
+      } catch (err) {
+        if (!isRefusedUnrun(err)) throw err;
+        const d = failed.next();
+        this.log(`Group join refused: ${err}, retrying in ${d}ms...`);
+        await pause(d, this.stopSignal.signal);
+      }
+    }
+    return false;
+  }
+
   private async pollLoop(): Promise<void> {
     const backoff = new EmptyPollBackoff();
+    const failed = newWorkerBackoff();
     while (this.running && !this.stopRequested) {
       try {
         // Check concurrency limit
@@ -371,6 +401,7 @@ export class StreamWorker {
           limit: this.config.batchSize,
           blockMs: this.config.blockMs,
         });
+        failed.reset();
 
         const empty = !result || result.records.length === 0;
         const wait = backoff.next(empty, performance.now() - started, this.config.blockMs);
@@ -398,8 +429,9 @@ export class StreamWorker {
         }
       } catch (err) {
         if (!this.stopRequested) {
-          this.log(`GroupRead error: ${err}, retrying...`);
-          await this.sleep(1000);
+          const d = failed.next();
+          this.log(`GroupRead error: ${err}, retrying in ${d}ms...`);
+          await pause(d, this.stopSignal.signal);
         }
       }
     }

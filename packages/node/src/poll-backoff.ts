@@ -1,3 +1,5 @@
+import { Backoff } from "@floruntime/core";
+
 /**
  * Pacing for a worker's long-poll loop.
  *
@@ -41,4 +43,13 @@ export function pause(ms: number, signal: AbortSignal): Promise<void> {
     const timer = setTimeout(done, ms);
     signal.addEventListener("abort", done);
   });
+}
+
+// Worker poll loops wait this way after a failed poll, and start again from
+// the bottom after a poll that succeeds.
+export const WORKER_INITIAL_BACKOFF_MS = 100;
+export const WORKER_MAX_BACKOFF_MS = 5000;
+
+export function newWorkerBackoff(): Backoff {
+  return new Backoff(WORKER_INITIAL_BACKOFF_MS, WORKER_MAX_BACKOFF_MS);
 }
