@@ -34,18 +34,22 @@ export const DEFAULT_RETRY_POLICY: Readonly<RetryPolicy> = Object.freeze({
  * Fills unset fields from the defaults, and makes the rest safe: a
  * negative or non-finite initial wait is 0, a non-finite or lower max is the
  * initial wait, and a non-finite maxAttempts is the default (a fractional
- * one is floored). So a wait's bound is never negative or infinite, the
+ * one is floored); both waits are capped at the longest setTimeout delay.
+ * So a wait's bound is never negative, infinite or past that cap, the
  * ceiling only ever grows, and the tries always end.
  */
 export function normalizeRetryPolicy(p?: Partial<RetryPolicy>): RetryPolicy {
-  const initial = Math.max(0, finiteOr(p?.initialBackoffMs, DEFAULT_RETRY_POLICY.initialBackoffMs, 0));
-  const max = Math.max(initial, finiteOr(p?.maxBackoffMs, DEFAULT_RETRY_POLICY.maxBackoffMs, initial));
+  const initial = Math.min(MAX_TIMEOUT_MS, Math.max(0, finiteOr(p?.initialBackoffMs, DEFAULT_RETRY_POLICY.initialBackoffMs, 0)));
+  const max = Math.min(MAX_TIMEOUT_MS, Math.max(initial, finiteOr(p?.maxBackoffMs, DEFAULT_RETRY_POLICY.maxBackoffMs, initial)));
   return {
     maxAttempts: Math.floor(finiteOr(p?.maxAttempts, DEFAULT_RETRY_POLICY.maxAttempts, DEFAULT_RETRY_POLICY.maxAttempts)),
     initialBackoffMs: initial,
     maxBackoffMs: max,
   };
 }
+
+/** The longest wait setTimeout takes; past it, timers fire after 1 ms. */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
 /** `v`, or `unset` when it is undefined, or `bad` when it isn't a finite number. */
 function finiteOr(v: number | undefined, unset: number, bad: number): number {

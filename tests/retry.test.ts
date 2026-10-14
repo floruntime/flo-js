@@ -223,6 +223,9 @@ describe("Backoff", () => {
     expect(normalizeRetryPolicy({ maxAttempts: 2.9, initialBackoffMs: 40, maxBackoffMs: Infinity })).toEqual({
       maxAttempts: 2, initialBackoffMs: 40, maxBackoffMs: 40,
     });
+    expect(normalizeRetryPolicy({ initialBackoffMs: 1e12, maxBackoffMs: 1e15 })).toMatchObject({
+      initialBackoffMs: 2 ** 31 - 1, maxBackoffMs: 2 ** 31 - 1,
+    });
   });
 
   it("raises a max below the initial wait to the initial", () => {
