@@ -27,4 +27,7 @@ jobs:
 
       - run: pnpm -r build
 
+      # The examples aren't part of any package build; typecheck them here.
+      - run: pnpm exec tsc -b
+
       - run: pnpm exec vitest run

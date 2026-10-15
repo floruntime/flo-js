@@ -18,7 +18,7 @@
  *   npx tsx examples/processing.ts
  *
  * Prerequisites:
- *   - A running Flo server on localhost:4453
+ *   - A running Flo server on localhost:9000
  *   - pnpm install && pnpm build
  */
 
@@ -105,7 +105,7 @@ sinks:
 `;
 
 async function main() {
-  const client = new FloClient("localhost:4453", {
+  const client = new FloClient("localhost:9000", {
     namespace: "default",
     logger: true,
   });
@@ -218,7 +218,7 @@ async function main() {
 
         const kvResult = await client.kv.get(`account:${data.account_id}`);
         if (kvResult) {
-          const meta = JSON.parse(textDecoder.decode(kvResult)) as { name: string };
+          const meta = JSON.parse(textDecoder.decode(kvResult.value)) as { name: string };
           console.log(`  ${data.webhook_id} → ${data.account_id.slice(0, 12)}... → ${meta.name} (OURS ✓)`);
           kvMatched++;
         } else {
