@@ -20,7 +20,6 @@ import {
   type RawResponse,
   type RetryPolicy,
   StreamOperations,
-  type Transport,
   WorkerOperations,
   WorkflowOperations,
   type WorkflowSyncOptions,
