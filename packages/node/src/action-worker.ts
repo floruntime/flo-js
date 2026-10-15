@@ -41,7 +41,14 @@ import {
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
 import { EmptyPollBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
-import { closedSince, isConnectionError, reconnect, sendResult } from "./reconnect.js";
+import {
+  RESULT_GRACE_MS,
+  closedSince,
+  graceAfter,
+  isConnectionError,
+  reconnect,
+  sendResult,
+} from "./reconnect.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -312,6 +319,8 @@ export class ActionWorker {
   private running = false;
   private stopRequested = false;
   private stopSignal = new AbortController();
+  /** Aborts RESULT_GRACE_MS after stopSignal: until then lost results are resent. */
+  private resultGrace = graceAfter(this.stopSignal.signal, RESULT_GRACE_MS);
   /** client.closes() at start(): once it moves, the owner closed the client. */
   private clientCloses = 0;
   private activeTaskCount = 0;
@@ -407,6 +416,7 @@ export class ActionWorker {
       this.running = true;
       this.stopRequested = false;
       this.stopSignal = new AbortController();
+      this.resultGrace = graceAfter(this.stopSignal.signal, RESULT_GRACE_MS);
 
       // Start heartbeat interval
       this.startHeartbeat();
@@ -422,6 +432,7 @@ export class ActionWorker {
         this.log(`Waiting for ${this.pendingTasks.size} tasks to complete...`);
         await Promise.allSettled(this.pendingTasks);
       }
+      this.resultGrace.dispose();
 
       // Deregister from worker registry
       if (this.client) {
@@ -598,7 +609,7 @@ export class ActionWorker {
 
     const sent = await sendResult(
       client,
-      this.stopSignal.signal,
+      this.resultGrace.signal,
       this.logger,
       this.clientCloses,
       `${what} for task ${taskId}`,

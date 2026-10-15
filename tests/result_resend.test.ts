@@ -5,7 +5,7 @@
  */
 
 import * as net from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   HEADER_SIZE,
   MAGIC,
@@ -18,7 +18,7 @@ import {
   computeCRC32,
   type Logger,
 } from "@floruntime/core";
-import { ActionWorker, StreamWorker } from "@floruntime/node";
+import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
 
 function frame(id: bigint, status: number, data: Uint8Array = new Uint8Array(0)): Uint8Array {
   const buf = new Uint8Array(HEADER_SIZE + data.length);
@@ -60,13 +60,28 @@ function oneRecord(): Uint8Array {
 /** A conflict refusal the server ran: not retried by the client. */
 const REFUSE = "refuse";
 
-type Action = "drop" | "park" | typeof REFUSE | Uint8Array | undefined;
+/** An overloaded refusal the server didn't run, then the connection drops. */
+const BUSY_THEN_DROP = "busy-then-drop";
+/** An OK answer whose CRC is wrong. */
+const BAD_CRC = "bad-crc";
+/** An answer whose header has the wrong magic. */
+const BAD_MAGIC = "bad-magic";
+
+type Action =
+  | "drop"
+  | "park"
+  | typeof REFUSE
+  | typeof BUSY_THEN_DROP
+  | typeof BAD_CRC
+  | typeof BAD_MAGIC
+  | Uint8Array
+  | undefined;
 type Seen = { op: number; conn: number; bytes: Buffer };
 
 /**
  * A server that answers per `script(op, conn)`, conn counting accepted
  * connections from 0: undefined is an empty OK, "drop" destroys the
- * connection, "park" never answers, "refuse" is a refusal.
+ * connection, "park" never answers; the named constants above say the rest.
  */
 async function fakeServer(script: (op: number, conn: number) => Action) {
   const seen: Seen[] = [];
@@ -94,6 +109,18 @@ async function fakeServer(script: (op: number, conn: number) => Action) {
           sock.write(frame(id, StatusCode.Conflict, body));
           continue;
         }
+        if (a === BUSY_THEN_DROP) {
+          const body = new Uint8Array([Reason.Unclassified, 0, Ran.No, 0x6e, 0x6f]);
+          sock.write(frame(id, StatusCode.Overloaded, body));
+          return void sock.end(() => sock.destroy());
+        }
+        if (a === BAD_CRC || a === BAD_MAGIC) {
+          const f = frame(id, StatusCode.OK);
+          if (a === BAD_CRC) f[16] = f[16]! ^ 0xff;
+          else f[0] = f[0]! ^ 0xff;
+          sock.write(f);
+          continue;
+        }
         sock.write(frame(id, StatusCode.OK, a));
       }
     });
@@ -104,6 +131,7 @@ async function fakeServer(script: (op: number, conn: number) => Action) {
     endpoint: `127.0.0.1:${port}`,
     seen,
     of: (op: number) => seen.filter((s) => s.op === op),
+    connections: () => sockets.length,
     close: () => {
       server.close();
       sockets.forEach((s) => s.destroy());
@@ -170,8 +198,37 @@ function oneRecordThen(rest: (op: number, conn: number) => Action) {
   };
 }
 
-function actionWorker(endpoint: string, logger: Logger, handler: () => Promise<Uint8Array> = async () => new Uint8Array([1, 2, 3])) {
-  const w = new ActionWorker({ endpoint, blockMs: 30000, heartbeatIntervalMs: 0, logger });
+/** The retry byte of an ActionFail request frame. */
+function failRetryByte(b: Buffer): number {
+  let o = HEADER_SIZE;
+  o += 2 + b.readUInt16LE(o); // namespace
+  o += 2 + b.readUInt16LE(o); // key (worker id)
+  o += 4; // value length
+  o += 2 + b.readUInt16LE(o); // action name
+  o += 2 + b.readUInt16LE(o); // task id
+  return b[o]!;
+}
+
+/** A handler that runs until release() is called. */
+function heldHandler() {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  const state = { started: false, release: () => release() };
+  const handler = async () => {
+    state.started = true;
+    await held;
+    return new Uint8Array(0);
+  };
+  return { state, handler };
+}
+
+function actionWorker(
+  endpoint: string,
+  logger: Logger,
+  handler: () => Promise<Uint8Array> = async () => new Uint8Array([1, 2, 3]),
+  actionTimeoutMs?: number,
+) {
+  const w = new ActionWorker({ endpoint, blockMs: 30000, heartbeatIntervalMs: 0, logger, actionTimeoutMs });
   w.action("a", handler);
   const done = w.start();
   cleanups.push(async () => {
@@ -261,6 +318,73 @@ describe("ActionWorker results", () => {
     expect(srv.of(OpCode.ActionComplete)).toHaveLength(1);
     expect(srv.of(OpCode.ActionFail)).toHaveLength(0);
   });
+
+  it("fails a task whose handler runs past actionTimeoutMs, without retry, and sends no complete", async () => {
+    const srv = await serve(oneTaskThen(() => undefined));
+    const { logger } = recordingLogger();
+    actionWorker(srv.endpoint, logger, () => new Promise<Uint8Array>(() => {}), 100);
+    await until(() => srv.of(OpCode.ActionFail).length >= 1, 3000);
+    await sleep(100);
+    const fails = srv.of(OpCode.ActionFail);
+    expect(fails).toHaveLength(1);
+    expect(failRetryByte(fails[0]!.bytes)).toBe(0);
+    expect(srv.of(OpCode.ActionComplete)).toHaveLength(0);
+  });
+
+  it.each([
+    ["fails its checksum", BAD_CRC],
+    ["has a bad header", BAD_MAGIC],
+  ] as const)("resends a complete whose answer %s, and sends no fail", async (_name, bad) => {
+    let answered = false;
+    const srv = await serve(
+      oneTaskThen((op) => {
+        if (op !== OpCode.ActionComplete || answered) return undefined;
+        answered = true;
+        return bad;
+      }),
+    );
+    const { logger } = recordingLogger();
+    actionWorker(srv.endpoint, logger);
+    await until(() => srv.of(OpCode.ActionComplete).length >= 2, 3000);
+    await sleep(100);
+    expect(srv.of(OpCode.ActionComplete)).toHaveLength(2);
+    expect(srv.of(OpCode.ActionFail)).toHaveLength(0);
+  });
+
+  it("resends, within the grace after stop(), a complete whose connection drops", async () => {
+    const srv = await serve(oneTaskThen((op, conn) => (op === OpCode.ActionComplete && conn === 0 ? "drop" : undefined)));
+    const { logger } = recordingLogger();
+    const { state, handler } = heldHandler();
+    const { w, done } = actionWorker(srv.endpoint, logger, handler);
+    await until(() => state.started, 3000);
+    const stopped = Date.now();
+    w.stop();
+    state.release();
+    await until(() => srv.of(OpCode.ActionComplete).length >= 2, 3000);
+    expect(Date.now() - stopped).toBeLessThan(2000);
+    expect(srv.of(OpCode.ActionComplete).map((s) => s.conn)).toEqual([0, 1]);
+    srv.close(); // ends the parked poll
+    await done;
+    expect(srv.of(OpCode.ActionFail)).toHaveLength(0);
+  });
+
+  it("drops the complete about 2 s after stop() when the server is gone, and start() returns", async () => {
+    const srv = await serve(oneTaskThen(() => undefined));
+    const { logger, errors } = recordingLogger();
+    const { state, handler } = heldHandler();
+    const { w, done } = actionWorker(srv.endpoint, logger, handler);
+    await until(() => state.started, 3000);
+    const stopped = Date.now();
+    w.stop();
+    srv.close();
+    await sleep(50);
+    state.release();
+    await done;
+    const took = Date.now() - stopped;
+    expect(took).toBeGreaterThanOrEqual(1900);
+    expect(took).toBeLessThan(3500);
+    expect(errors.some((m) => m.includes("complete for task t1"))).toBe(true);
+  });
 });
 
 describe("StreamWorker results", () => {
@@ -286,5 +410,47 @@ describe("StreamWorker results", () => {
     expect(srv.of(OpCode.StreamGroupAck)).toHaveLength(1);
     expect(srv.of(OpCode.StreamGroupNack)).toHaveLength(0);
     expect(errors.some((m) => m.includes("ack for record 0-1"))).toBe(true);
+  });
+});
+
+describe("StreamWorkers sharing a client", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("resend an ack without redialing a connection the other worker already replaced", async () => {
+    // The first ack is refused as busy and connection 0 drops; the client
+    // retries it 300 ms later, after a poller redialed, on connection 1, where
+    // it goes unanswered and times out. Its resend then needs no redial.
+    vi.spyOn(Math, "random").mockReturnValue(0.999);
+    let acks = 0;
+    const srv = await serve(
+      oneRecordThen((op) => {
+        if (op !== OpCode.StreamGroupAck) return undefined;
+        acks++;
+        if (acks === 1) return BUSY_THEN_DROP;
+        if (acks === 2) return "park";
+        return undefined;
+      }),
+    );
+    const client = new FloClient(srv.endpoint, {
+      timeoutMs: 300,
+      retry: { maxAttempts: 2, initialBackoffMs: 300, maxBackoffMs: 300 },
+    });
+    await client.connect();
+    cleanups.push(() => client.close());
+    const { logger } = recordingLogger();
+    const workers = ["a", "b"].map(
+      (stream) => new StreamWorker(client, { stream, blockMs: 30000, heartbeatIntervalMs: 0, logger }, async () => {}),
+    );
+    const done = workers.map((w) => w.start());
+    cleanups.push(async () => {
+      workers.forEach((w) => w.stop());
+      await client.close();
+      await Promise.all(done);
+    });
+    await until(() => srv.of(OpCode.StreamGroupAck).length >= 3, 5000);
+    await sleep(200);
+    expect(srv.of(OpCode.StreamGroupAck).map((s) => s.conn)).toEqual([0, 1, 1]);
+    expect(srv.of(OpCode.StreamGroupNack)).toHaveLength(0);
+    expect(srv.connections()).toBe(2);
   });
 });
