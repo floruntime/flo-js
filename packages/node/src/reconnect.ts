@@ -5,6 +5,7 @@
 import {
   ConnectionError,
   InvalidChecksumError,
+  ServerError,
   NotConnectedError,
   TimeoutError,
   UnexpectedEOFError,
@@ -102,6 +103,9 @@ export function graceAfter(stop: AbortSignal, ms: number): { signal: AbortSignal
  * reply header closes it). Anything else is the server's answer.
  */
 function lost(err: unknown, client: FloClient, seen: Seen): boolean {
+  // The server answered: a refusal is final, even if the connection changed
+  // since (another worker sharing the client may have redialed).
+  if (err instanceof ServerError) return false;
   return (
     isConnectionError(err) ||
     err instanceof InvalidChecksumError ||
