@@ -44,6 +44,7 @@ import {
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
 import { EmptyPollBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { isConnectionError, reconnect } from "./reconnect.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -289,27 +290,6 @@ export class StreamWorker {
 
     try {
       if (!(await this.joinGroup())) return;
-      this.log("Joined consumer group");
-
-      // Register in worker registry
-      const processName = `${this.config.stream}/${this.config.group}`;
-      const processes: ProcessEntry[] = [
-        { name: processName, kind: ProcessKind.StreamConsumer },
-      ];
-      const metadata = JSON.stringify({
-        stream: this.config.stream,
-        group: this.config.group,
-        consumer: this.config.consumer,
-      });
-
-      await this.client.worker.register(this.config.workerId, [], {
-        workerType: WorkerType.Stream,
-        maxConcurrency: this.config.concurrency,
-        processes,
-        metadata,
-        machineId: this.config.machineId || undefined,
-      });
-      this.log("Registered in worker registry");
 
       // Initialize state
       this.running = true;
@@ -359,17 +339,18 @@ export class StreamWorker {
   }
 
   /**
-   * Join the consumer group. A join the server refused without running it
-   * (overloaded or unavailable, past the client's own retries) is tried
-   * again with the worker backoff; any other error is thrown. Returns false
-   * if stop() came first.
+   * Join the consumer group and register this worker with the server. A
+   * join the server refused without running it (overloaded or unavailable,
+   * past the client's own retries) is tried again with the worker backoff;
+   * any other error is thrown. Returns false if stop() came first.
    */
   private async joinGroup(): Promise<boolean> {
     const failed = newWorkerBackoff();
-    while (!this.stopRequested) {
+    for (;;) {
+      if (this.stopRequested) return false;
       try {
         await this.client!.stream.groupJoin(this.config.stream, this.config.group, this.config.consumer);
-        return true;
+        break;
       } catch (err) {
         if (!isRefusedUnrun(err)) throw err;
         const d = failed.next();
@@ -377,7 +358,38 @@ export class StreamWorker {
         await pause(d, this.stopSignal.signal);
       }
     }
-    return false;
+    this.log("Joined consumer group");
+
+    const processName = `${this.config.stream}/${this.config.group}`;
+    const processes: ProcessEntry[] = [
+      { name: processName, kind: ProcessKind.StreamConsumer },
+    ];
+    const metadata = JSON.stringify({
+      stream: this.config.stream,
+      group: this.config.group,
+      consumer: this.config.consumer,
+    });
+    await this.client!.worker.register(this.config.workerId, [], {
+      workerType: WorkerType.Stream,
+      maxConcurrency: this.config.concurrency,
+      processes,
+      metadata,
+      machineId: this.config.machineId || undefined,
+    });
+    this.log("Registered in worker registry");
+    return true;
+  }
+
+  /** Reconnect after a dropped connection, then join again. */
+  private async recover(cause: unknown): Promise<void> {
+    this.logger.warn(`Connection lost: ${cause}; reconnecting...`);
+    if (!(await reconnect(this.client!, this.stopSignal.signal, this.logger))) return;
+    try {
+      await this.joinGroup();
+    } catch (err) {
+      // A connection error here surfaces again on the next read.
+      this.logger.warn(`Re-join after reconnect failed: ${err}`);
+    }
   }
 
   private async pollLoop(): Promise<void> {
@@ -428,7 +440,11 @@ export class StreamWorker {
           this.pendingTasks.add(taskPromise);
         }
       } catch (err) {
-        if (!this.stopRequested) {
+        if (this.stopRequested) break;
+        if (isConnectionError(err)) {
+          await this.recover(err);
+          failed.reset();
+        } else {
           const d = failed.next();
           this.log(`GroupRead error: ${err}, retrying in ${d}ms...`);
           await pause(d, this.stopSignal.signal);

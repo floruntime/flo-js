@@ -41,6 +41,7 @@ import {
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
 import { EmptyPollBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { isConnectionError, reconnect } from "./reconnect.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -395,28 +396,9 @@ export class ActionWorker {
     });
     await this.client.connect();
 
+    const actionNames = Array.from(this.handlers.keys());
     try {
-      // Register actions with the server
-      const actionNames = Array.from(this.handlers.keys());
-      for (const actionName of actionNames) {
-        await this.client.action.register(actionName, ActionType.User);
-        this.log(`Registered action with server: ${actionName}`);
-      }
-
-      // Build process entries from registered actions
-      const processes: ProcessEntry[] = actionNames.map((name) => ({
-        name,
-        kind: ProcessKind.Action,
-      }));
-
-      // Register worker in worker registry
-      await this.client.worker.register(this.config.workerId, actionNames, {
-        workerType: WorkerType.Action,
-        maxConcurrency: this.config.concurrency,
-        processes,
-        machineId: this.config.machineId || undefined,
-      });
-      this.log(`Worker registered with ${actionNames.length} actions`);
+      await this.register(actionNames);
 
       // Initialize state
       this.running = true;
@@ -451,6 +433,38 @@ export class ActionWorker {
       this.client = null;
       this.running = false;
       this.log("Worker stopped");
+    }
+  }
+
+  /** Register the actions and this worker with the server. */
+  private async register(actionNames: string[]): Promise<void> {
+    for (const actionName of actionNames) {
+      await this.client!.action.register(actionName, ActionType.User);
+      this.log(`Registered action with server: ${actionName}`);
+    }
+
+    const processes: ProcessEntry[] = actionNames.map((name) => ({
+      name,
+      kind: ProcessKind.Action,
+    }));
+    await this.client!.worker.register(this.config.workerId, actionNames, {
+      workerType: WorkerType.Action,
+      maxConcurrency: this.config.concurrency,
+      processes,
+      machineId: this.config.machineId || undefined,
+    });
+    this.log(`Worker registered with ${actionNames.length} actions`);
+  }
+
+  /** Reconnect after a dropped connection, then register again. */
+  private async recover(actionNames: string[], cause: unknown): Promise<void> {
+    this.logger.warn(`Connection lost: ${cause}; reconnecting...`);
+    if (!(await reconnect(this.client!, this.stopSignal.signal, this.logger))) return;
+    try {
+      await this.register(actionNames);
+    } catch (err) {
+      // A connection error here surfaces again on the next poll.
+      this.logger.warn(`Re-register after reconnect failed: ${err}`);
     }
   }
 
@@ -494,7 +508,11 @@ export class ActionWorker {
         });
         this.pendingTasks.add(taskPromise);
       } catch (err) {
-        if (!this.stopRequested) {
+        if (this.stopRequested) break;
+        if (isConnectionError(err)) {
+          await this.recover(actionNames, err);
+          failed.reset();
+        } else {
           const d = failed.next();
           this.log(`Await error: ${err}, retrying in ${d}ms...`);
           await pause(d, this.stopSignal.signal);
