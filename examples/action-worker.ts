@@ -281,7 +281,7 @@ async function manualReview(ctx: ActionContext) {
 async function main() {
   // Create action worker with configuration
   const worker = new ActionWorker({
-    endpoint: process.env.FLO_ENDPOINT || "localhost:4453",
+    endpoint: process.env.FLO_ENDPOINT || "localhost:9000",
     namespace: process.env.FLO_NAMESPACE || "example",
     concurrency: 5,
     actionTimeoutMs: 300000, // 5 minutes

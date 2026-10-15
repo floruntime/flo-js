@@ -336,7 +336,7 @@ export const OptionTag = {
 
   // Stream Options (0x20 - 0x2F) - StreamID-native ONLY
   // 0x20 reserved
-  StreamStart: 0x21, // [16]u8: Start StreamID for reads (inclusive)
+  StreamStart: 0x21, // [16]u8: Start StreamID for reads (exclusive)
   StreamEnd: 0x22, // [16]u8: End StreamID for reads (inclusive)
   StreamTail: 0x23, // void: Flag indicating tail read (start from end of stream)
   Partition: 0x24, // u32: Explicit partition index
@@ -457,10 +457,10 @@ export interface DequeueResult {
  * Storage tier of a stream record.
  */
 export const StorageTier = {
+  /** Served from the in-memory log. */
   Hot: 0,
-  Pending: 1,
-  Warm: 2,
-  Cold: 3,
+  /** Served from the warm store after leaving the in-memory log. */
+  Warm: 1,
 } as const;
 
 export type StorageTier = (typeof StorageTier)[keyof typeof StorageTier];
@@ -471,7 +471,7 @@ export type StorageTier = (typeof StorageTier)[keyof typeof StorageTier];
 export interface StreamRecord {
   /** Full StreamID (timestamp_ms + sequence) */
   id: StreamID;
-  /** Storage tier (hot, pending, warm, cold) */
+  /** Storage tier the record was served from */
   tier: StorageTier;
   /** Stream name (identifies which stream the record came from) */
   stream: string;
@@ -563,7 +563,7 @@ export class StreamID {
  */
 export interface StreamReadOptions {
   namespace?: string;
-  /** Start position (inclusive). If undefined and tail is false, reads from beginning. */
+  /** Read records after this position (exclusive): pass the last id seen to continue. If undefined and tail is false, reads from beginning. */
   start?: StreamID;
   /** End position (inclusive). If undefined, reads to end of stream. */
   end?: StreamID;

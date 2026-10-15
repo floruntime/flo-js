@@ -9,7 +9,7 @@
     "lint": "eslint packages/*/src/**/*.ts",
     "clean": "pnpm -r clean",
     "example:node": "tsx examples/node-basic.ts",
-    "example:worker": "tsx examples/worker.ts",
+    "example:worker": "tsx examples/action-worker.ts",
     "publish:dev": "pnpm -r publish --access public --tag dev --no-git-checks",
     "publish:release": "pnpm -r publish --access public"
   },

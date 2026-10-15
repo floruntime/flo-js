@@ -174,7 +174,7 @@ steps:
 `;
 
 async function main() {
-  const client = new FloClient("localhost:4453", {
+  const client = new FloClient("localhost:9000", {
     namespace: "example",
     logger: true,
   });

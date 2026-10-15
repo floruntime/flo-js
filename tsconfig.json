@@ -1,6 +1,8 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
+    // Only typechecks the examples; packages build with their own config.
+    "noEmit": true,
     "baseUrl": ".",
     "paths": {
       "@floruntime/core": ["./packages/core/src"],
