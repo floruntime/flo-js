@@ -171,7 +171,6 @@ async function main() {
     console.log(`  Job: ${status.job_id}`);
     console.log(`  Name: ${status.name}`);
     console.log(`  Status: ${status.status}`);
-    console.log(`  Parallelism: ${status.parallelism}`);
     console.log(`  Batch size: ${status.batch_size}`);
     console.log(`  Records processed: ${status.records_processed}`);
     console.log();
@@ -183,7 +182,7 @@ async function main() {
 
     const jobs = await client.processing.list();
     for (const job of jobs) {
-      console.log(`  ${job.name} (${job.job_id}) — ${job.status}, parallelism=${job.parallelism}`);
+      console.log(`  ${job.name} (${job.job_id}) — ${job.status}`);
     }
     console.log();
 

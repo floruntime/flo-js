@@ -4,8 +4,13 @@ node_modules/
 # Build output
 dist/
 *.tsbuildinfo
+# tsc output beside the sources, should the root config ever emit again.
 examples/**/*.js
+examples/**/*.map
+examples/**/*.d.ts
 packages/*/src/**/*.js
+packages/*/src/**/*.map
+packages/*/src/**/*.d.ts
 
 # IDE
 .idea/

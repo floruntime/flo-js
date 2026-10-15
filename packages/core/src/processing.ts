@@ -3,8 +3,8 @@
  *
  * Stream processing jobs are continuous data pipelines (Flink-inspired)
  * submitted as YAML definitions. This module provides submit/status/list/
- * stop/cancel/savepoint/restore/rescale operations that map to the
- * processing opcodes (0xC0–0xD1).
+ * stop/cancel operations that map to the
+ * processing opcodes (0x360–0x364).
  */
 
 import { createServerError } from "./errors.js";
@@ -19,9 +19,6 @@ import {
   type ProcessingListEntry,
   type ProcessingStopOptions,
   type ProcessingCancelOptions,
-  type ProcessingSavepointOptions,
-  type ProcessingRestoreOptions,
-  type ProcessingRescaleOptions,
   type ProcessingSyncOptions,
   type ProcessingSyncResult,
   type ProcessingSyncDirFn,
@@ -112,7 +109,7 @@ export class ProcessingOperations {
 
     // Binary wire format:
     // [job_id_len:u16][job_id][name_len:u16][name][status:u8]
-    // [parallelism:u32][batch_size:u32][records_processed:u64][created_at:i64]
+    // [batch_size:u32][records_processed:u64][created_at:i64]
     return parseWireStatus(resp.data);
   }
 
@@ -140,7 +137,7 @@ export class ProcessingOperations {
 
     // Binary wire format:
     // [count:u32]([name_len:u16][name][job_id_len:u16][job_id]
-    //  [status_len:u16][status][parallelism:u32][created_at:i64])*
+    //  [status_len:u16][status][created_at:i64])*
     // [has_more:u8][cursor_len:u16]
     return parseWireList(resp.data);
   }
@@ -181,93 +178,6 @@ export class ProcessingOperations {
       namespace,
       textEncoder.encode(jobId),
       new Uint8Array(0),
-      new Uint8Array(0)
-    );
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-  }
-
-  /**
-   * Trigger a savepoint for a processing job.
-   * Returns the savepoint ID.
-   *
-   * @param jobId - Job ID
-   * @param opts - Options (namespace)
-   */
-  async savepoint(
-    jobId: string,
-    opts?: ProcessingSavepointOptions
-  ): Promise<string> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.ProcessingSavepoint,
-      namespace,
-      textEncoder.encode(jobId),
-      new Uint8Array(0),
-      new Uint8Array(0)
-    );
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-
-    return textDecoder.decode(resp.data);
-  }
-
-  /**
-   * Restore a processing job from a savepoint.
-   *
-   * @param jobId - Job ID
-   * @param savepointId - Savepoint ID to restore from
-   * @param opts - Options (namespace)
-   */
-  async restore(
-    jobId: string,
-    savepointId: string,
-    opts?: ProcessingRestoreOptions
-  ): Promise<void> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.ProcessingRestore,
-      namespace,
-      textEncoder.encode(jobId),
-      textEncoder.encode(savepointId),
-      new Uint8Array(0)
-    );
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
-  }
-
-  /**
-   * Rescale a processing job's parallelism.
-   *
-   * @param jobId - Job ID
-   * @param parallelism - New parallelism level
-   * @param opts - Options (namespace)
-   */
-  async rescale(
-    jobId: string,
-    parallelism: number,
-    opts?: ProcessingRescaleOptions
-  ): Promise<void> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    // Value: [parallelism:u32]
-    const value = new Uint8Array(4);
-    const view = new DataView(value.buffer);
-    view.setUint32(0, parallelism, true);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.ProcessingRescale,
-      namespace,
-      textEncoder.encode(jobId),
-      value,
       new Uint8Array(0)
     );
 
@@ -409,7 +319,7 @@ const statusNames = [
  * Parse binary wire format for processing job status.
  *
  * Wire format: [job_id_len:u16][job_id][name_len:u16][name][status:u8]
- *              [parallelism:u32][batch_size:u32][records_processed:u64][created_at:i64]
+ *              [batch_size:u32][records_processed:u64][created_at:i64]
  */
 function parseWireStatus(data: Uint8Array): ProcessingStatusResult {
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -428,9 +338,6 @@ function parseWireStatus(data: Uint8Array): ProcessingStatusResult {
   const statusByte = data[pos++]!;
   const status = statusNames[statusByte] ?? `unknown(${statusByte})`;
 
-  const parallelism = view.getUint32(pos, true);
-  pos += 4;
-
   const batch_size = view.getUint32(pos, true);
   pos += 4;
 
@@ -439,14 +346,14 @@ function parseWireStatus(data: Uint8Array): ProcessingStatusResult {
 
   const created_at = Number(view.getBigInt64(pos, true));
 
-  return { job_id, name, status, parallelism, batch_size, records_processed, created_at };
+  return { job_id, name, status, batch_size, records_processed, created_at };
 }
 
 /**
  * Parse binary wire format for processing job list.
  *
  * Wire format: [count:u32]([name_len:u16][name][job_id_len:u16][job_id]
- *              [status_len:u16][status][parallelism:u32][created_at:i64])*
+ *              [status_len:u16][status][created_at:i64])*
  *              [has_more:u8][cursor_len:u16]
  */
 function parseWireList(data: Uint8Array): ProcessingListEntry[] {
@@ -471,13 +378,10 @@ function parseWireList(data: Uint8Array): ProcessingListEntry[] {
     const status = textDecoder.decode(data.subarray(pos, pos + statusLen));
     pos += statusLen;
 
-    const parallelism = view.getUint32(pos, true);
-    pos += 4;
-
     const created_at = Number(view.getBigInt64(pos, true));
     pos += 8;
 
-    results.push({ name, job_id, status, parallelism, created_at });
+    results.push({ name, job_id, status, created_at });
   }
 
   return results;
