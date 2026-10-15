@@ -41,7 +41,14 @@ import {
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
 import { EmptyPollBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
-import { closedSince, isConnectionError, reconnect } from "./reconnect.js";
+import {
+  RESULT_GRACE_MS,
+  closedSince,
+  graceAfter,
+  isConnectionError,
+  reconnect,
+  sendResult,
+} from "./reconnect.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -312,6 +319,8 @@ export class ActionWorker {
   private running = false;
   private stopRequested = false;
   private stopSignal = new AbortController();
+  /** Aborts RESULT_GRACE_MS after stopSignal: until then lost results are resent. */
+  private resultGrace = graceAfter(this.stopSignal.signal, RESULT_GRACE_MS);
   /** client.closes() at start(): once it moves, the owner closed the client. */
   private clientCloses = 0;
   private activeTaskCount = 0;
@@ -407,6 +416,7 @@ export class ActionWorker {
       this.running = true;
       this.stopRequested = false;
       this.stopSignal = new AbortController();
+      this.resultGrace = graceAfter(this.stopSignal.signal, RESULT_GRACE_MS);
 
       // Start heartbeat interval
       this.startHeartbeat();
@@ -422,6 +432,7 @@ export class ActionWorker {
         this.log(`Waiting for ${this.pendingTasks.size} tasks to complete...`);
         await Promise.allSettled(this.pendingTasks);
       }
+      this.resultGrace.dispose();
 
       // Deregister from worker registry
       if (this.client) {
@@ -547,97 +558,64 @@ export class ActionWorker {
     createdAt: bigint;
     attempt: number;
   }): Promise<void> {
-    try {
-      this.log(
-        `Executing action: ${task.taskType} (task=${task.taskId}, attempt=${task.attempt})`
-      );
+    const client = this.client!;
+    const { workerId } = this.config;
+    const { taskType, taskId } = task;
+    this.log(`Executing action: ${taskType} (task=${taskId}, attempt=${task.attempt})`);
 
-      // Get handler
-      const handler = this.handlers.get(task.taskType);
-      if (!handler) {
-        this.log(`No handler registered for action: ${task.taskType}`);
-        await this.client!.worker.fail(
-          this.config.workerId,
-          task.taskType,
-          task.taskId,
-          `No handler for: ${task.taskType}`
-        );
-        return;
-      }
-
-      // Create action context
+    // The handler's outcome alone picks complete or fail; sending it is
+    // separate, so a lost complete is resent, never turned into a fail.
+    let what: string;
+    let report: () => Promise<unknown>;
+    const handler = this.handlers.get(taskType);
+    if (!handler) {
+      this.log(`No handler registered for action: ${taskType}`);
+      what = "fail";
+      report = () => client.worker.fail(workerId, taskType, taskId, `No handler for: ${taskType}`);
+    } else {
       const ctx = new ActionContext(
-        task.taskId,
-        task.taskType,
+        taskId,
+        taskType,
         task.payload,
         task.attempt,
         task.createdAt,
         this.config.namespace,
         this
       );
-
-      // Execute with timeout
       try {
-        const result = await this.withTimeout(
-          handler(ctx),
-          this.config.actionTimeoutMs
-        );
-
-        // Normalize result: plain object → JSON bytes, ActionResult → named outcome
+        const result = await this.withTimeout(handler(ctx), this.config.actionTimeoutMs);
+        // Plain object → JSON bytes, ActionResult → named outcome
+        what = "complete";
         if (result instanceof ActionResult) {
-          await this.client!.worker.complete(
-            this.config.workerId,
-            task.taskType,
-            task.taskId,
-            result.data,
-            { outcome: result.outcome }
-          );
-          this.log(`Action completed: ${task.taskType} (outcome: ${result.outcome})`);
+          report = () => client.worker.complete(workerId, taskType, taskId, result.data, { outcome: result.outcome });
         } else {
-          const bytes = result instanceof Uint8Array
-            ? result
-            : textEncoder.encode(JSON.stringify(result));
-          await this.client!.worker.complete(
-            this.config.workerId,
-            task.taskType,
-            task.taskId,
-            bytes
-          );
-          this.log(`Action completed: ${task.taskType}`);
+          const bytes = result instanceof Uint8Array ? result : textEncoder.encode(JSON.stringify(result));
+          report = () => client.worker.complete(workerId, taskType, taskId, bytes);
         }
       } catch (err) {
+        what = "fail";
         if (err instanceof TimeoutError) {
-          this.log(`Action timed out: ${task.taskType}`);
-          await this.client!.worker.fail(
-            this.config.workerId,
-            task.taskType,
-            task.taskId,
-            "Action timed out",
-            { retry: false }
-          );
+          this.log(`Action timed out: ${taskType}`);
+          report = () => client.worker.fail(workerId, taskType, taskId, "Action timed out", { retry: false });
         } else if (err instanceof NonRetryableError) {
-          this.log(`Action failed (non-retryable): ${task.taskType} - ${err}`);
-          await this.client!.worker.fail(
-            this.config.workerId,
-            task.taskType,
-            task.taskId,
-            String(err),
-            { retry: false }
-          );
+          this.log(`Action failed (non-retryable): ${taskType} - ${err}`);
+          report = () => client.worker.fail(workerId, taskType, taskId, String(err), { retry: false });
         } else {
-          this.log(`Action failed: ${task.taskType} - ${err}`);
-          await this.client!.worker.fail(
-            this.config.workerId,
-            task.taskType,
-            task.taskId,
-            String(err),
-            { retry: true }
-          );
+          this.log(`Action failed: ${taskType} - ${err}`);
+          report = () => client.worker.fail(workerId, taskType, taskId, String(err), { retry: true });
         }
       }
-    } catch (err) {
-      this.log(`Failed to report task result: ${err}`);
     }
+
+    const sent = await sendResult(
+      client,
+      this.resultGrace.signal,
+      this.logger,
+      this.clientCloses,
+      `${what} for task ${taskId}`,
+      report
+    );
+    if (sent) this.log(`Action ${what} sent: ${taskType} (task=${taskId})`);
   }
 
   /**
@@ -737,7 +715,10 @@ export class ActionWorker {
 }
 
 /**
- * Error thrown when an operation times out.
+ * Error thrown when an action handler runs past `actionTimeoutMs`. It fails
+ * the task without retry. Not core's `TimeoutError`, which the transport
+ * throws when a request goes unanswered; a worker treats that as a lost
+ * connection.
  */
 export class TimeoutError extends Error {
   constructor(message: string) {
