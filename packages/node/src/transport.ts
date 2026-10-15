@@ -82,6 +82,10 @@ export function parseEndpoint(endpoint: string): { host: string; port: number } 
  */
 export class TcpTransport implements Transport {
   private socket: net.Socket | null = null;
+  /** The dial in progress, which concurrent connect() calls share. */
+  private connecting: Promise<void> | null = null;
+  /** close() was called: a worker doesn't reopen a client its owner closed. */
+  private closed = false;
   private readonly host: string;
   private readonly port: number;
   private readonly connectTimeoutMs: number;
@@ -107,10 +111,33 @@ export class TcpTransport implements Transport {
   }
 
   async connect(): Promise<void> {
+    this.closed = false;
     if (this.socket) {
       return;
     }
+    // Callers sharing this transport wait on one dial, not one each.
+    this.connecting ??= this.dial().finally(() => {
+      this.connecting = null;
+    });
+    return this.connecting;
+  }
 
+  /** Drop the current socket, failing what is in flight, and dial again. */
+  async redial(): Promise<void> {
+    if (this.socket) {
+      const socket = this.socket;
+      this.failAll(socket, new UnexpectedEOFError("connection dropped to redial"));
+      socket.destroy();
+    }
+    return this.connect();
+  }
+
+  /** Whether close() was called since the last connect(). */
+  isClosed(): boolean {
+    return this.closed;
+  }
+
+  private dial(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const socket = new net.Socket();
       let connected = false;
@@ -125,6 +152,8 @@ export class TcpTransport implements Transport {
       socket.once("connect", () => {
         connected = true;
         clearTimeout(timeoutId);
+        // A half-open connection is found by the OS rather than left to hang.
+        socket.setKeepAlive(true, 30_000);
         this.socket = socket;
         this.received = [];
         this.receivedLen = 0;
@@ -149,6 +178,7 @@ export class TcpTransport implements Transport {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
     if (this.socket) {
       const socket = this.socket;
       this.failAll(socket, new UnexpectedEOFError("connection closed"));

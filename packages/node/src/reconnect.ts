@@ -5,32 +5,38 @@
 import {
   ConnectionError,
   NotConnectedError,
+  TimeoutError,
   UnexpectedEOFError,
   type Logger,
 } from "@floruntime/core";
 import type { FloClient } from "./client.js";
 import { newWorkerBackoff, pause } from "./poll-backoff.js";
 
-/** Whether `err` means the connection is gone, so only a reconnect helps. */
+/**
+ * Whether `err` means the connection is gone, so only a reconnect helps. A
+ * poll that times out counts: its deadline is its own wait plus the
+ * client's timeout, so the connection is half-open.
+ */
 export function isConnectionError(err: unknown): boolean {
   return (
     err instanceof NotConnectedError ||
     err instanceof UnexpectedEOFError ||
-    err instanceof ConnectionError
+    err instanceof ConnectionError ||
+    err instanceof TimeoutError
   );
 }
 
 /**
- * Reconnect `client`, waiting between tries as the poll loop does after a
- * failed poll. Returns false if `signal` aborts first.
+ * Redial `client`, waiting between failed tries as the poll loop does after
+ * a failed poll. Returns false if `signal` aborts first, or the client was
+ * closed by its owner (a worker doesn't reopen it).
  */
 export async function reconnect(client: FloClient, signal: AbortSignal, logger: Logger): Promise<boolean> {
-  // Drop whatever is left of the old socket so connect() dials afresh.
-  await client.close();
   const wait = newWorkerBackoff();
-  for (let attempt = 1; !signal.aborted; attempt++) {
+  for (let attempt = 1; !signal.aborted && !client.isClosed(); attempt++) {
     try {
-      await client.connect();
+      await client.redial();
+      if (signal.aborted) return false;
       logger.warn(`Reconnected (attempt ${attempt})`);
       return true;
     } catch (err) {

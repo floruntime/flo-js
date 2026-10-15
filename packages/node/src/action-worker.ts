@@ -459,7 +459,13 @@ export class ActionWorker {
   /** Reconnect after a dropped connection, then register again. */
   private async recover(actionNames: string[], cause: unknown): Promise<void> {
     this.logger.warn(`Connection lost: ${cause}; reconnecting...`);
-    if (!(await reconnect(this.client!, this.stopSignal.signal, this.logger))) return;
+    if (!(await reconnect(this.client!, this.stopSignal.signal, this.logger))) {
+      if (this.client!.isClosed() && !this.stopRequested) {
+        this.logger.warn("The client was closed by its owner; stopping the worker");
+        this.stop();
+      }
+      return;
+    }
     try {
       await this.register(actionNames);
     } catch (err) {
@@ -471,6 +477,7 @@ export class ActionWorker {
   private async pollLoop(actionNames: string[]): Promise<void> {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
+    let unproven = false;
     while (this.running && !this.stopRequested) {
       try {
         // Check concurrency limit
@@ -493,6 +500,7 @@ export class ActionWorker {
           { blockMs: this.config.blockMs }
         );
         failed.reset();
+        unproven = false;
 
         const wait = backoff.next(result.task === null, performance.now() - started, this.config.blockMs);
         if (result.task === null) {
@@ -510,8 +518,13 @@ export class ActionWorker {
       } catch (err) {
         if (this.stopRequested) break;
         if (isConnectionError(err)) {
+          // A server that takes the connection and drops it again is not
+          // redialed at once each time: until a poll succeeds after a
+          // reconnect, each one waits first.
+          if (unproven) await pause(failed.next(), this.stopSignal.signal);
+          if (this.stopRequested) break;
           await this.recover(actionNames, err);
-          failed.reset();
+          unproven = true;
         } else {
           const d = failed.next();
           this.log(`Await error: ${err}, retrying in ${d}ms...`);

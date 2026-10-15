@@ -82,6 +82,8 @@ async function fakeServer(script: (op: number, conn: number) => Action) {
   return {
     endpoint: `127.0.0.1:${port}`,
     seen,
+    /** Connections accepted so far. */
+    connections: () => sockets.length,
     /** Stop listening and drop every connection, so redials are refused. */
     close: () => {
       server.close();
@@ -171,6 +173,20 @@ describe.each(cases)("%s reconnect", (_name, c) => {
     expect(warnings.some((m) => m.startsWith("Connection lost"))).toBe(true);
   });
 
+  it("doesn't redial at once, again and again, a server that takes the connection and drops it", async () => {
+    // Every poll is dropped, on every connection.
+    const srv = await fakeServer((op) => (op === c.poll ? "drop" : undefined));
+    close = srv.close;
+    const { logger } = recordingLogger();
+    const w = c.start(srv.endpoint, logger);
+    await sleep(1500);
+    w.stop();
+    await w.done;
+    // Waits of up to 100, 200, 400, 800 ms between redials: a handful, not
+    // thousands.
+    expect(srv.connections()).toBeLessThan(15);
+  });
+
   it("stops promptly during the reconnect backoff", async () => {
     // The first poll takes the server down, so every redial is refused.
     const srv = await fakeServer((op) => {
@@ -189,6 +205,61 @@ describe.each(cases)("%s reconnect", (_name, c) => {
     w.stop();
     await w.done;
     expect(Date.now() - stopped).toBeLessThan(200);
+  });
+});
+
+describe("a StreamWorker given a client", () => {
+  let close: (() => void) | undefined;
+  afterEach(() => close?.());
+  const noRetry = { maxAttempts: 1 };
+
+  it("redials when a poll times out on a connection that went quiet", async () => {
+    // Connection 0 never answers its poll; connection 1 hands out a record.
+    let served = false;
+    const srv = await fakeServer((op, conn) => {
+      if (op !== OpCode.StreamGroupRead) return undefined;
+      if (conn === 0) return "park";
+      if (served) return "park";
+      served = true;
+      return oneRecord();
+    });
+    close = srv.close;
+    const { logger } = recordingLogger();
+    const client = new FloClient(srv.endpoint, { timeoutMs: 200, retry: noRetry });
+    await client.connect();
+    const w = new StreamWorker(client, { stream: "s", blockMs: 100, heartbeatIntervalMs: 0, logger }, async () => {});
+    const done = w.start();
+    await until(() => srv.seen.some((s) => s.op === OpCode.StreamGroupAck), 3000);
+    w.stop();
+    await done;
+    expect(srv.seen.some((s) => s.conn === 1 && s.op === OpCode.StreamGroupAck)).toBe(true);
+  });
+
+  it("stops, without reopening it, when its owner closes the client", async () => {
+    const srv = await fakeServer((op) => (op === OpCode.StreamGroupRead ? "park" : undefined));
+    close = srv.close;
+    const { logger, warnings } = recordingLogger();
+    const client = new FloClient(srv.endpoint, { retry: noRetry });
+    await client.connect();
+    const w = new StreamWorker(client, { stream: "s", blockMs: 30000, heartbeatIntervalMs: 0, logger }, async () => {});
+    const done = w.start();
+    await until(() => srv.seen.some((s) => s.op === OpCode.StreamGroupRead), 3000);
+    await client.close();
+    await done;
+    expect(srv.connections()).toBe(1);
+    expect(warnings.some((m) => m.includes("closed by its owner"))).toBe(true);
+  });
+});
+
+describe("FloClient.connect", () => {
+  it("dials once for callers that connect at the same time", async () => {
+    const srv = await fakeServer(() => undefined);
+    const client = new FloClient(srv.endpoint);
+    await Promise.all([client.connect(), client.connect(), client.connect()]);
+    await sleep(50);
+    expect(srv.connections()).toBe(1);
+    await client.close();
+    srv.close();
   });
 });
 

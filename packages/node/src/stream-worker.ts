@@ -383,7 +383,13 @@ export class StreamWorker {
   /** Reconnect after a dropped connection, then join again. */
   private async recover(cause: unknown): Promise<void> {
     this.logger.warn(`Connection lost: ${cause}; reconnecting...`);
-    if (!(await reconnect(this.client!, this.stopSignal.signal, this.logger))) return;
+    if (!(await reconnect(this.client!, this.stopSignal.signal, this.logger))) {
+      if (this.client!.isClosed() && !this.stopRequested) {
+        this.logger.warn("The client was closed by its owner; stopping the worker");
+        this.stop();
+      }
+      return;
+    }
     try {
       await this.joinGroup();
     } catch (err) {
@@ -395,6 +401,7 @@ export class StreamWorker {
   private async pollLoop(): Promise<void> {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
+    let unproven = false;
     while (this.running && !this.stopRequested) {
       try {
         // Check concurrency limit
@@ -414,6 +421,7 @@ export class StreamWorker {
           blockMs: this.config.blockMs,
         });
         failed.reset();
+        unproven = false;
 
         const empty = !result || result.records.length === 0;
         const wait = backoff.next(empty, performance.now() - started, this.config.blockMs);
@@ -442,8 +450,13 @@ export class StreamWorker {
       } catch (err) {
         if (this.stopRequested) break;
         if (isConnectionError(err)) {
+          // A server that takes the connection and drops it again is not
+          // redialed at once each time: until a read succeeds after a
+          // reconnect, each one waits first.
+          if (unproven) await pause(failed.next(), this.stopSignal.signal);
+          if (this.stopRequested) break;
           await this.recover(err);
-          failed.reset();
+          unproven = true;
         } else {
           const d = failed.next();
           this.log(`GroupRead error: ${err}, retrying in ${d}ms...`);
