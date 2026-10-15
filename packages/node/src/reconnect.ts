@@ -64,3 +64,51 @@ export async function reconnect(client: FloClient, signal: AbortSignal, logger: 
   }
   return false;
 }
+
+/** Sends of one result in all, the first included. */
+export const RESULT_SENDS = 3;
+
+/**
+ * Send a worker's result (complete, fail, ack or nack) with `send`, which
+ * builds the same request each call. If the connection drops or the send
+ * times out, the worker reconnects and sends it again: the server may never
+ * have seen it, and a resend at worst repeats a result it already has. After
+ * RESULT_SENDS sends, or if the worker is stopping or the client's owner
+ * closed it, the result is dropped with an error log naming `what`; the
+ * server then hands the work out again once its lease runs out. A refusal is
+ * the server's answer and is not resent. Returns whether it was delivered.
+ */
+export async function sendResult(
+  client: FloClient,
+  signal: AbortSignal,
+  logger: Logger,
+  closes: number,
+  what: string,
+  send: () => Promise<unknown>,
+): Promise<boolean> {
+  for (let sends = 1; ; sends++) {
+    const seen = { connection: client.connection(), closes };
+    try {
+      await send();
+      return true;
+    } catch (err) {
+      if (!isConnectionError(err)) {
+        logger.error(`Dropped ${what}: ${err}`);
+        return false;
+      }
+      if (sends >= RESULT_SENDS) {
+        logger.error(`Dropped ${what} after ${sends} sends: ${err}`);
+        return false;
+      }
+      if (signal.aborted || closedSince(client, seen)) {
+        logger.error(`Dropped ${what}: ${err}; the worker is stopping or its client was closed`);
+        return false;
+      }
+      logger.warn(`Sending ${what} failed: ${err}; reconnecting to send it again`);
+      if (!(await reconnect(client, signal, logger, seen))) {
+        logger.error(`Dropped ${what}: ${err}; the worker is stopping or its client was closed`);
+        return false;
+      }
+    }
+  }
+}

@@ -607,7 +607,7 @@ export interface StreamAckOptions {
   namespace?: string;
   /** Consumer group name */
   group: string;
-  /** Consumer ID (required for correct ack matching in multi-consumer groups) */
+  /** Consumer ID. Sent, but the server doesn't check it: any consumer can ack an entry. */
   consumer: string;
 }
 
@@ -618,7 +618,7 @@ export interface StreamNackOptions {
   namespace?: string;
   /** Consumer group name */
   group: string;
-  /** Consumer ID (required for correct nack matching in multi-consumer groups) */
+  /** Consumer ID. Sent, but the server doesn't check it: any consumer can nack an entry. */
   consumer: string;
 }
 

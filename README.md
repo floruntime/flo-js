@@ -384,6 +384,11 @@ instead of stopping. `ActionWorker`, and a `StreamWorker` given an endpoint, tak
 option, with the same fields, for the client they create; a `StreamWorker`
 given a client uses that client's. A worker reconnects its client when the connection drops, but once the client's owner calls `close()` the worker stops, and stays stopped even if the client is connected again.
 
+A worker sends its handler's result (complete or fail, ack or nack) again, the
+same request, after reconnecting if the connection drops or the send times out,
+up to 3 sends in all; a refusal is not resent. Delivery is at-least-once: a
+handler may see the same task or record again, so make it safe to repeat.
+
 ```typescript
 // Up to 8 tries, waiting at most 2 s between them
 const client = new FloClient("localhost:9000", {

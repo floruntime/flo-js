@@ -44,7 +44,7 @@ import {
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
 import { EmptyPollBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
-import { closedSince, isConnectionError, reconnect } from "./reconnect.js";
+import { closedSince, isConnectionError, reconnect, sendResult } from "./reconnect.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -473,36 +473,33 @@ export class StreamWorker {
   }
 
   private async processRecord(record: StreamRecord): Promise<void> {
+    const client = this.client!;
     const ctx = new StreamContext(
       record,
-      this.client!.namespace(),
+      client.namespace(),
       this.config.stream,
       this.config.group,
       this.config.consumer
     );
+    const id = `${record.id.timestampMs}-${record.id.sequence}`;
+    const opts = { group: this.config.group, consumer: this.config.consumer };
 
+    // The handler's outcome alone picks ack or nack; sending it is separate,
+    // so a lost ack is resent, never turned into a nack.
+    let acked = true;
     try {
-      // Execute handler with timeout
       await this.withTimeout(this.handler(ctx), this.config.messageTimeoutMs);
-
-      // Auto-ack on success
-      await this.client!.stream.groupAck(this.config.stream, [record.id], {
-        group: this.config.group,
-        consumer: this.config.consumer,
-      });
     } catch (err) {
-      this.log(`Record ${record.id} failed: ${err}`);
-
-      // Auto-nack on failure
-      try {
-        await this.client!.stream.groupNack(this.config.stream, [record.id], {
-          group: this.config.group,
-          consumer: this.config.consumer,
-        });
-      } catch (nackErr) {
-        this.log(`Failed to nack record ${record.id}: ${nackErr}`);
-      }
+      this.log(`Record ${id} failed: ${err}`);
+      acked = false;
     }
+
+    const what = acked ? "ack" : "nack";
+    await sendResult(client, this.stopSignal.signal, this.logger, this.clientCloses, `${what} for record ${id}`, () =>
+      acked
+        ? client.stream.groupAck(this.config.stream, [record.id], opts)
+        : client.stream.groupNack(this.config.stream, [record.id], opts)
+    );
   }
 
   /**
