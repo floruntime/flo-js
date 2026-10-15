@@ -20,7 +20,6 @@ import {
   type RawResponse,
   type RetryPolicy,
   StreamOperations,
-  type Transport,
   WorkerOperations,
   WorkflowOperations,
   type WorkflowSyncOptions,
@@ -39,7 +38,7 @@ import { TcpTransport, type TcpTransportOptions } from "./transport.js";
  * Flo client for Node.js using TCP transport.
  */
 export class FloClient {
-  private readonly transport: Transport;
+  private readonly transport: TcpTransport;
   private readonly defaultNamespace: string;
   private readonly logger: Logger;
   private readonly retry: RetryPolicy;
@@ -115,6 +114,29 @@ export class FloClient {
    */
   async close(): Promise<void> {
     await this.transport.close();
+  }
+
+  /**
+   * Drop the connection, failing requests in flight, and dial again. How a
+   * worker recovers from a dropped or half-open connection.
+   */
+  async redial(connection?: number): Promise<void> {
+    await this.transport.redial(connection);
+  }
+
+  /** Whether close() was called since the last connect(). */
+  isClosed(): boolean {
+    return this.transport.isClosed();
+  }
+
+  /** Counts the connections made; pass it to redial() to drop only that one. */
+  connection(): number {
+    return this.transport.connection();
+  }
+
+  /** Counts close() calls. */
+  closes(): number {
+    return this.transport.closes();
   }
 
   /**

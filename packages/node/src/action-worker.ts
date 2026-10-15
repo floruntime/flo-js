@@ -41,6 +41,7 @@ import {
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
 import { EmptyPollBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { closedSince, isConnectionError, reconnect } from "./reconnect.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -311,6 +312,8 @@ export class ActionWorker {
   private running = false;
   private stopRequested = false;
   private stopSignal = new AbortController();
+  /** client.closes() at start(): once it moves, the owner closed the client. */
+  private clientCloses = 0;
   private activeTaskCount = 0;
   private readonly pendingTasks: Set<Promise<void>> = new Set();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -394,29 +397,11 @@ export class ActionWorker {
       retry: this.config.retry,
     });
     await this.client.connect();
+    this.clientCloses = this.client.closes();
 
+    const actionNames = Array.from(this.handlers.keys());
     try {
-      // Register actions with the server
-      const actionNames = Array.from(this.handlers.keys());
-      for (const actionName of actionNames) {
-        await this.client.action.register(actionName, ActionType.User);
-        this.log(`Registered action with server: ${actionName}`);
-      }
-
-      // Build process entries from registered actions
-      const processes: ProcessEntry[] = actionNames.map((name) => ({
-        name,
-        kind: ProcessKind.Action,
-      }));
-
-      // Register worker in worker registry
-      await this.client.worker.register(this.config.workerId, actionNames, {
-        workerType: WorkerType.Action,
-        maxConcurrency: this.config.concurrency,
-        processes,
-        machineId: this.config.machineId || undefined,
-      });
-      this.log(`Worker registered with ${actionNames.length} actions`);
+      await this.register(actionNames);
 
       // Initialize state
       this.running = true;
@@ -454,10 +439,52 @@ export class ActionWorker {
     }
   }
 
+  /** Register the actions and this worker with the server. */
+  private async register(actionNames: string[]): Promise<void> {
+    for (const actionName of actionNames) {
+      await this.client!.action.register(actionName, ActionType.User);
+      this.log(`Registered action with server: ${actionName}`);
+    }
+
+    const processes: ProcessEntry[] = actionNames.map((name) => ({
+      name,
+      kind: ProcessKind.Action,
+    }));
+    await this.client!.worker.register(this.config.workerId, actionNames, {
+      workerType: WorkerType.Action,
+      maxConcurrency: this.config.concurrency,
+      processes,
+      machineId: this.config.machineId || undefined,
+    });
+    this.log(`Worker registered with ${actionNames.length} actions`);
+  }
+
+  /** Reconnect after a dropped connection, then register again. */
+  private async recover(actionNames: string[], cause: unknown, connection: number): Promise<void> {
+    this.logger.warn(`Connection lost: ${cause}; reconnecting...`);
+    const seen = { connection, closes: this.clientCloses };
+    if (!(await reconnect(this.client!, this.stopSignal.signal, this.logger, seen))) {
+      if (closedSince(this.client!, seen) && !this.stopRequested) {
+        this.logger.warn("The client was closed by its owner; stopping the worker");
+        this.stop();
+      }
+      return;
+    }
+    try {
+      await this.register(actionNames);
+    } catch (err) {
+      // A connection error here surfaces again on the next poll.
+      this.logger.warn(`Re-register after reconnect failed: ${err}`);
+    }
+  }
+
   private async pollLoop(actionNames: string[]): Promise<void> {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
+    let unproven = false;
     while (this.running && !this.stopRequested) {
+      // The connection this iteration's poll goes on, to redial only it.
+      const connection = this.client!.connection();
       try {
         // Check concurrency limit
         if (this.activeTaskCount >= this.config.concurrency) {
@@ -479,6 +506,7 @@ export class ActionWorker {
           { blockMs: this.config.blockMs }
         );
         failed.reset();
+        unproven = false;
 
         const wait = backoff.next(result.task === null, performance.now() - started, this.config.blockMs);
         if (result.task === null) {
@@ -494,7 +522,16 @@ export class ActionWorker {
         });
         this.pendingTasks.add(taskPromise);
       } catch (err) {
-        if (!this.stopRequested) {
+        if (this.stopRequested) break;
+        if (isConnectionError(err)) {
+          // A server that takes the connection and drops it again is not
+          // redialed at once each time: until a poll succeeds after a
+          // reconnect, each one waits first.
+          if (unproven) await pause(failed.next(), this.stopSignal.signal);
+          if (this.stopRequested) break;
+          await this.recover(actionNames, err, connection);
+          unproven = true;
+        } else {
           const d = failed.next();
           this.log(`Await error: ${err}, retrying in ${d}ms...`);
           await pause(d, this.stopSignal.signal);

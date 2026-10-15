@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `ActionWorker` and `StreamWorker` reconnect after the connection drops, or after a poll times out on a connection that went quiet, then register again (`ActionWorker`) or rejoin the group and re-register (`StreamWorker`) before polling. They used to retry on the dead connection forever. Redials wait as a failed poll does (jittered, from 100 ms doubling to 5 s) until `stop()`, which ends a wait at once; a server that takes each new connection and drops it is redialed at that pace too, not at once. A worker given a client its owner then closes stops rather than reopening it, and stays stopped even if the owner connects the client again. Workers sharing a client redial a dropped connection once between them. The lost connection and each failed attempt are logged at warn.
+- `FloClient.connect()` called again while a dial is in progress waits on that dial instead of opening a second socket. Sockets use TCP keepalive.
+
 ### Changed
 
 - A request refused as overloaded or unavailable with `ran === Ran.No` is sent again as a new request, up to 4 tries with a jittered wait doubling from 50 ms to 1 s (`retry` client option; `{ maxAttempts: 1 }` turns it off). Workers back off from 100 ms to 5 s after a failed poll (was a flat 1 s that `stop()` couldn't cut short), and a `StreamWorker` retries a group join refused this way instead of failing `start()`.
