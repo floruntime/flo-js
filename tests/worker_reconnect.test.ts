@@ -269,12 +269,12 @@ describe("reconnect", () => {
   it("waits as the poll loop does: jittered, the ceiling doubling from 100 ms to 5 s", async () => {
     vi.useFakeTimers();
     const client = new FloClient("127.0.0.1:1");
-    client.connect = async () => {
+    client.redial = async () => {
       throw new Error("refused");
     };
     const { logger, warnings } = recordingLogger();
     const stop = new AbortController();
-    const done = reconnect(client, stop.signal, logger);
+    const done = reconnect(client, stop.signal, logger, { connection: 0, closes: 0 });
     for (let i = 0; i < 8; i++) await vi.advanceTimersByTimeAsync(5_000);
     stop.abort();
     expect(await done).toBe(false);
@@ -285,5 +285,91 @@ describe("reconnect", () => {
       expect(d).toBeGreaterThanOrEqual(0);
       expect(d).toBeLessThanOrEqual(ceilings[i]!);
     });
+  });
+});
+
+describe("reconnect, stopped", () => {
+  it("doesn't count a dial that finishes after stop() as reconnected", async () => {
+    const client = new FloClient("127.0.0.1:1");
+    const stop = new AbortController();
+    client.redial = async () => {
+      stop.abort();
+    };
+    const { logger, warnings } = recordingLogger();
+    expect(await reconnect(client, stop.signal, logger, { connection: 0, closes: 0 })).toBe(false);
+    expect(warnings.some((m) => m.startsWith("Reconnected"))).toBe(false);
+  });
+});
+
+describe("FloClient.close", () => {
+  it("during a dial leaves the client closed, with no socket", async () => {
+    const srv = await fakeServer(() => undefined);
+    const client = new FloClient(srv.endpoint);
+    const dialing = client.connect();
+    await client.close();
+    await expect(dialing).rejects.toThrow();
+    expect(client.isConnected()).toBe(false);
+    expect(client.isClosed()).toBe(true);
+    srv.close();
+  });
+});
+
+describe("FloClient.redial", () => {
+  it("drops only the connection the caller saw, so callers sharing a client redial it once", async () => {
+    const srv = await fakeServer(() => undefined);
+    const client = new FloClient(srv.endpoint);
+    await client.connect();
+    const seen = client.connection();
+    await client.redial(seen); // the first caller replaces the connection
+    await client.redial(seen); // the second, late, finds it already replaced
+    await sleep(50);
+    expect(srv.connections()).toBe(2);
+    expect(client.isConnected()).toBe(true);
+    await client.close();
+    srv.close();
+  });
+});
+
+describe("StreamWorkers sharing a client", () => {
+  it("redial its dropped connection once between them, not once each", async () => {
+    // The first connection drops at its first read; later ones park reads.
+    const srv = await fakeServer((op, conn) => {
+      if (op !== OpCode.StreamGroupRead) return undefined;
+      return conn === 0 ? "drop" : "park";
+    });
+    const client = new FloClient(srv.endpoint, { retry: { maxAttempts: 1 } });
+    await client.connect();
+    const { logger } = recordingLogger();
+    const workers = ["a", "b"].map(
+      (stream) => new StreamWorker(client, { stream, blockMs: 30000, heartbeatIntervalMs: 0, logger }, async () => {}),
+    );
+    const done = workers.map((w) => w.start());
+    await until(() => srv.seen.filter((s) => s.conn >= 1 && s.op === OpCode.StreamGroupRead).length >= 2, 3000);
+    await sleep(500);
+    workers.forEach((w) => w.stop());
+    await client.close();
+    await Promise.all(done);
+    expect(srv.connections()).toBe(2);
+    srv.close();
+  });
+});
+
+describe("a StreamWorker whose client is closed and connected again", () => {
+  it("stays stopped", async () => {
+    const srv = await fakeServer((op) => (op === OpCode.StreamGroupRead ? "park" : undefined));
+    const client = new FloClient(srv.endpoint, { retry: { maxAttempts: 1 } });
+    await client.connect();
+    const { logger } = recordingLogger();
+    const w = new StreamWorker(client, { stream: "s", blockMs: 30000, heartbeatIntervalMs: 0, logger }, async () => {});
+    const done = w.start();
+    await until(() => srv.seen.some((s) => s.op === OpCode.StreamGroupRead), 3000);
+    await client.close();
+    await client.connect();
+    await done;
+    const reads = srv.seen.filter((s) => s.op === OpCode.StreamGroupRead).length;
+    await sleep(300);
+    expect(srv.seen.filter((s) => s.op === OpCode.StreamGroupRead).length).toBe(reads);
+    await client.close();
+    srv.close();
   });
 });

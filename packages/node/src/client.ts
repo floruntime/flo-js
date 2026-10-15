@@ -120,13 +120,23 @@ export class FloClient {
    * Drop the connection, failing requests in flight, and dial again. How a
    * worker recovers from a dropped or half-open connection.
    */
-  async redial(): Promise<void> {
-    await this.transport.redial();
+  async redial(connection?: number): Promise<void> {
+    await this.transport.redial(connection);
   }
 
   /** Whether close() was called since the last connect(). */
   isClosed(): boolean {
     return this.transport.isClosed();
+  }
+
+  /** Counts the connections made; pass it to redial() to drop only that one. */
+  connection(): number {
+    return this.transport.connection();
+  }
+
+  /** Counts close() calls. */
+  closes(): number {
+    return this.transport.closes();
   }
 
   /**

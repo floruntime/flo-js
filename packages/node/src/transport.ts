@@ -86,6 +86,9 @@ export class TcpTransport implements Transport {
   private connecting: Promise<void> | null = null;
   /** close() was called: a worker doesn't reopen a client its owner closed. */
   private closed = false;
+  private closeCount = 0;
+  /** Connections made so far. */
+  private generation = 0;
   private readonly host: string;
   private readonly port: number;
   private readonly connectTimeoutMs: number;
@@ -122,9 +125,14 @@ export class TcpTransport implements Transport {
     return this.connecting;
   }
 
-  /** Drop the current socket, failing what is in flight, and dial again. */
-  async redial(): Promise<void> {
-    if (this.socket) {
+  /**
+   * Drop the current socket, failing what is in flight, and dial again.
+   * Given `generation` (from connection()), only the connection that was
+   * current then is dropped: if another caller sharing this transport has
+   * already redialed, this just connects to the new one.
+   */
+  async redial(generation?: number): Promise<void> {
+    if (this.socket && (generation === undefined || generation === this.generation)) {
       const socket = this.socket;
       this.failAll(socket, new UnexpectedEOFError("connection dropped to redial"));
       socket.destroy();
@@ -135,6 +143,16 @@ export class TcpTransport implements Transport {
   /** Whether close() was called since the last connect(). */
   isClosed(): boolean {
     return this.closed;
+  }
+
+  /** Counts the connections made; redial() takes it to drop only its own. */
+  connection(): number {
+    return this.generation;
+  }
+
+  /** Counts close() calls: a worker stops once its client was closed. */
+  closes(): number {
+    return this.closeCount;
   }
 
   private dial(): Promise<void> {
@@ -152,9 +170,16 @@ export class TcpTransport implements Transport {
       socket.once("connect", () => {
         connected = true;
         clearTimeout(timeoutId);
+        // close() came during the dial: the transport stays closed.
+        if (this.closed) {
+          socket.destroy();
+          reject(new NotConnectedError());
+          return;
+        }
         // A half-open connection is found by the OS rather than left to hang.
         socket.setKeepAlive(true, 30_000);
         this.socket = socket;
+        this.generation += 1;
         this.received = [];
         this.receivedLen = 0;
         socket.on("data", (chunk: Buffer) => this.onData(chunk));
@@ -179,6 +204,7 @@ export class TcpTransport implements Transport {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.closeCount += 1;
     if (this.socket) {
       const socket = this.socket;
       this.failAll(socket, new UnexpectedEOFError("connection closed"));

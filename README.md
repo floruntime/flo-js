@@ -382,7 +382,7 @@ connection; the server routes it afresh.
 ends a wait at once. A stream worker retries a group join refused this way
 instead of stopping. `ActionWorker`, and a `StreamWorker` given an endpoint, take a `retry`
 option, with the same fields, for the client they create; a `StreamWorker`
-given a client uses that client's.
+given a client uses that client's. A worker reconnects its client when the connection drops, but once the client's owner calls `close()` the worker stops, and stays stopped even if the client is connected again.
 
 ```typescript
 // Up to 8 tries, waiting at most 2 s between them

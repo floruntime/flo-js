@@ -44,7 +44,7 @@ import {
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
 import { EmptyPollBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
-import { isConnectionError, reconnect } from "./reconnect.js";
+import { closedSince, isConnectionError, reconnect } from "./reconnect.js";
 import crypto from "crypto";
 import os from "os";
 
@@ -204,6 +204,8 @@ export class StreamWorker {
   private running = false;
   private stopRequested = false;
   private stopSignal = new AbortController();
+  /** client.closes() at start(): once it moves, the owner closed the client. */
+  private clientCloses = 0;
   private activeCount = 0;
   private readonly pendingTasks: Set<Promise<void>> = new Set();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -283,6 +285,7 @@ export class StreamWorker {
     if (!this.client) {
       throw new Error("Client not available");
     }
+    this.clientCloses = this.client.closes();
 
     // Set before the join so stop() can end a join's retry wait.
     this.stopRequested = false;
@@ -381,10 +384,11 @@ export class StreamWorker {
   }
 
   /** Reconnect after a dropped connection, then join again. */
-  private async recover(cause: unknown): Promise<void> {
+  private async recover(cause: unknown, connection: number): Promise<void> {
     this.logger.warn(`Connection lost: ${cause}; reconnecting...`);
-    if (!(await reconnect(this.client!, this.stopSignal.signal, this.logger))) {
-      if (this.client!.isClosed() && !this.stopRequested) {
+    const seen = { connection, closes: this.clientCloses };
+    if (!(await reconnect(this.client!, this.stopSignal.signal, this.logger, seen))) {
+      if (closedSince(this.client!, seen) && !this.stopRequested) {
         this.logger.warn("The client was closed by its owner; stopping the worker");
         this.stop();
       }
@@ -403,6 +407,8 @@ export class StreamWorker {
     const failed = newWorkerBackoff();
     let unproven = false;
     while (this.running && !this.stopRequested) {
+      // The connection this iteration's poll goes on, to redial only it.
+      const connection = this.client!.connection();
       try {
         // Check concurrency limit
         if (this.activeCount >= this.config.concurrency) {
@@ -455,7 +461,7 @@ export class StreamWorker {
           // reconnect, each one waits first.
           if (unproven) await pause(failed.next(), this.stopSignal.signal);
           if (this.stopRequested) break;
-          await this.recover(err);
+          await this.recover(err, connection);
           unproven = true;
         } else {
           const d = failed.next();
