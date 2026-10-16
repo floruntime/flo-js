@@ -251,6 +251,7 @@ export {
 export {
   serializeActionRegisterValue,
   serializeActionInvokeValue,
+  serializeStreamAppendValue,
   serializeListValue,
   serializeWorkerRegisterValue,
   serializeWorkerAwaitValue,

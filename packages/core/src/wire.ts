@@ -499,6 +499,43 @@ export function serializeActionRegisterValue(
 }
 
 /**
+ * A stream append's value: a batch of one record,
+ * [record_count:u32=1][payload_len:u32][payload][header_count:u16]([key_len:u16][key][value_len:u16][value])*.
+ * The server refuses a payload that isn't framed this way.
+ */
+export function serializeStreamAppendValue(payload: Uint8Array, headers?: Record<string, string>): Uint8Array {
+  const pairs = Object.entries(headers ?? {}).map(([k, v]) => [textEncoder.encode(k), textEncoder.encode(v)] as const);
+  if (pairs.length > 0xffff) throw new RangeError("a record holds at most 65535 headers");
+  let size = 4 + 4 + payload.length + 2;
+  for (const [k, v] of pairs) {
+    if (k.length > 0xffff || v.length > 0xffff) throw new RangeError("a header key or value is longer than 65535 bytes");
+    size += 2 + k.length + 2 + v.length;
+  }
+  const buf = new Uint8Array(size);
+  const view = new DataView(buf.buffer);
+  let o = 0;
+  view.setUint32(o, 1, true);
+  o += 4;
+  view.setUint32(o, payload.length, true);
+  o += 4;
+  buf.set(payload, o);
+  o += payload.length;
+  view.setUint16(o, pairs.length, true);
+  o += 2;
+  for (const [k, v] of pairs) {
+    view.setUint16(o, k.length, true);
+    o += 2;
+    buf.set(k, o);
+    o += k.length;
+    view.setUint16(o, v.length, true);
+    o += 2;
+    buf.set(v, o);
+    o += v.length;
+  }
+  return buf;
+}
+
+/**
  * Serialize action invoke value.
  * Format: [has_labels:u8]([labels_len:u16 LE][labels])?[input...]
  *
