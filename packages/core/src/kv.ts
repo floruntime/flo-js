@@ -139,10 +139,10 @@ export class KVOperations {
     const encoded = keys.map((k) => textEncoder.encode(k));
     const out: MGetEntry[] = [];
     // Each run of keys fits one request frame; within a run, follow next.
-    for (const end of splitMGetKeys(encoded)) {
+    for (const end of splitMGetKeys(encoded, opts?.routingKey)) {
       while (out.length < end) {
         const from = out.length;
-        const resp = await this.sender.sendRequest(OpCode.KVMGet, namespace, new Uint8Array(0), encodeMGetBody(encoded.slice(from, end)), new Uint8Array(0));
+        const resp = await this.sender.sendRequest(OpCode.KVMGet, namespace, new Uint8Array(0), encodeMGetBody(encoded.slice(from, end), opts?.routingKey), new Uint8Array(0));
         if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
         const page = decodeMGetAnswer(resp.data);
         const asked = end - from;
