@@ -23,15 +23,16 @@ function reply(id: bigint, data: Uint8Array = new Uint8Array(0)): Uint8Array {
   return buf;
 }
 
-/** A task assignment for action "a". */
+/** A task assignment for action "a", invoked by no workflow. */
 function oneTask(): Uint8Array {
-  const buf = new Uint8Array(2 + 2 + 2 + 1 + 8 + 4);
+  const buf = new Uint8Array(2 + 2 + 2 + 1 + 8 + 4 + 1);
   const view = new DataView(buf.buffer);
   view.setUint16(0, 2, true);
   buf.set([0x74, 0x31], 2); // "t1"
   view.setUint16(4, 1, true);
   buf[6] = 0x61; // "a"
   view.setUint32(15, 1, true); // attempt
+  buf[19] = 0; // has_caller
   return buf;
 }
 

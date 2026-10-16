@@ -34,15 +34,16 @@ function frame(id: bigint, status: number, data: Uint8Array = new Uint8Array(0))
   return buf;
 }
 
-/** A task assignment for action "a", task id "t1". */
+/** A task assignment for action "a", task id "t1", invoked by no workflow. */
 function oneTask(): Uint8Array {
-  const buf = new Uint8Array(2 + 2 + 2 + 1 + 8 + 4);
+  const buf = new Uint8Array(2 + 2 + 2 + 1 + 8 + 4 + 1);
   const view = new DataView(buf.buffer);
   view.setUint16(0, 2, true);
   buf.set([0x74, 0x31], 2); // "t1"
   view.setUint16(4, 1, true);
   buf[6] = 0x61; // "a"
   view.setUint32(15, 1, true); // attempt
+  buf[19] = 0; // has_caller
   return buf;
 }
 
@@ -566,5 +567,20 @@ describe("serializeActionRegisterValue", () => {
     expect(() => serializeActionRegisterValue(0, 30000, 2 ** 32)).toThrow(RangeError);
     expect(() => serializeActionRegisterValue(0, 30000, 3, "x".repeat(65536))).toThrow(RangeError);
     expect(serializeActionRegisterValue(0, 30000, 3, "x".repeat(65535)).length).toBe(11 + 65535);
+  });
+});
+
+describe("stream.append", () => {
+  it("sends the record batch-framed, as the server reads an append", async () => {
+    // An append's answer: [sequence:u64][timestamp_ms:i64].
+    const srv = await serve((op) => (op === OpCode.StreamAppend ? new Uint8Array(16) : undefined));
+    const client = new FloClient(srv.endpoint);
+    await client.connect();
+    cleanups.push(() => client.close());
+    await client.stream.append("e", new TextEncoder().encode("hi"), { headers: { k: "v" } });
+    const [frame] = srv.of(OpCode.StreamAppend);
+    // [count=1][len=2]["hi"][headers=1][1]["k"][1]["v"], whole at the end of the value.
+    const batch = Buffer.from([1, 0, 0, 0, 2, 0, 0, 0, 0x68, 0x69, 1, 0, 1, 0, 0x6b, 1, 0, 0x76]);
+    expect(frame!.bytes.includes(batch)).toBe(true);
   });
 });
