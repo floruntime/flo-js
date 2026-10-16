@@ -261,6 +261,20 @@ while (true) {
 }
 ```
 
+#### ActionWorker
+
+```typescript
+import { ActionWorker } from "@floruntime/node";
+
+const worker = new ActionWorker({ endpoint: "localhost:9000", autoTouch: true });
+worker.action("process-image", async (ctx) => ({ done: true }), { timeoutMs: 60000, maxRetries: 5 });
+await worker.start();
+```
+
+The worker registers each action when it starts, with exactly the options given (the server's defaults when none: a 30 s timeout, 3 attempts). Registering replaces the action's settings, so workers that register one action with different options leave it with whichever registered last.
+
+A run whose handler goes past the action's `timeoutMs` without touching it is taken back and run again, by this worker or another. `autoTouch: true` touches each run every third of its action's timeout while the handler runs; it's off by default. Without it, call `await ctx.touch()` from long handlers. The worker also stops any handler after its own `actionTimeoutMs` (300 s by default) whatever the action's timeout, so raise it for actions that run longer.
+
 ### Stream Operations
 
 Streams are append-only logs for event sourcing and real-time data.

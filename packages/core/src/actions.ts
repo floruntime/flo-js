@@ -86,7 +86,7 @@ export class ActionOperations {
       actionType,
       opts?.timeoutMs ?? 30000,
       opts?.maxRetries ?? 3,
-      opts?.description
+      opts?.owner
     );
 
     const resp = await this.sender.sendRequest(

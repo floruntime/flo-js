@@ -472,53 +472,30 @@ const textDecoder = new TextDecoder();
 
 /**
  * Serialize action register value.
- * Format: [action_type:u8][timeout_ms:u32][max_retries:u32]
- *         [has_desc:u8][desc_len:u16]?[desc]?
- *         [has_wasm_module:u8]...(all optional fields as u8=0)
+ * Format: [action_type:u8][timeout_ms:u32][max_retries:u32][owner_len:u16][owner]
  */
 export function serializeActionRegisterValue(
   actionType: number,
   timeoutMs: number,
   maxRetries: number,
-  description?: string
+  owner?: string
 ): Uint8Array {
-  const descBytes = description ? textEncoder.encode(description) : null;
-  const size = 9 + (descBytes ? 3 + descBytes.length : 1) + 5; // 5 optional fields as u8=0
-
-  const buf = new Uint8Array(size);
-  const view = new DataView(buf.buffer);
-  let offset = 0;
-
-  // action_type
-  buf[offset++] = actionType & 0xff;
-
-  // timeout_ms
-  view.setUint32(offset, timeoutMs, true);
-  offset += 4;
-
-  // max_retries
-  view.setUint32(offset, maxRetries, true);
-  offset += 4;
-
-  // description (optional)
-  if (descBytes) {
-    buf[offset++] = 1; // has_desc
-    view.setUint16(offset, descBytes.length, true);
-    offset += 2;
-    buf.set(descBytes, offset);
-    offset += descBytes.length;
-  } else {
-    buf[offset++] = 0;
+  for (const [name, v] of [["timeoutMs", timeoutMs], ["maxRetries", maxRetries]] as const) {
+    // Both go on the wire as u32.
+    if (!(Number.isInteger(v) && v >= 0 && v < 2 ** 32)) {
+      throw new RangeError(`${name} must be an integer in [0, 2^32), not ${v}`);
+    }
   }
-
-  // Optional fields (all 0)
-  buf[offset++] = 0; // wasm_module
-  buf[offset++] = 0; // wasm_entrypoint
-  buf[offset++] = 0; // wasm_memory_limit
-  buf[offset++] = 0; // trigger_stream
-  buf[offset++] = 0; // trigger_group
-
-  return buf.subarray(0, offset);
+  const ownerBytes = textEncoder.encode(owner ?? "");
+  if (ownerBytes.length > 0xffff) throw new RangeError("owner is longer than 65535 bytes");
+  const buf = new Uint8Array(11 + ownerBytes.length);
+  const view = new DataView(buf.buffer);
+  buf[0] = actionType & 0xff;
+  view.setUint32(1, timeoutMs, true);
+  view.setUint32(5, maxRetries, true);
+  view.setUint16(9, ownerBytes.length, true);
+  buf.set(ownerBytes, 11);
+  return buf;
 }
 
 /**
