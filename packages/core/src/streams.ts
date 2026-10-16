@@ -24,7 +24,7 @@ import {
   type StreamNackOptions,
 } from "./types.js";
 import { kvGet, kvScan } from "./kv.js";
-import { OptionsBuilder } from "./wire.js";
+import { OptionsBuilder, serializeStreamAppendValue } from "./wire.js";
 
 /**
  * Interface for sending requests (implemented by client).
@@ -223,7 +223,7 @@ export class StreamOperations {
       OpCode.StreamAppend,
       namespace,
       textEncoder.encode(stream),
-      payload,
+      serializeStreamAppendValue(payload, opts?.headers),
       builder.build()
     );
 

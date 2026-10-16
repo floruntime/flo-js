@@ -9,11 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `StreamAppendOptions.headers`: headers stored with the record.
 - `ActionWorker` `autoTouch` option (off by default): touches each run every third of its action's timeout (at least every 100 ms) while the handler runs, asking for the worker's own timeout. It stops when a touch is refused as conflict, not found or bad request, and carries on after any other refusal.
 - `Reason.StaleReport` (26): an action complete or fail for a run that has moved on (another worker holds it, or it finished) is refused with it; resending it is refused the same way. The table hash moves with the server.
 
 ### Fixed
 
+- `stream.append` sent the bare payload, which the server refuses as a malformed batch: every append failed. It now sends the record as a batch of one, as the server reads it.
 - `ActionWorker` registered every action with the default options (30 s timeout, 3 attempts) each time it started, and registering replaces an action's settings, so a longer timeout registered elsewhere was reset by the next worker start; now that the server enforces timeouts, long handlers were taken back after 30 s. `worker.action(name, handler, options)` registers with exactly those options (the server's defaults when none). Workers registering one action with different options leave the last one's.
 - `ActionRegisterOptions` carries `timeoutMs`, `maxRetries` and `owner`, checked to fit a u32 and encoded as the server reads them. **Breaking:** `description` is removed; it went in the owner's place and would have been misread. `serializeActionRegisterValue`'s fourth argument is now `owner`.
 - `StorageTier` is `Hot = 0, Warm = 1`, the two tiers the server sends. It was `Hot, Pending, Warm, Cold` with `Warm = 2`, so a record served from the warm store read as `Pending`. `StorageTier.Pending` and `StorageTier.Cold` are removed.

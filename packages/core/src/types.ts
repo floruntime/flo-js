@@ -517,6 +517,8 @@ export interface StreamAppendOptions {
   partitionKey?: string;
   /** Explicit partition index (optional - uses partitionKey hash if not provided) */
   partition?: number;
+  /** Headers stored with the record (keys and values up to 65535 bytes each). */
+  headers?: Record<string, string>;
 }
 
 /**

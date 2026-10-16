@@ -24,6 +24,7 @@ import {
   serializeSeqs,
   IncompleteResponseError,
   serializeActionInvokeValue,
+  serializeStreamAppendValue,
   FloError,
 } from "@floruntime/core";
 
@@ -350,5 +351,18 @@ describe("Wire Protocol", () => {
       const labels = JSON.stringify({ k: "a".repeat(65535) });
       expect(() => serializeActionInvokeValue(enc.encode("x"), labels)).toThrow(FloError);
     });
+  });
+});
+
+describe("serializeStreamAppendValue", () => {
+  it("frames one record as the server's batch, with its headers", () => {
+    const got = serializeStreamAppendValue(new TextEncoder().encode("hi"), { k: "v" });
+    // [count=1][len=2]["hi"][headers=1][1]["k"][1]["v"]
+    expect(Array.from(got)).toEqual([1, 0, 0, 0, 2, 0, 0, 0, 0x68, 0x69, 1, 0, 1, 0, 0x6b, 1, 0, 0x76]);
+    expect(Array.from(serializeStreamAppendValue(new Uint8Array(0)))).toEqual([1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  });
+
+  it("refuses a header too long for its u16 length", () => {
+    expect(() => serializeStreamAppendValue(new Uint8Array(0), { k: "v".repeat(65536) })).toThrow(RangeError);
   });
 });
