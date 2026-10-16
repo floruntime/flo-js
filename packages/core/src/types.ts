@@ -10,7 +10,9 @@ export const VERSION = 0x02;
 /**
  * The hash of the op table this SDK was built for, written into every
  * request header. A server built from another table refuses the request,
- * and its answers carry its own hash, which this SDK refuses.
+ * and its answers carry its own hash, which this SDK refuses. CI's live
+ * tests run against the flo commit in .github/flo-ref.env: change both in
+ * one commit.
  */
 export const TABLE_HASH = 0xc8a2c3c65e95d11dn;
 
