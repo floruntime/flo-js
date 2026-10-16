@@ -214,6 +214,7 @@ export {
   MAX_ROUTING_KEY,
   MAX_SCAN_LIMIT,
   MAX_TTL_MS,
+  decodeActionStatusAnswer,
 } from "./kv_body.js";
 export {
   Transaction,
@@ -234,6 +235,7 @@ export {
   ActionOperations,
   WorkerOperations,
   type RequestSender as ActionRequestSender,
+  parseActionInvokeAnswer,
 } from "./actions.js";
 export {
   WorkflowOperations,

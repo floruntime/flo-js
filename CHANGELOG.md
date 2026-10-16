@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `action.status` returned the server's raw answer, which no caller could read. It now decodes the op table's answer into an `ActionRunStatus`: `status` (pending, running, completed, failed, cancelled, timed_out), `createdAtMs`, `startedAtMs`, `completedAtMs`, `attempt`, and the run's `output` and `errorMessage`. The table hash moves with the server.
+- `action.invoke` returned the whole answer as the run id: its length prefix, the id and a trailing byte. A status asked with that id was never found. It now returns the id alone.
 - `stream.append` sent the bare payload, which the server refuses as a malformed batch: every append failed. It now sends the record as a batch of one, as the server reads it.
 - `ActionWorker` handed every handler a payload starting with the task's caller block: the `has_caller` byte, and for an action a workflow invoked, the caller's run id and workflow name. `parseTaskAssignment` now reads that block, and the payload is the input alone. `TaskAssignment` and `ActionContext` carry `callerRunId` and `callerWorkflowName`.
 - `ActionWorker` registered every action with the default options (30 s timeout, 3 attempts) each time it started, and registering replaces an action's settings, so a longer timeout registered elsewhere was reset by the next worker start; now that the server enforces timeouts, long handlers were taken back after 30 s. `worker.action(name, handler, options)` registers with exactly those options (the server's defaults when none). Workers registering one action with different options leave the last one's.

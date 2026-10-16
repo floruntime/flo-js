@@ -78,8 +78,7 @@ describe.skipIf(!endpoint)("live", () => {
     expect((await client.queue.peek("jobs", 10)).messages).toHaveLength(0);
   });
 
-  // Status can't read the run's answer yet, so the accepted complete is the proof.
-  it("runs an invoked action on a worker, whose complete the server accepts", async () => {
+  it("runs an invoked action on a worker, and the run's status then carries its output", async () => {
     const { client, namespace } = await liveClient();
     const logged: string[] = [];
     const logger = { debug: (m: string) => void logged.push(m), warn: () => {}, error: (m: string) => void logged.push(m) };
@@ -95,13 +94,18 @@ describe.skipIf(!endpoint)("live", () => {
       await done;
     });
     await new Promise((r) => setTimeout(r, 200));
-    await client.action.invoke("echo", encoder.encode("hi"));
+    const { runId } = await client.action.invoke("echo", encoder.encode("hi"));
     const deadline = Date.now() + 15000;
-    while (!logged.some((m) => m.startsWith("Action complete sent: echo"))) {
-      expect(Date.now(), `log: ${logged.join(" | ")}`).toBeLessThan(deadline);
+    let status = await client.action.status(runId);
+    while (status.status !== "completed") {
+      expect(Date.now(), `run still ${status.status}; log: ${logged.join(" | ")}`).toBeLessThan(deadline);
       await new Promise((r) => setTimeout(r, 20));
+      status = await client.action.status(runId);
     }
     expect(input).toBe("hi");
+    expect(decoder.decode(status.output!)).toBe("ok");
+    expect(status.attempt).toBe(1);
+    expect(status.completedAtMs).toBeDefined();
   });
 
   // A handler past its action's 1 s timeout runs once when the worker touches
