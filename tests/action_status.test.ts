@@ -69,5 +69,9 @@ describe("action.invoke's answer", () => {
     expect(parseActionInvokeAnswer(new Uint8Array([id.length, 0, ...id, 0]))).toBe("act-1a2b-3");
     expect(() => parseActionInvokeAnswer(new Uint8Array([0, 0, 0]))).toThrow(IncompleteResponseError);
     expect(() => parseActionInvokeAnswer(new Uint8Array([9, 0, 0x61]))).toThrow(IncompleteResponseError);
+    // The has_output byte is there and 0, and nothing follows it.
+    expect(() => parseActionInvokeAnswer(new Uint8Array([id.length, 0, ...id]))).toThrow(IncompleteResponseError);
+    expect(() => parseActionInvokeAnswer(new Uint8Array([id.length, 0, ...id, 1]))).toThrow(IncompleteResponseError);
+    expect(() => parseActionInvokeAnswer(new Uint8Array([id.length, 0, ...id, 0, 0]))).toThrow(IncompleteResponseError);
   });
 });
