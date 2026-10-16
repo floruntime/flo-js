@@ -23,6 +23,7 @@ import {
   parseEnqueueResponse,
   serializeSeqs,
   IncompleteResponseError,
+  parseTaskAssignment,
   serializeActionInvokeValue,
   serializeStreamAppendValue,
   FloError,
@@ -364,5 +365,30 @@ describe("serializeStreamAppendValue", () => {
 
   it("refuses a header too long for its u16 length", () => {
     expect(() => serializeStreamAppendValue(new Uint8Array(0), { k: "v".repeat(65536) })).toThrow(RangeError);
+  });
+});
+
+describe("parseTaskAssignment", () => {
+  // [task_id_len]["t1"][task_type_len]["a"][created_at][attempt]
+  const head = [2, 0, 0x74, 0x31, 1, 0, 0x61, 7, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0];
+  const text = (s: string) => Array.from(new TextEncoder().encode(s));
+
+  it("reads a task no workflow invoked: the payload starts after has_caller", () => {
+    const task = parseTaskAssignment(new Uint8Array([...head, 0, ...text("hi")]));
+    expect(new TextDecoder().decode(task.payload)).toBe("hi");
+    expect(task.callerRunId).toBeUndefined();
+    expect(task.attempt).toBe(2);
+  });
+
+  it("reads a workflow's caller block, and the payload after it", () => {
+    const task = parseTaskAssignment(new Uint8Array([...head, 1, 2, 0, ...text("r1"), 3, 0, ...text("buy"), ...text("hi")]));
+    expect(task.callerRunId).toBe("r1");
+    expect(task.callerWorkflowName).toBe("buy");
+    expect(new TextDecoder().decode(task.payload)).toBe("hi");
+  });
+
+  it("refuses a has_caller byte that isn't 0 or 1, and a cut caller block", () => {
+    expect(() => parseTaskAssignment(new Uint8Array([...head, 2]))).toThrow(IncompleteResponseError);
+    expect(() => parseTaskAssignment(new Uint8Array([...head, 1, 5, 0, 0x72]))).toThrow(IncompleteResponseError);
   });
 });

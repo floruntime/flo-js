@@ -1064,6 +1064,10 @@ export interface TaskAssignment {
   payload: Uint8Array;
   createdAt: bigint;
   attempt: number;
+  /** The workflow run that invoked this action, when one did. */
+  callerRunId?: string;
+  /** That run's workflow. */
+  callerWorkflowName?: string;
 }
 
 /**

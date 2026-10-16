@@ -868,6 +868,33 @@ export function parseTaskAssignment(data: Uint8Array): import("./types.js").Task
   const attempt = view.getUint32(offset, true);
   offset += 4;
 
+  // caller: [has_caller:u8]([run_id_len:u16][run_id][workflow_len:u16][workflow])?
+  // The workflow run that invoked the action, when one did.
+  if (data.length < offset + 1) {
+    throw new IncompleteResponseError("task assignment: missing has_caller");
+  }
+  const hasCaller = data[offset++];
+  let callerRunId: string | undefined;
+  let callerWorkflowName: string | undefined;
+  if (hasCaller === 1) {
+    for (const field of ["run id", "workflow name"] as const) {
+      if (data.length < offset + 2) {
+        throw new IncompleteResponseError(`task assignment: missing caller ${field} length`);
+      }
+      const len = view.getUint16(offset, true);
+      offset += 2;
+      if (data.length < offset + len) {
+        throw new IncompleteResponseError(`task assignment: missing caller ${field}`);
+      }
+      const text = textDecoder.decode(data.subarray(offset, offset + len));
+      offset += len;
+      if (field === "run id") callerRunId = text;
+      else callerWorkflowName = text;
+    }
+  } else if (hasCaller !== 0) {
+    throw new IncompleteResponseError(`task assignment: has_caller is ${hasCaller}, not 0 or 1`);
+  }
+
   // payload (rest of data)
   const payload = data.subarray(offset);
 
@@ -877,6 +904,8 @@ export function parseTaskAssignment(data: Uint8Array): import("./types.js").Task
     payload,
     createdAt,
     attempt,
+    callerRunId,
+    callerWorkflowName,
   };
 }
 

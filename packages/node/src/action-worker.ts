@@ -40,6 +40,7 @@ import {
   silentLogger,
   type ProcessEntry,
   type RetryPolicy,
+  type TaskAssignment,
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
@@ -181,6 +182,12 @@ export class ActionContext {
   /** Namespace */
   readonly namespace: string;
 
+  /** The workflow run that invoked this action, when one did. */
+  readonly callerRunId?: string;
+
+  /** That run's workflow. */
+  readonly callerWorkflowName?: string;
+
   private readonly worker: ActionWorker;
   private _cancelled = false;
 
@@ -191,8 +198,11 @@ export class ActionContext {
     attempt: number,
     createdAt: bigint,
     namespace: string,
-    worker: ActionWorker
+    worker: ActionWorker,
+    caller?: { runId?: string; workflowName?: string }
   ) {
+    this.callerRunId = caller?.runId;
+    this.callerWorkflowName = caller?.workflowName;
     this.taskId = taskId;
     this.actionName = actionName;
     this.payload = payload;
@@ -588,13 +598,7 @@ export class ActionWorker {
     }
   }
 
-  private async executeTask(task: {
-    taskId: string;
-    taskType: string;
-    payload: Uint8Array;
-    createdAt: bigint;
-    attempt: number;
-  }): Promise<void> {
+  private async executeTask(task: TaskAssignment): Promise<void> {
     const client = this.client!;
     const { workerId } = this.config;
     const { taskType, taskId } = task;
@@ -617,7 +621,8 @@ export class ActionWorker {
         task.attempt,
         task.createdAt,
         this.config.namespace,
-        this
+        this,
+        { runId: task.callerRunId, workflowName: task.callerWorkflowName }
       );
       const timeoutMs = this.actionOptions.get(taskType)?.timeoutMs ?? 30000;
       const stopTouching = this.config.autoTouch && timeoutMs > 0 ? this.keepTouching(taskType, taskId, timeoutMs) : () => {};
