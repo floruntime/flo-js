@@ -62,6 +62,8 @@ const REFUSE = "refuse";
 
 /** An overloaded refusal the server didn't run, then the connection drops. */
 const BUSY_THEN_DROP = "busy-then-drop";
+/** An overloaded refusal the server didn't run; the connection stays up. */
+const OVERLOADED = "overloaded";
 /** An OK answer whose CRC is wrong. */
 const BAD_CRC = "bad-crc";
 /** An answer whose header has the wrong magic. */
@@ -72,6 +74,7 @@ type Action =
   | "park"
   | typeof REFUSE
   | typeof BUSY_THEN_DROP
+  | typeof OVERLOADED
   | typeof BAD_CRC
   | typeof BAD_MAGIC
   | Uint8Array
@@ -107,6 +110,11 @@ async function fakeServer(script: (op: number, conn: number) => Action) {
         if (a === REFUSE) {
           const body = new Uint8Array([Reason.Unclassified, 0, Ran.Yes, 0x6e, 0x6f]);
           sock.write(frame(id, StatusCode.Conflict, body));
+          continue;
+        }
+        if (a === OVERLOADED) {
+          const body = new Uint8Array([Reason.Unclassified, 0, Ran.No, 0x6e, 0x6f]);
+          sock.write(frame(id, StatusCode.Overloaded, body));
           continue;
         }
         if (a === BUSY_THEN_DROP) {
@@ -452,5 +460,111 @@ describe("StreamWorkers sharing a client", () => {
     expect(srv.of(OpCode.StreamGroupAck).map((s) => s.conn)).toEqual([0, 1, 1]);
     expect(srv.of(OpCode.StreamGroupNack)).toHaveLength(0);
     expect(srv.connections()).toBe(2);
+  });
+});
+
+describe("ActionWorker registration and auto-touch", () => {
+  function worker(endpoint: string, autoTouch: boolean, timeoutMs: number, handlerMs: number) {
+    const w = new ActionWorker({
+      endpoint,
+      blockMs: 30000,
+      heartbeatIntervalMs: 0,
+      logger: recordingLogger().logger,
+      autoTouch,
+      retry: { maxAttempts: 1 },
+    });
+    w.action("a", async () => {
+      await sleep(handlerMs);
+      return new Uint8Array(0);
+    }, { timeoutMs, owner: "payments", namespace: "elsewhere" });
+    const done = w.start();
+    cleanups.push(async () => {
+      w.stop();
+      await done;
+    });
+    return w;
+  }
+
+  it("registers the action with the options it was given", async () => {
+    const srv = await serve(oneTaskThen(() => undefined));
+    worker(srv.endpoint, false, 600000, 0);
+    await until(() => srv.of(OpCode.ActionComplete).length > 0, 5000);
+    const want = Buffer.alloc(11 + 8);
+    want.writeUInt8(0, 0);
+    want.writeUInt32LE(600000, 1);
+    want.writeUInt32LE(3, 5);
+    want.writeUInt16LE(8, 9);
+    want.write("payments", 11);
+    const [reg] = srv.of(OpCode.ActionRegister);
+    expect(reg!.bytes.includes(want)).toBe(true);
+    // The worker's namespace, not the options': "default".
+    expect(reg!.bytes.includes(Buffer.from("elsewhere"))).toBe(false);
+  });
+
+  it("touches a running task every third of its timeout, and stops with the handler", async () => {
+    const srv = await serve(oneTaskThen(() => undefined));
+    worker(srv.endpoint, true, 300, 450);
+    await until(() => srv.of(OpCode.ActionComplete).length > 0, 5000);
+    await sleep(300);
+    const touches = srv.of(OpCode.ActionTouch);
+    expect(touches.length).toBeGreaterThanOrEqual(2);
+    expect(touches.length).toBeLessThanOrEqual(5);
+    const completeAt = srv.seen.indexOf(srv.of(OpCode.ActionComplete)[0]!);
+    for (const t of touches) expect(srv.seen.indexOf(t)).toBeLessThan(completeAt);
+    // Each asks for this worker's timeout: "t1" then u32 300.
+    const extend = Buffer.alloc(4);
+    extend.writeUInt32LE(300);
+    for (const t of touches) expect(t.bytes.includes(Buffer.concat([Buffer.from("t1"), extend]))).toBe(true);
+  });
+
+  it("keeps touching after a refusal that isn't final, such as overloaded", async () => {
+    const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionTouch ? OVERLOADED : undefined)));
+    worker(srv.endpoint, true, 300, 450);
+    await until(() => srv.of(OpCode.ActionComplete).length > 0, 5000);
+    expect(srv.of(OpCode.ActionTouch).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("sends the complete while a touch is still in flight, on the same connection", async () => {
+    const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionTouch ? "park" : undefined)));
+    worker(srv.endpoint, true, 300, 150);
+    await until(() => srv.of(OpCode.ActionComplete).length > 0, 5000);
+    expect(srv.of(OpCode.ActionTouch)).toHaveLength(1);
+    expect(srv.connections()).toBe(1);
+  });
+
+  it("refuses options that don't fit a u32", () => {
+    const w = new ActionWorker({ endpoint: "127.0.0.1:1", logger: false });
+    expect(() => w.action("a", async () => new Uint8Array(0), { timeoutMs: -1 })).toThrow(RangeError);
+    expect(() => w.action("b", async () => new Uint8Array(0), { maxRetries: 2 ** 32 })).toThrow(RangeError);
+    expect(() => w.action("c", async () => new Uint8Array(0), { timeoutMs: 1.5 })).toThrow(RangeError);
+  });
+
+  it("touches nothing without autoTouch, or when the action never times out", async () => {
+    const off = await serve(oneTaskThen(() => undefined));
+    worker(off.endpoint, false, 300, 450);
+    const never = await serve(oneTaskThen(() => undefined));
+    worker(never.endpoint, true, 0, 300);
+    await until(() => off.of(OpCode.ActionComplete).length > 0 && never.of(OpCode.ActionComplete).length > 0, 5000);
+    await sleep(200);
+    expect(off.of(OpCode.ActionTouch)).toHaveLength(0);
+    expect(never.of(OpCode.ActionTouch)).toHaveLength(0);
+  });
+
+  it("stops touching once a touch is refused as a conflict", async () => {
+    const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionTouch ? REFUSE : undefined)));
+    worker(srv.endpoint, true, 300, 450);
+    await until(() => srv.of(OpCode.ActionComplete).length > 0, 5000);
+    await sleep(200);
+    expect(srv.of(OpCode.ActionTouch)).toHaveLength(1);
+  });
+});
+
+describe("serializeActionRegisterValue", () => {
+  it("refuses a timeout or attempt count outside u32, and an owner longer than 65535 bytes", async () => {
+    const { serializeActionRegisterValue } = await import("@floruntime/core");
+    expect(() => serializeActionRegisterValue(0, -1, 3)).toThrow(RangeError);
+    expect(() => serializeActionRegisterValue(0, 30000, 2 ** 32)).toThrow(RangeError);
+    expect(() => serializeActionRegisterValue(0, 30000, 3, "x".repeat(65536))).toThrow(RangeError);
+    expect(serializeActionRegisterValue(0, 30000, 3, "x".repeat(65535)).length).toBe(11 + 65535);
   });
 });

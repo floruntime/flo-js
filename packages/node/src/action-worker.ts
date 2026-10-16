@@ -29,8 +29,11 @@
 
 import {
   ActionType,
+  type ActionRegisterOptions,
   Logger,
   ProcessKind,
+  ServerError,
+  StatusCode,
   WorkerStatus,
   WorkerType,
   consoleLogger,
@@ -93,6 +96,13 @@ export interface ActionWorkerConfig {
   retry?: Partial<RetryPolicy>;
 
   /**
+   * Touch each run every third of its action's timeout while the handler
+   * runs (default false). Without it, a handler that runs past the action's
+   * timeout without calling `ctx.touch()` is taken back and run again.
+   */
+  autoTouch?: boolean;
+
+  /**
    * Logger for worker messages.
    * - `true`: use console logger
    * - `false` or omitted: silent (no logging)
@@ -100,6 +110,15 @@ export interface ActionWorkerConfig {
    */
   logger?: boolean | Logger;
 }
+
+/** autoTouch never touches more often than this, whatever the timeout. */
+const MIN_TOUCH_INTERVAL_MS = 100;
+
+/** The longest lease a touch may ask for; the server refuses more. */
+const MAX_TOUCH_EXTEND_MS = 3_600_000;
+
+/** Touch refusals that mean the run moved on: touching again can't help. */
+const TOUCH_FINAL: StatusCode[] = [StatusCode.Conflict, StatusCode.NotFound, StatusCode.BadRequest];
 
 /**
  * Action handler function signature.
@@ -316,6 +335,7 @@ export class ActionWorker {
   private readonly logger: Logger;
   private client: FloClient | null = null;
   private readonly handlers: Map<string, ActionHandler> = new Map();
+  private readonly actionOptions: Map<string, ActionRegisterOptions> = new Map();
   private running = false;
   private stopRequested = false;
   private stopSignal = new AbortController();
@@ -344,6 +364,7 @@ export class ActionWorker {
       machineId: config.machineId ?? (os.hostname() || ""),
       heartbeatIntervalMs: config.heartbeatIntervalMs ?? 30000,
       retry: config.retry ?? {},
+      autoTouch: config.autoTouch ?? false,
     };
 
     // Setup logger
@@ -369,15 +390,31 @@ export class ActionWorker {
   /**
    * Register an action handler.
    *
+   * The worker registers the action with the server when it starts, with
+   * exactly these options (the server's defaults when none: a 30 s timeout,
+   * 3 attempts). Registering replaces the action's settings, so workers
+   * registering one action with different options leave it with whichever
+   * registered last. The options' namespace is ignored: the action goes in
+   * the worker's.
+   *
    * @param name - The action name to register
    * @param handler - Async function that handles the action
+   * @param options - The action's timeout, attempts and owner
    * @throws Error if action is already registered
    */
-  action(name: string, handler: ActionHandler): void {
+  action(name: string, handler: ActionHandler, options: ActionRegisterOptions = {}): void {
     if (this.handlers.has(name)) {
       throw new Error(`Action '${name}' is already registered`);
     }
+    for (const field of ["timeoutMs", "maxRetries"] as const) {
+      const v = options[field];
+      // Both go on the wire as u32.
+      if (v !== undefined && !(Number.isInteger(v) && v >= 0 && v < 2 ** 32)) {
+        throw new RangeError(`${field} must be an integer in [0, 2^32), not ${v}`);
+      }
+    }
     this.handlers.set(name, handler);
+    this.actionOptions.set(name, { ...options, namespace: undefined });
     this.log(`Registered action: ${name}`);
   }
 
@@ -453,7 +490,7 @@ export class ActionWorker {
   /** Register the actions and this worker with the server. */
   private async register(actionNames: string[]): Promise<void> {
     for (const actionName of actionNames) {
-      await this.client!.action.register(actionName, ActionType.User);
+      await this.client!.action.register(actionName, ActionType.User, this.actionOptions.get(actionName));
       this.log(`Registered action with server: ${actionName}`);
     }
 
@@ -582,8 +619,10 @@ export class ActionWorker {
         this.config.namespace,
         this
       );
+      const timeoutMs = this.actionOptions.get(taskType)?.timeoutMs ?? 30000;
+      const stopTouching = this.config.autoTouch && timeoutMs > 0 ? this.keepTouching(taskType, taskId, timeoutMs) : () => {};
       try {
-        const result = await this.withTimeout(handler(ctx), this.config.actionTimeoutMs);
+        const result = await this.withTimeout(handler(ctx), this.config.actionTimeoutMs).finally(stopTouching);
         // Plain object → JSON bytes, ActionResult → named outcome
         what = "complete";
         if (result instanceof ActionResult) {
@@ -616,6 +655,41 @@ export class ActionWorker {
       report
     );
     if (sent) this.log(`Action ${what} sent: ${taskType} (task=${taskId})`);
+  }
+
+  /**
+   * Touch a run until the returned function is called. Each touch asks for
+   * this worker's timeout, at most an hour, so the lease covers it even if
+   * another worker's registration shortened the action's, and goes every
+   * third of that (at least 100 ms apart). Conflict, not found or bad
+   * request means the run moved on (finished, cancelled or taken back), so
+   * touching stops; any other refusal, an overloaded leader say, or a touch
+   * lost with its connection, is tried again next interval. A touch in
+   * flight when this stops is left to finish.
+   */
+  private keepTouching(actionName: string, taskId: string, timeoutMs: number): () => void {
+    const extendMs = Math.min(timeoutMs, MAX_TOUCH_EXTEND_MS);
+    // A third of the lease each touch asks for, so two can fail in a row.
+    const intervalMs = Math.max(extendMs / 3, MIN_TOUCH_INTERVAL_MS);
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async (): Promise<void> => {
+      try {
+        await this._touchTask(actionName, taskId, extendMs);
+      } catch (err) {
+        if (err instanceof ServerError && TOUCH_FINAL.includes(err.status)) {
+          this.logger.warn(`Touch for task ${taskId} was refused, stopping: ${err}`);
+          return;
+        }
+        this.logger.warn(`Touch for task ${taskId} failed: ${err}; trying again`);
+      }
+      if (!stopped) timer = setTimeout(tick, intervalMs);
+    };
+    timer = setTimeout(tick, intervalMs);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
   }
 
   /**

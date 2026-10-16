@@ -952,11 +952,17 @@ export interface ActionListResult {
 /**
  * Options for registering an action.
  */
+/**
+ * Options for registering an action. Registering replaces the action's
+ * settings: the last registration wins.
+ */
 export interface ActionRegisterOptions {
   namespace?: string;
+  /** How long a run may go without its worker completing, failing or touching it before it's taken back; 0 means never (default 30000). */
   timeoutMs?: number;
+  /** Attempts in all, counting the first (default 3). */
   maxRetries?: number;
-  description?: string;
+  owner?: string;
 }
 
 /**
