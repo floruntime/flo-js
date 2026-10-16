@@ -513,7 +513,7 @@ export class WorkerOperations {
 export function parseActionInvokeAnswer(data: Uint8Array): string {
   if (data.length < 2) throw new IncompleteResponseError("invoke answer: missing run id length");
   const len = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint16(0, true);
-  if (len === 0 || 2 + len > data.length) {
+  if (len === 0 || data.length !== 2 + len + 1 || data[2 + len] !== 0) {
     throw new IncompleteResponseError(`invoke answer: run id length ${len} in ${data.length} bytes`);
   }
   return textDecoder.decode(data.subarray(2, 2 + len));

@@ -13,9 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ActionWorker` `autoTouch` option (off by default): touches each run every third of its action's timeout (at least every 100 ms) while the handler runs, asking for the worker's own timeout. It stops when a touch is refused as conflict, not found or bad request, and carries on after any other refusal.
 - `Reason.StaleReport` (26): an action complete or fail for a run that has moved on (another worker holds it, or it finished) is refused with it; resending it is refused the same way. The table hash moves with the server.
 
+### Changed
+
+- **Breaking:** `action.status` returns a new `ActionRunStatus` shape: `status` (pending, running, completed, failed, cancelled, timed_out), `createdAtMs`, `startedAtMs`, `completedAtMs`, `attempt`, and the run's `output` and `errorMessage`, decoded from the op table's answer. It used to return the server's raw answer, which no caller could read. The table hash moves with the server.
+
 ### Fixed
 
-- `action.status` returned the server's raw answer, which no caller could read. It now decodes the op table's answer into an `ActionRunStatus`: `status` (pending, running, completed, failed, cancelled, timed_out), `createdAtMs`, `startedAtMs`, `completedAtMs`, `attempt`, and the run's `output` and `errorMessage`. The table hash moves with the server.
 - `action.invoke` returned the whole answer as the run id: its length prefix, the id and a trailing byte. A status asked with that id was never found. It now returns the id alone.
 - `stream.append` sent the bare payload, which the server refuses as a malformed batch: every append failed. It now sends the record as a batch of one, as the server reads it.
 - `ActionWorker` handed every handler a payload starting with the task's caller block: the `has_caller` byte, and for an action a workflow invoked, the caller's run id and workflow name. `parseTaskAssignment` now reads that block, and the payload is the input alone. `TaskAssignment` and `ActionContext` carry `callerRunId` and `callerWorkflowName`.
