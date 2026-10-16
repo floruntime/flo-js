@@ -67,6 +67,7 @@ const TABLE_OPS: ReadonlySet<OpCode> = new Set([
   OpCode.KVRollbackTxn,
   OpCode.KVExpire,
   OpCode.KVExists,
+  OpCode.ActionStatus,
 ]);
 
 /** Whether `op`'s request carries a schema-coded body, not a value and options. */
@@ -516,4 +517,26 @@ export function decodeTxnCommitAnswer(data: Uint8Array): KVCommitResult {
 /** An answer with no fields: kv.expire's, kv.txn_rollback's. */
 export function decodeEmptyAnswer(data: Uint8Array): void {
   new AnswerReader(data).end();
+}
+
+/** action.status's status values, by their wire number. */
+const RUN_STATUSES = ["pending", "running", "completed", "failed", "cancelled", "timed_out"] as const;
+
+/**
+ * action.status's answer: [status:u8][created_at_ms:i64][started_at_ms?][completed_at_ms?]
+ * [attempt:u32][output?: u16 length][error_message?: u16 length], each ? a present byte first.
+ */
+export function decodeActionStatusAnswer(runId: string, data: Uint8Array): import("./types.js").ActionRunStatus {
+  const r = new AnswerReader(data);
+  const code = r.u8();
+  const status = RUN_STATUSES[code];
+  if (status === undefined) throw new IncompleteResponseError(`action status ${code} is not one this client knows`);
+  const createdAtMs = r.i64();
+  const startedAtMs = r.present() ? r.i64() : undefined;
+  const completedAtMs = r.present() ? r.i64() : undefined;
+  const attempt = r.u32();
+  const output = r.present() ? r.bytes16() : undefined;
+  const errorMessage = r.present() ? new TextDecoder().decode(r.bytes16()) : undefined;
+  r.end();
+  return { runId, status, createdAtMs, startedAtMs, completedAtMs, attempt, output, errorMessage };
 }

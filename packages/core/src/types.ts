@@ -14,7 +14,7 @@ export const VERSION = 0x02;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0xc8a2c3c65e95d11dn;
+export const TABLE_HASH = 0x0594d65e5909af22n;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -937,10 +937,19 @@ export interface ActionInfo {
  */
 export interface ActionRunStatus {
   runId: string;
-  /** Status: "pending" | "running" | "completed" | "failed" */
-  status: string;
-  result?: Uint8Array;
-  error?: string;
+  status: "pending" | "running" | "completed" | "failed" | "cancelled" | "timed_out";
+  /** When it was invoked, ms since the epoch. */
+  createdAtMs: bigint;
+  /** When a worker first claimed it; absent until then. */
+  startedAtMs?: bigint;
+  /** When it finished; absent until then. */
+  completedAtMs?: bigint;
+  /** Attempts begun so far, the current one included. */
+  attempt: number;
+  /** What the worker completed it with; absent until it completes. */
+  output?: Uint8Array;
+  /** Why its last attempt failed, if one did. */
+  errorMessage?: string;
 }
 
 /**

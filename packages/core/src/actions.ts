@@ -2,7 +2,8 @@
  * Action and Worker operations for Flo SDK.
  */
 
-import { createServerError } from "./errors.js";
+import { createServerError, IncompleteResponseError } from "./errors.js";
+import { decodeActionStatusAnswer } from "./kv_body.js";
 import {
   type ActionDeleteOptions,
   type ActionInvokeOptions,
@@ -131,9 +132,7 @@ export class ActionOperations {
       throw createServerError(resp.status, resp.data);
     }
 
-    // Response contains run_id as string
-    const runId = resp.data.length > 0 ? textDecoder.decode(resp.data) : "";
-    return { runId };
+    return { runId: parseActionInvokeAnswer(resp.data) };
   }
 
   /**
@@ -158,12 +157,7 @@ export class ActionOperations {
       throw createServerError(resp.status, resp.data);
     }
 
-    // Parse status response - format TBD based on server implementation
-    return {
-      runId,
-      status: "unknown",
-      result: resp.data.length > 0 ? resp.data : undefined,
-    };
+    return decodeActionStatusAnswer(runId, resp.data);
   }
 
   /**
@@ -513,4 +507,14 @@ export class WorkerOperations {
     // Parse list response - format TBD based on server implementation
     return { workers: [] };
   }
+}
+
+/** An invoke's answer: [run_id_len:u16][run_id][has_output:u8]; the server never sets output. */
+export function parseActionInvokeAnswer(data: Uint8Array): string {
+  if (data.length < 2) throw new IncompleteResponseError("invoke answer: missing run id length");
+  const len = new DataView(data.buffer, data.byteOffset, data.byteLength).getUint16(0, true);
+  if (len === 0 || 2 + len > data.length) {
+    throw new IncompleteResponseError(`invoke answer: run id length ${len} in ${data.length} bytes`);
+  }
+  return textDecoder.decode(data.subarray(2, 2 + len));
 }
