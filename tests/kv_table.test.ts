@@ -404,3 +404,16 @@ describe("the reason list", () => {
     expect([Reason.WrongRoutingKey, Reason.WrongType, Reason.TooManyTransactions]).toEqual([18, 24, 25]);
   });
 });
+
+describe("the worker refusals", () => {
+  it("name worker_unhealthy (27) and worker_draining (28), and a refusal carrying one decodes", async () => {
+    const { createServerError, Ran, StatusCode } = await import("@floruntime/core");
+    expect([Reason.WorkerUnhealthy, Reason.WorkerDraining]).toEqual([27, 28]);
+    expect(reasonName(Reason.WorkerUnhealthy)).toBe("worker_unhealthy");
+    expect(reasonName(Reason.WorkerDraining)).toBe("worker_draining");
+    for (const reason of [27, 28]) {
+      const err = createServerError(StatusCode.BadRequest, new Uint8Array([reason, 0, Ran.No, 0x78]));
+      expect(err).toMatchObject({ status: StatusCode.BadRequest, reason, ran: Ran.No });
+    }
+  });
+});

@@ -91,12 +91,12 @@ const NEVER = 60_000;
 type Started = { stop: () => void; done: Promise<void> };
 const workers: [string, number, (endpoint: string) => Started][] = [
   ["ActionWorker", OpCode.ActionAwait, (endpoint) => {
-    const w = new ActionWorker({ endpoint, blockMs: 30000, heartbeatIntervalMs: 0 });
+    const w = new ActionWorker({ endpoint, blockMs: 30000 });
     w.action("a", async () => new Uint8Array(0));
     return { stop: () => w.stop(), done: w.start() };
   }],
   ["StreamWorker", OpCode.StreamGroupRead, (endpoint) => {
-    const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000, heartbeatIntervalMs: 0 }, async () => {});
+    const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000 }, async () => {});
     return { stop: () => w.stop(), done: w.start() };
   }],
 ];
@@ -174,7 +174,7 @@ describe("ActionWorker restart", () => {
   it("backs off again after a stop and start", async () => {
     const srv = await fakeServer(() => undefined);
     close = srv.close;
-    const w = new ActionWorker({ endpoint: srv.endpoint, blockMs: 30000, heartbeatIntervalMs: 0 });
+    const w = new ActionWorker({ endpoint: srv.endpoint, blockMs: 30000 });
     w.action("a", async () => new Uint8Array(0));
     let done = w.start();
     await sleep(100);
@@ -208,7 +208,7 @@ describe("StreamWorker group read wakes", () => {
     const handled: number[] = [];
     const w = new StreamWorker(
       srv.endpoint,
-      { stream: "s", blockMs: 30000, heartbeatIntervalMs: 0 },
+      { stream: "s", blockMs: 30000 },
       async () => {
         handled.push(Date.now());
       }
@@ -239,7 +239,7 @@ describe("StreamWorker group read wakes", () => {
       return { delayMs: nth < 4 ? 300 : NEVER };
     });
     close = srv.close;
-    const w = new StreamWorker(srv.endpoint, { stream: "s", blockMs: 30000, heartbeatIntervalMs: 0 }, async () => {});
+    const w = new StreamWorker(srv.endpoint, { stream: "s", blockMs: 30000 }, async () => {});
     const done = w.start();
     await sleep(1400);
     w.stop();

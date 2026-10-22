@@ -214,7 +214,10 @@ export {
   MAX_ROUTING_KEY,
   MAX_SCAN_LIMIT,
   MAX_TTL_MS,
+  MAX_WORKER_LIST_LIMIT,
   decodeActionStatusAnswer,
+  decodeWorkerListAnswer,
+  encodeWorkerListBody,
 } from "./kv_body.js";
 export {
   Transaction,

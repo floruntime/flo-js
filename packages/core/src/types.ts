@@ -14,7 +14,7 @@ export const VERSION = 0x02;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0x3ac05a0a877bda48n;
+export const TABLE_HASH = 0x2fba7dd9ae941830n;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -62,6 +62,10 @@ export enum Reason {
   TooManyTransactions = 25,
   /** An action complete or fail for a run that has moved on (another worker holds it, or it finished). It was dropped; resending it is refused the same way. */
   StaleReport = 26,
+  /** An action await from a worker that missed its heartbeats: send one, or register again. */
+  WorkerUnhealthy = 27,
+  /** An action await from a worker the server has drained: it takes no more work. */
+  WorkerDraining = 28,
 }
 
 /** Whether a refused request took effect: retry logic reads this, not the message. */
@@ -100,6 +104,8 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.WrongType]: "wrong_type",
   [Reason.TooManyTransactions]: "too_many_transactions",
   [Reason.StaleReport]: "stale_report",
+  [Reason.WorkerUnhealthy]: "worker_unhealthy",
+  [Reason.WorkerDraining]: "worker_draining",
 };
 
 /** The server's name for a reason, as it appears in messages. */
@@ -950,6 +956,12 @@ export interface ActionRunStatus {
   output?: Uint8Array;
   /** Why its last attempt failed, if one did. */
   errorMessage?: string;
+  /**
+   * The worker that holds the run, or last held it; absent until a worker
+   * takes it. Only the leader knows a take at once: other nodes learn it at
+   * the run's next update.
+   */
+  workerId?: string;
 }
 
 /**
@@ -1090,27 +1102,29 @@ export interface WorkerAwaitResult {
 }
 
 /**
- * Information about a registered worker.
+ * A registered worker, as worker.list answers.
  */
 export interface WorkerInfo {
   id: string;
   type: WorkerType;
   status: WorkerStatus;
-  metadata?: string;
-  machineId?: string;
-  tasksCompleted: number;
-  tasksFailed: number;
+  /** Handlers running, as the worker last reported; 0 once it is unhealthy. */
   currentLoad: number;
   maxConcurrency: number;
+  tasksCompleted: bigint;
+  tasksFailed: bigint;
   registeredAtMs: bigint;
-  lastHeartbeat: bigint;
+  lastHeartbeatMs: bigint;
+  machineId?: string;
 }
 
 /**
- * Result of listing workers.
+ * A page of workers, in id order.
  */
 export interface WorkerListResult {
   workers: WorkerInfo[];
+  /** Pass as the next call's cursor; null on the last page. */
+  cursor: Uint8Array | null;
 }
 
 /**
@@ -1170,7 +1184,10 @@ export interface WorkerFailOptions {
  */
 export interface WorkerListOptions {
   namespace?: string;
+  /** Most workers on the page, 1 to 1024 (default 1024). */
   limit?: number;
+  /** The previous page's cursor; omit for the first page. */
+  cursor?: Uint8Array | null;
 }
 
 /**

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { IncompleteResponseError, decodeActionStatusAnswer } from "@floruntime/core";
 
 /** action.status's answer as the server encodes it. */
-function answer(status: number, opts: { started?: bigint; completed?: bigint; attempt?: number; output?: string; error?: string } = {}): Uint8Array {
+function answer(status: number, opts: { started?: bigint; completed?: bigint; attempt?: number; output?: string; error?: string; worker?: string } = {}): Uint8Array {
   const parts: number[] = [status];
   const i64 = (v: bigint) => {
     const b = new DataView(new ArrayBuffer(8));
@@ -20,7 +20,7 @@ function answer(status: number, opts: { started?: bigint; completed?: bigint; at
   }
   const a = opts.attempt ?? 0;
   parts.push(a & 0xff, (a >> 8) & 0xff, (a >> 16) & 0xff, a >>> 24);
-  for (const s of [opts.output, opts.error]) {
+  for (const s of [opts.output, opts.error, opts.worker]) {
     if (s === undefined) parts.push(0);
     else {
       const b = new TextEncoder().encode(s);
@@ -44,7 +44,13 @@ describe("action.status", () => {
       attempt: 1,
       output: new TextEncoder().encode('{"ok":true}'),
       errorMessage: undefined,
+      workerId: undefined,
     });
+  });
+
+  it("decodes the worker that holds the run, last", () => {
+    const s = decodeActionStatusAnswer("r", answer(1, { started: 1100n, attempt: 1, worker: "host-1a2b" }));
+    expect([s.status, s.workerId, s.output, s.errorMessage]).toEqual(["running", "host-1a2b", undefined, undefined]);
   });
 
   it("decodes a pending run and a timed-out one with its error", () => {
@@ -54,7 +60,7 @@ describe("action.status", () => {
   });
 
   it("refuses a cut answer and a status this client doesn't know", () => {
-    const whole = answer(2, { attempt: 1, output: "x" });
+    const whole = answer(2, { attempt: 1, output: "x", worker: "w" });
     for (let n = 0; n < whole.length; n++) {
       expect(() => decodeActionStatusAnswer("r", whole.subarray(0, n))).toThrow(IncompleteResponseError);
     }
