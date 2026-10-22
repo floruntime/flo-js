@@ -21,6 +21,10 @@ import {
   type ScanResult,
   type VersionEntry,
   WaitFor,
+  type WorkerInfo,
+  type WorkerListResult,
+  type WorkerStatus,
+  type WorkerType,
 } from "./types.js";
 
 /** The longest routing key; its length prefix is a u16. */
@@ -39,6 +43,10 @@ export const MAX_JSON_PATH = 1024;
 export const MAX_JSON_DOCUMENT = 252_819;
 /** The longest scan cursor; its length prefix is a u8. */
 const MAX_SCAN_CURSOR = 64;
+/** The most workers one worker.list page holds. */
+export const MAX_WORKER_LIST_LIMIT = 1024;
+/** The longest worker id, and so the longest worker.list cursor. */
+const MAX_WORKER_ID = 4096;
 /** The longest key in a kv.mget. */
 export const MAX_MGET_KEY = 4096;
 /**
@@ -68,6 +76,7 @@ const TABLE_OPS: ReadonlySet<OpCode> = new Set([
   OpCode.KVExpire,
   OpCode.KVExists,
   OpCode.ActionStatus,
+  OpCode.WorkerList,
 ]);
 
 /** Whether `op`'s request carries a schema-coded body, not a value and options. */
@@ -524,7 +533,8 @@ const RUN_STATUSES = ["pending", "running", "completed", "failed", "cancelled", 
 
 /**
  * action.status's answer: [status:u8][created_at_ms:i64][started_at_ms?][completed_at_ms?]
- * [attempt:u32][output?: u16 length][error_message?: u16 length], each ? a present byte first.
+ * [attempt:u32][output?: u16 length][error_message?: u16 length][worker_id?: u16 length],
+ * each ? a present byte first.
  */
 export function decodeActionStatusAnswer(runId: string, data: Uint8Array): import("./types.js").ActionRunStatus {
   const r = new AnswerReader(data);
@@ -537,6 +547,57 @@ export function decodeActionStatusAnswer(runId: string, data: Uint8Array): impor
   const attempt = r.u32();
   const output = r.present() ? r.bytes16() : undefined;
   const errorMessage = r.present() ? new TextDecoder().decode(r.bytes16()) : undefined;
+  const workerId = r.present() ? new TextDecoder().decode(r.bytes16()) : undefined;
   r.end();
-  return { runId, status, createdAtMs, startedAtMs, completedAtMs, attempt, output, errorMessage };
+  return { runId, status, createdAtMs, startedAtMs, completedAtMs, attempt, output, errorMessage, workerId };
+}
+
+/** worker.list's request: limit (1 to 1024), cursor (empty for the first page). */
+export function encodeWorkerListBody(limit: number, cursor: Uint8Array | null | undefined): Uint8Array {
+  checkLimit("limit", limit, MAX_WORKER_LIST_LIMIT);
+  const c = cursor ?? new Uint8Array(0);
+  if (c.length > MAX_WORKER_ID) throw new FloError(`flo: worker list cursor is ${c.length} bytes, at most ${MAX_WORKER_ID}`);
+  const w = new BodyWriter();
+  w.u8(1);
+  w.u32(limit);
+  w.bytes16(c);
+  return w.build();
+}
+
+const WORKER_TYPES = 2; // action, stream
+const WORKER_STATUSES = 4; // active, idle, draining, unhealthy
+
+/** worker.list's answer: the page's workers in id order, then the next page's cursor (null on the last page). */
+export function decodeWorkerListAnswer(data: Uint8Array): WorkerListResult {
+  const r = new AnswerReader(data);
+  const workers: WorkerInfo[] = [];
+  for (let n = r.u16(); n > 0; n--) {
+    const id = r.string16();
+    const type = r.u8();
+    if (type >= WORKER_TYPES) throw new IncompleteResponseError(`worker type ${type} is not one this client knows`);
+    const status = r.u8();
+    if (status >= WORKER_STATUSES) throw new IncompleteResponseError(`worker status ${status} is not one this client knows`);
+    const currentLoad = r.u32();
+    const maxConcurrency = r.u32();
+    const tasksCompleted = r.u64();
+    const tasksFailed = r.u64();
+    const registeredAtMs = r.i64();
+    const lastHeartbeatMs = r.i64();
+    const machineId = r.present() ? new TextDecoder().decode(r.bytes8()) : undefined;
+    workers.push({
+      id,
+      type: type as WorkerType,
+      status: status as WorkerStatus,
+      currentLoad,
+      maxConcurrency,
+      tasksCompleted,
+      tasksFailed,
+      registeredAtMs,
+      lastHeartbeatMs,
+      machineId,
+    });
+  }
+  const cursor = r.present() ? r.bytes16() : null;
+  r.end();
+  return { workers, cursor };
 }

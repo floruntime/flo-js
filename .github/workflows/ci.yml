@@ -68,25 +68,33 @@ jobs:
         with:
           name: flo
           path: ${{ runner.temp }}/flo-bin
+      # Two servers: the second removes a worker 1 s after its last
+      # heartbeat, for the test of a removed worker registering again.
       - name: Start the pinned flo
         run: |
           cd "$RUNNER_TEMP"
           chmod +x flo-bin/flo
           echo "FLO_BINARY=$RUNNER_TEMP/flo-bin/flo" >> "$GITHUB_ENV"
-          mkdir -p flo-data
+          mkdir -p flo-data flo-expiry-data
+          printf '[workers]\nheartbeat_timeout_ms = 1000\nremove_after_ms = 1000\n' > flo-expiry.toml
           ./flo-bin/flo server start --port 4453 --data-dir "$RUNNER_TEMP/flo-data" > flo-server.log 2>&1 &
-          for _ in $(seq 1 50); do
-            if (exec 3<>/dev/tcp/127.0.0.1/4453) 2>/dev/null; then exit 0; fi
-            sleep 0.2
+          ./flo-bin/flo server start --port 4463 --data-dir "$RUNNER_TEMP/flo-expiry-data" --config "$RUNNER_TEMP/flo-expiry.toml" > flo-expiry-server.log 2>&1 &
+          for port in 4453 4463; do
+            up=0
+            for _ in $(seq 1 50); do
+              if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then up=1; break; fi
+              sleep 0.2
+            done
+            [ $up = 1 ] || { echo "flo server on $port did not start"; cat flo-server.log flo-expiry-server.log; exit 1; }
           done
-          echo "flo server did not start"; cat flo-server.log; exit 1
 
       # CI=1 turns a missing server into a failure, not a skip.
       - run: pnpm exec vitest run
         env:
           CI: "1"
           FLO_ENDPOINT: localhost:4453
+          FLO_EXPIRY_ENDPOINT: localhost:4463
 
-      - name: Server log
+      - name: Server logs
         if: failure()
-        run: cat "$RUNNER_TEMP/flo-server.log"
+        run: cat "$RUNNER_TEMP/flo-server.log" "$RUNNER_TEMP/flo-expiry-server.log"

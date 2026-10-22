@@ -3,7 +3,7 @@
  */
 
 import { createServerError, IncompleteResponseError } from "./errors.js";
-import { decodeActionStatusAnswer } from "./kv_body.js";
+import { decodeActionStatusAnswer, decodeWorkerListAnswer, encodeWorkerListBody, MAX_WORKER_LIST_LIMIT } from "./kv_body.js";
 import {
   type ActionDeleteOptions,
   type ActionInvokeOptions,
@@ -482,30 +482,17 @@ export class WorkerOperations {
   }
 
   /**
-   * List registered workers.
-   *
-   * @param opts - List options
-   * @returns WorkerListResult with list of workers
+   * List a page of the namespace's workers, in id order. Pass the answer's
+   * cursor to the next call for the page after; it is null on the last page.
    */
   async list(opts?: WorkerListOptions): Promise<WorkerListResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const value = serializeListValue(opts?.limit ?? 100);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.WorkerList,
-      namespace,
-      new Uint8Array(0),
-      value,
-      new Uint8Array(0)
-    );
-
+    const body = encodeWorkerListBody(opts?.limit ?? MAX_WORKER_LIST_LIMIT, opts?.cursor);
+    const resp = await this.sender.sendRequest(OpCode.WorkerList, namespace, new Uint8Array(0), body, new Uint8Array(0));
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
-
-    // Parse list response - format TBD based on server implementation
-    return { workers: [] };
+    return decodeWorkerListAnswer(resp.data);
   }
 }
 

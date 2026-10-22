@@ -123,7 +123,7 @@ const cases: [string, Case][] = [
     handled: OpCode.ActionComplete,
     work: oneTask(),
     start: (endpoint, logger) => {
-      const w = new ActionWorker({ endpoint, blockMs: 30000, heartbeatIntervalMs: 0, logger });
+      const w = new ActionWorker({ endpoint, blockMs: 30000, logger });
       w.action("a", async () => new Uint8Array(0));
       return { stop: () => w.stop(), done: w.start() };
     },
@@ -134,7 +134,7 @@ const cases: [string, Case][] = [
     handled: OpCode.StreamGroupAck,
     work: oneRecord(),
     start: (endpoint, logger) => {
-      const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000, heartbeatIntervalMs: 0, logger }, async () => {});
+      const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000, logger }, async () => {});
       return { stop: () => w.stop(), done: w.start() };
     },
   }],
@@ -228,7 +228,7 @@ describe("a StreamWorker given a client", () => {
     const { logger } = recordingLogger();
     const client = new FloClient(srv.endpoint, { timeoutMs: 200, retry: noRetry });
     await client.connect();
-    const w = new StreamWorker(client, { stream: "s", blockMs: 100, heartbeatIntervalMs: 0, logger }, async () => {});
+    const w = new StreamWorker(client, { stream: "s", blockMs: 100, logger }, async () => {});
     const done = w.start();
     await until(() => srv.seen.some((s) => s.op === OpCode.StreamGroupAck), 3000);
     w.stop();
@@ -242,7 +242,7 @@ describe("a StreamWorker given a client", () => {
     const { logger, warnings } = recordingLogger();
     const client = new FloClient(srv.endpoint, { retry: noRetry });
     await client.connect();
-    const w = new StreamWorker(client, { stream: "s", blockMs: 30000, heartbeatIntervalMs: 0, logger }, async () => {});
+    const w = new StreamWorker(client, { stream: "s", blockMs: 30000, logger }, async () => {});
     const done = w.start();
     await until(() => srv.seen.some((s) => s.op === OpCode.StreamGroupRead), 3000);
     await client.close();
@@ -342,7 +342,7 @@ describe("StreamWorkers sharing a client", () => {
     await client.connect();
     const { logger } = recordingLogger();
     const workers = ["a", "b"].map(
-      (stream) => new StreamWorker(client, { stream, blockMs: 30000, heartbeatIntervalMs: 0, logger }, async () => {}),
+      (stream) => new StreamWorker(client, { stream, blockMs: 30000, logger }, async () => {}),
     );
     const done = workers.map((w) => w.start());
     await until(() => srv.seen.filter((s) => s.conn >= 1 && s.op === OpCode.StreamGroupRead).length >= 2, 3000);
@@ -361,7 +361,7 @@ describe("a StreamWorker whose client is closed and connected again", () => {
     const client = new FloClient(srv.endpoint, { retry: { maxAttempts: 1 } });
     await client.connect();
     const { logger } = recordingLogger();
-    const w = new StreamWorker(client, { stream: "s", blockMs: 30000, heartbeatIntervalMs: 0, logger }, async () => {});
+    const w = new StreamWorker(client, { stream: "s", blockMs: 30000, logger }, async () => {});
     const done = w.start();
     await until(() => srv.seen.some((s) => s.op === OpCode.StreamGroupRead), 3000);
     await client.close();

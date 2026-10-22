@@ -1,5 +1,8 @@
 import { Backoff } from "@floruntime/core";
 
+/** The longest delay Node's timers keep; past it they fire after 1 ms. */
+export const MAX_TIMER_MS = 2_147_483_647;
+
 /**
  * Pacing for a worker's long-poll loop.
  *

@@ -11,10 +11,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `StreamAppendOptions.headers`: headers stored with the record.
 - `ActionWorker` `autoTouch` option (off by default): touches each run every third of its action's timeout (at least every 100 ms) while the handler runs, asking for the worker's own timeout. It stops when a touch is refused as conflict, not found or bad request, and carries on after any other refusal.
+- `Reason.WorkerUnhealthy` (27) and `Reason.WorkerDraining` (28): an action await from a worker that missed its heartbeats, or that the server drained, is refused bad request with one of them. Match on the reason, not the message.
+- `ActionRunStatus.workerId`: the worker that holds the run, or last held it; absent until a worker takes it.
+- `ActionWorker` and `StreamWorker` register again, with the same options, when a heartbeat answers not found (the server removed the worker after it went silent), and a draining one sends its drain again. They used to keep taking work unregistered. An `ActionWorker` await refused `worker_unhealthy` sends a heartbeat at once, then polls again with the failure backoff; one refused `worker_draining` stops taking work as a Draining heartbeat does, letting running handlers finish.
 - `Reason.StaleReport` (26): an action complete or fail for a run that has moved on (another worker holds it, or it finished) is refused with it; resending it is refused the same way. The table hash moves with the server.
 
 ### Changed
 
+- **Breaking:** `worker.list` is a table op: `list({ limit, cursor })` returns a page of workers in id order and the next page's `cursor` (null on the last page); `limit` is 1 to 1024, default 1024. It used to send a raw limit and return no workers at all. `WorkerInfo` is the server's row: `tasksCompleted`/`tasksFailed` are bigints, `lastHeartbeat` is `lastHeartbeatMs`, and `metadata` is gone.
+- **Breaking:** `heartbeatIntervalMs: 0` no longer turns heartbeats off: a worker that never heartbeats is refused work after the server's heartbeat timeout. A value of 0 or less throws at construction.
+- The table hash moves to `0x2fba7dd9ae941830` with the server.
 - **Breaking:** `action.status` returns a new `ActionRunStatus` shape: `status` (pending, running, completed, failed, cancelled, timed_out), `createdAtMs`, `startedAtMs`, `completedAtMs`, `attempt`, and the run's `output` and `errorMessage`, decoded from the op table's answer. It used to return the server's raw answer, which no caller could read. The table hash moves with the server.
 
 ### Fixed

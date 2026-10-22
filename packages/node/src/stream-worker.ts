@@ -31,6 +31,8 @@
 import {
   Logger,
   ProcessKind,
+  ServerError,
+  StatusCode,
   WorkerStatus,
   WorkerType,
   consoleLogger,
@@ -43,7 +45,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { EmptyPollBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
 import {
   RESULT_GRACE_MS,
   closedSince,
@@ -92,7 +94,10 @@ export interface StreamWorkerConfig {
   /** Maximum duration for a message handler in milliseconds (default: 300000 = 5 minutes) */
   messageTimeoutMs?: number;
 
-  /** Heartbeat interval in milliseconds (default: 30000). Set to 0 to disable. */
+  /**
+   * Heartbeat interval in milliseconds (default: 30000); must be more than
+   * 0. Keep it under the server's heartbeat timeout.
+   */
   heartbeatIntervalMs?: number;
 
   /**
@@ -215,7 +220,10 @@ export class StreamWorker {
   private resultGrace = graceAfter(this.stopSignal.signal, RESULT_GRACE_MS);
   /** client.closes() at start(): once it moves, the owner closed the client. */
   private clientCloses = 0;
+  /** Handlers running: the load heartbeats report. */
   private activeCount = 0;
+  /** Set by drain(), so a worker registered again is drained again. */
+  private draining = false;
   private readonly pendingTasks: Set<Promise<void>> = new Set();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -241,6 +249,12 @@ export class StreamWorker {
     const workerId =
       config.workerId ?? `${os.hostname() || "unknown"}-${crypto.randomBytes(4).toString("hex")}`;
 
+    const heartbeatIntervalMs = config.heartbeatIntervalMs ?? 30000;
+    // Node runs a longer setInterval every 1 ms.
+    if (!(heartbeatIntervalMs > 0 && heartbeatIntervalMs <= MAX_TIMER_MS)) {
+      throw new RangeError(`heartbeatIntervalMs must be more than 0 and at most ${MAX_TIMER_MS}, not ${heartbeatIntervalMs}`);
+    }
+
     this.config = {
       stream: config.stream,
       group: config.group ?? "default",
@@ -251,7 +265,7 @@ export class StreamWorker {
       batchSize: config.batchSize ?? 10,
       blockMs: workerBlockMs(config.blockMs),
       messageTimeoutMs: config.messageTimeoutMs ?? 300000,
-      heartbeatIntervalMs: config.heartbeatIntervalMs ?? 30000,
+      heartbeatIntervalMs,
       retry: config.retry ?? {},
     };
 
@@ -298,6 +312,7 @@ export class StreamWorker {
 
     // Set before the join so stop() can end a join's retry wait.
     this.stopRequested = false;
+    this.draining = false;
     this.stopSignal = new AbortController();
     this.resultGrace = graceAfter(this.stopSignal.signal, RESULT_GRACE_MS);
 
@@ -373,7 +388,12 @@ export class StreamWorker {
       }
     }
     this.log("Joined consumer group");
+    await this.registerWorker();
+    return true;
+  }
 
+  /** Register this worker, with the same options each time. */
+  private async registerWorker(): Promise<void> {
     const processName = `${this.config.stream}/${this.config.group}`;
     const processes: ProcessEntry[] = [
       { name: processName, kind: ProcessKind.StreamConsumer },
@@ -391,7 +411,6 @@ export class StreamWorker {
       machineId: this.config.machineId || undefined,
     });
     this.log("Registered in worker registry");
-    return true;
   }
 
   /** Reconnect after a dropped connection, then join again. */
@@ -539,24 +558,43 @@ export class StreamWorker {
    */
   async drain(): Promise<void> {
     if (!this.client) return;
+    this.draining = true;
     await this.client.worker.drain(this.config.workerId);
     this.log("Stream worker drain requested");
   }
 
-  private startHeartbeat(): void {
-    if (this.config.heartbeatIntervalMs <= 0) return;
+  /**
+   * Send a heartbeat; stop on a Draining answer. A worker silent past the
+   * server's removal time is removed, and its heartbeat answers not found:
+   * it registers again, and a draining one is drained again, since
+   * registering marks it active.
+   */
+  private async heartbeat(): Promise<void> {
+    const client = this.client!;
+    let status: WorkerStatus;
+    try {
+      status = await client.worker.heartbeat(this.config.workerId, this.activeCount);
+    } catch (err) {
+      if (!(err instanceof ServerError && err.status === StatusCode.NotFound)) throw err;
+      // A heartbeat out when stop() ran answers after the worker deregistered:
+      // registering then would leave one the server keeps till it expires.
+      if (!this.running) return;
+      this.logger.warn("The server removed this worker; registering again");
+      await this.registerWorker();
+      if (this.draining) await client.worker.drain(this.config.workerId);
+      return;
+    }
+    if (status === WorkerStatus.Draining) {
+      this.log("Worker is draining, stopping...");
+      this.stop();
+    }
+  }
 
+  private startHeartbeat(): void {
     this.heartbeatTimer = setInterval(async () => {
       if (!this.client || !this.running) return;
       try {
-        const status = await this.client.worker.heartbeat(
-          this.config.workerId,
-          this.activeCount
-        );
-        if (status === WorkerStatus.Draining) {
-          this.log("Worker is draining, stopping...");
-          this.stop();
-        }
+        await this.heartbeat();
       } catch {
         // Heartbeat failures are non-fatal
       }

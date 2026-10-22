@@ -237,7 +237,7 @@ function actionWorker(
   handler: () => Promise<Uint8Array> = async () => new Uint8Array([1, 2, 3]),
   actionTimeoutMs?: number,
 ) {
-  const w = new ActionWorker({ endpoint, blockMs: 30000, heartbeatIntervalMs: 0, logger, actionTimeoutMs });
+  const w = new ActionWorker({ endpoint, blockMs: 30000, logger, actionTimeoutMs });
   w.action("a", handler);
   const done = w.start();
   cleanups.push(async () => {
@@ -248,7 +248,7 @@ function actionWorker(
 }
 
 function streamWorker(endpoint: string, logger: Logger) {
-  const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000, heartbeatIntervalMs: 0, logger }, async () => {});
+  const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000, logger }, async () => {});
   const done = w.start();
   cleanups.push(async () => {
     w.stop();
@@ -448,7 +448,7 @@ describe("StreamWorkers sharing a client", () => {
     cleanups.push(() => client.close());
     const { logger } = recordingLogger();
     const workers = ["a", "b"].map(
-      (stream) => new StreamWorker(client, { stream, blockMs: 30000, heartbeatIntervalMs: 0, logger }, async () => {}),
+      (stream) => new StreamWorker(client, { stream, blockMs: 30000, logger }, async () => {}),
     );
     const done = workers.map((w) => w.start());
     cleanups.push(async () => {
@@ -469,7 +469,6 @@ describe("ActionWorker registration and auto-touch", () => {
     const w = new ActionWorker({
       endpoint,
       blockMs: 30000,
-      heartbeatIntervalMs: 0,
       logger: recordingLogger().logger,
       autoTouch,
       retry: { maxAttempts: 1 },

@@ -224,7 +224,7 @@ Workers execute tasks for registered actions.
 | `touch` | `touch(workerId, taskId, opts?) → Promise<void>` | Extend task lease |
 | `complete` | `complete(workerId, taskId, result, opts?) → Promise<void>` | Complete task |
 | `fail` | `fail(workerId, taskId, error, opts?) → Promise<void>` | Fail task |
-| `list` | `list(opts?) → Promise<WorkerListResult>` | List workers |
+| `list` | `list({ limit?, cursor? }?) → Promise<WorkerListResult>` | A page of workers in id order; pass `cursor` on for the next, null on the last |
 
 #### Worker Example
 

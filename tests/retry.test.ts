@@ -243,7 +243,7 @@ describe("StreamWorker group join", () => {
       op === OpCode.StreamGroupJoin && n < 3 ? refusal(id, StatusCode.Overloaded, Ran.No) : frame(id, StatusCode.OK)
     );
     const c = await connect(srv.endpoint, noRetry);
-    const w = new StreamWorker(c, { stream: "s", blockMs: 30000, heartbeatIntervalMs: 0 }, async () => {});
+    const w = new StreamWorker(c, { stream: "s", blockMs: 30000 }, async () => {});
     const done = w.start();
     for (let i = 0; i < 100 && srv.of(OpCode.StreamGroupRead).length === 0; i++) await sleep(20);
     w.stop();
@@ -257,7 +257,7 @@ describe("StreamWorker group join", () => {
       op === OpCode.StreamGroupJoin ? refusal(id, StatusCode.Overloaded, Ran.Unknown) : frame(id, StatusCode.OK)
     );
     const c = await connect(srv.endpoint, noRetry);
-    const w = new StreamWorker(c, { stream: "s", heartbeatIntervalMs: 0 }, async () => {});
+    const w = new StreamWorker(c, { stream: "s" }, async () => {});
     await expect(w.start()).rejects.toBeInstanceOf(OverloadedError);
     expect(srv.of(OpCode.StreamGroupJoin).length).toBe(1);
   });
@@ -267,7 +267,7 @@ describe("StreamWorker group join", () => {
       op === OpCode.StreamGroupJoin ? refusal(id, StatusCode.Unavailable, Ran.No) : frame(id, StatusCode.OK)
     );
     const c = await connect(srv.endpoint, noRetry);
-    const w = new StreamWorker(c, { stream: "s", heartbeatIntervalMs: 0 }, async () => {});
+    const w = new StreamWorker(c, { stream: "s" }, async () => {});
     const done = w.start();
     await sleep(1000);
     const stopped = Date.now();
@@ -281,7 +281,7 @@ describe("StreamWorker group join", () => {
 describe("ActionWorker", () => {
   it("gives its connection the retry policy it is configured with", async () => {
     const srv = await serve((_op, _n, id) => frame(id, StatusCode.OK));
-    const w = new ActionWorker({ endpoint: srv.endpoint, heartbeatIntervalMs: 0, retry: { maxAttempts: 7, maxBackoffMs: 9 } });
+    const w = new ActionWorker({ endpoint: srv.endpoint, retry: { maxAttempts: 7, maxBackoffMs: 9 } });
     w.action("a", async () => new Uint8Array(0));
     const done = w.start();
     await sleep(100);
@@ -303,12 +303,12 @@ describe("StreamWorker given an endpoint", () => {
 // Each poll fails with a refusal the client doesn't retry.
 const failingWorkers: [string, number, (endpoint: string) => { stop: () => void; done: Promise<void> }][] = [
   ["ActionWorker", OpCode.ActionAwait, (endpoint) => {
-    const w = new ActionWorker({ endpoint, blockMs: 30000, heartbeatIntervalMs: 0 });
+    const w = new ActionWorker({ endpoint, blockMs: 30000 });
     w.action("a", async () => new Uint8Array(0));
     return { stop: () => w.stop(), done: w.start() };
   }],
   ["StreamWorker", OpCode.StreamGroupRead, (endpoint) => {
-    const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000, heartbeatIntervalMs: 0 }, async () => {});
+    const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000 }, async () => {});
     return { stop: () => w.stop(), done: w.start() };
   }],
 ];
