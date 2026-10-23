@@ -1,6 +1,6 @@
 {
   "name": "@floruntime/node",
-  "version": "0.1.0-dev.8",
+  "version": "0.1.0-dev.9",
   "description": "Flo SDK for Node.js - TCP transport for streams, KV, queues, and workers",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -37,12 +37,12 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/floruntime/flo",
-    "directory": "sdks/js/packages/node"
+    "url": "git+https://github.com/floruntime/flo-js.git",
+    "directory": "packages/node"
   },
-  "homepage": "https://github.com/floruntime/flo/tree/main/sdks/js#readme",
+  "homepage": "https://github.com/floruntime/flo-js#readme",
   "bugs": {
-    "url": "https://github.com/floruntime/flo/issues"
+    "url": "https://github.com/floruntime/flo-js/issues"
   },
   "engines": {
     "node": ">=18.0.0"
