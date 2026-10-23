@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `processing.status` dropped a failed job's reason: it stopped reading after `created_at`. It now returns it as `failure_reason` (null when the server sends none), and refuses an answer whose reason runs past the end, has bytes left after it, or carries an unknown job status (which used to come back as `unknown(N)`).
 - `drain()` only sent the notice: the worker kept polling until a heartbeat came back Draining, heartbeats stopped while running handlers finished, a lost notice was never sent again, and a drain started on the server called `stop()`, which cut short the resends of results still to come. A drain, local or from the server, now stops issuing polls (an outstanding one still returns within `blockMs`), keeps heartbeating until the last handler has reported, sends the notice again after any re-registration or loss, and then `start()` returns. A drain also ends a reconnect. `drain()` no longer rejects when the notice fails (it logs and tries again), and it works before `start()`, ending that run.
 - A `stop()` or `drain()` during `start()`'s startup was lost: the flags were cleared after connecting. They are now cleared when a run ends, so one before or during startup ends that run.
 - A `StreamWorker` couldn't be started again after stopping: it dropped its client. It now keeps it, connecting an owned one again.

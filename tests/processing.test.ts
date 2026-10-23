@@ -1,7 +1,7 @@
 /** Processing status and list answers decode per the server's layouts. */
 
 import { describe, it, expect } from "vitest";
-import { ProcessingOperations, StatusCode } from "@floruntime/core";
+import { IncompleteResponseError, ProcessingOperations, StatusCode } from "@floruntime/core";
 
 const enc = new TextEncoder();
 
@@ -28,16 +28,42 @@ function replying(data: Uint8Array): never {
 }
 
 describe("processing answers", () => {
-  it("decodes status", async () => {
-    const data = bytes(str("job-1"), str("pipe"), [1], le(50, 4), le(1234, 8), le(99, 8));
-    expect(await new ProcessingOperations(replying(data)).status("job-1")).toEqual({
+  const head = (status: number) =>
+    bytes(str("job-1"), str("pipe"), [status], le(50, 4), le(1234, 8), le(99, 8));
+  const status = (data: Uint8Array) => new ProcessingOperations(replying(data)).status("job-1");
+
+  it("decodes a running job's status with no failure reason", async () => {
+    expect(await status(bytes(head(0), le(0, 2)))).toEqual({
       job_id: "job-1",
       name: "pipe",
-      status: "stopped",
+      status: "running",
       batch_size: 50,
       records_processed: 1234,
       created_at: 99,
+      failure_reason: null,
     });
+  });
+
+  it("decodes a failed job's failure reason", async () => {
+    const got = await status(bytes(head(3), str("sink refused")));
+    expect(got.status).toBe("failed");
+    expect(got.failure_reason).toBe("sink refused");
+  });
+
+  it("decodes completed", async () => {
+    expect((await status(bytes(head(4), le(0, 2)))).status).toBe("completed");
+  });
+
+  it("refuses a status answer whose reason runs past the end", async () => {
+    await expect(status(bytes(head(3), le(20, 2), enc.encode("short")))).rejects.toThrow(IncompleteResponseError);
+  });
+
+  it("refuses a status answer with bytes after the reason", async () => {
+    await expect(status(bytes(head(3), str("x"), [0]))).rejects.toThrow(IncompleteResponseError);
+  });
+
+  it("refuses an unknown job status", async () => {
+    await expect(status(bytes(head(5), le(0, 2)))).rejects.toThrow(IncompleteResponseError);
   });
 
   it("decodes list", async () => {

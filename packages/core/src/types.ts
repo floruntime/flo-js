@@ -1438,6 +1438,8 @@ export interface ProcessingStatusResult {
   batch_size: number;
   records_processed: number;
   created_at: number;
+  /** Why the job failed; null unless `status` is `"failed"`. */
+  failure_reason: string | null;
 }
 
 /**

@@ -140,7 +140,7 @@ class BodyWriter {
 }
 
 /** Reads an answer field by field; `end` refuses bytes left over. */
-class AnswerReader {
+export class AnswerReader {
   private off = 0;
   private readonly view: DataView;
   constructor(private readonly data: Uint8Array) {
