@@ -400,10 +400,21 @@ given a client uses that client's. A worker reconnects its client when the conne
 
 A worker sends its handler's result (complete or fail, ack or nack) again, the
 same request, after reconnecting if the connection drops, the send times out or
-the answer is garbled, up to 3 sends in all; a refusal is not resent. After
-`stop()` it keeps trying for up to 2 s, then drops the result. Delivery is
-at-least-once: a handler may see the same task or record again, so make it
-safe to repeat.
+the answer is garbled, up to 3 sends in all; a refusal is not resent. Once it
+is stopping or draining, each result gets up to 2 s of reconnects, then is
+dropped. Delivery is at-least-once: a handler may see the same task or record
+again, so make it safe to repeat.
+
+`drain()` stops issuing polls and lets the running handlers finish,
+heartbeats going on; an outstanding poll still returns within `blockMs`. The
+server is told (again after the worker registers anew, and on a retry if the
+notice is lost), so it assigns an action worker nothing more, and `start()`
+returns once the last handler has reported. A drain started on the server
+does the same. `stop()` ends polling, also mid-reconnect or mid-drain, once
+an outstanding poll returns;
+running handlers still finish, and a `StreamWorker` hands back the records of
+its last batch it hasn't started. Either one before or during `start()` ends
+that run, and both workers can be started again afterwards.
 
 ```typescript
 // Up to 8 tries, waiting at most 2 s between them

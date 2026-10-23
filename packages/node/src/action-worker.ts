@@ -47,11 +47,12 @@ import {
 import { FloClient } from "./client.js";
 import { EmptyPollBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
 import {
-  RESULT_GRACE_MS,
+  DRAIN_NOTICE_INTERVAL_MS,
   closedSince,
-  graceAfter,
   isConnectionError,
+  nextTaskOrTick,
   reconnect,
+  sendDrainNotice,
   sendResult,
 } from "./reconnect.js";
 import crypto from "crypto";
@@ -349,16 +350,20 @@ export class ActionWorker {
   private readonly handlers: Map<string, ActionHandler> = new Map();
   private readonly actionOptions: Map<string, ActionRegisterOptions> = new Map();
   private running = false;
+  // A run's stop and drain are cleared when it ends, not when it begins, so
+  // one that lands before or during startup still ends that run.
   private stopRequested = false;
   private stopSignal = new AbortController();
-  /** Aborts RESULT_GRACE_MS after stopSignal: until then lost results are resent. */
-  private resultGrace = graceAfter(this.stopSignal.signal, RESULT_GRACE_MS);
+  /** Aborted by stop() or a drain: the poll loop leaves, and its pauses and reconnects end. */
+  private leave = new AbortController();
   /** client.closes() at start(): once it moves, the owner closed the client. */
   private clientCloses = 0;
   /** Handlers running: the load heartbeats report. */
   private activeTaskCount = 0;
-  /** Set by drain(), so a worker registered again is drained again. */
+  /** Set by drain(), a Draining heartbeat or a worker_draining refusal. */
   private draining = false;
+  /** The server is to be told of the drain: at its start, and after any re-registration. */
+  private noticeDue = false;
   private readonly pendingTasks: Set<Promise<void>> = new Set();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -440,9 +445,10 @@ export class ActionWorker {
   }
 
   /**
-   * Start the worker and begin processing actions.
-   *
-   * This method blocks until `stop()` is called or an error occurs.
+   * Start the worker and process actions until `stop()`, or a drain once
+   * its running handlers finish. Either one before or during startup ends
+   * this run. Running handlers finish and send their results before it
+   * returns, and it may be called again afterwards.
    *
    * @throws Error if no handlers are registered
    * @throws Error if connection to server fails
@@ -457,44 +463,38 @@ export class ActionWorker {
         `namespace=${this.config.namespace}, concurrency=${this.config.concurrency})`
     );
 
-    // Connect to server
-    this.client = new FloClient(this.config.endpoint, {
-      namespace: this.config.namespace,
-      logger: this.logger,
-      retry: this.config.retry,
-    });
-    await this.client.connect();
-    this.clientCloses = this.client.closes();
-
-    const actionNames = Array.from(this.handlers.keys());
+    this.running = true;
+    let registered = false;
     try {
-      await this.register(actionNames);
+      this.client = new FloClient(this.config.endpoint, {
+        namespace: this.config.namespace,
+        logger: this.logger,
+        retry: this.config.retry,
+      });
+      await this.client.connect();
+      this.clientCloses = this.client.closes();
 
-      // Initialize state
-      this.running = true;
-      this.stopRequested = false;
-      this.draining = false;
-      this.stopSignal = new AbortController();
-      this.resultGrace = graceAfter(this.stopSignal.signal, RESULT_GRACE_MS);
-
-      // Start heartbeat interval
-      this.startHeartbeat(actionNames);
-
-      // Main polling loop
-      await this.pollLoop(actionNames);
+      if (!this.stopRequested) {
+        const actionNames = Array.from(this.handlers.keys());
+        // Deregistered at the end even if this answer is lost: the
+        // registration may still have taken.
+        registered = true;
+        await this.register(actionNames);
+        this.startHeartbeat(actionNames);
+        await this.pollLoop(actionNames);
+        if (this.draining && !this.stopRequested) await this.finishDrain();
+      }
     } finally {
-      // Stop heartbeat
-      this.stopHeartbeat();
-
-      // Wait for running tasks
+      // Wait for running tasks; heartbeats go on meanwhile.
       if (this.pendingTasks.size > 0) {
         this.log(`Waiting for ${this.pendingTasks.size} tasks to complete...`);
         await Promise.allSettled(this.pendingTasks);
       }
-      this.resultGrace.dispose();
+      this.stopHeartbeat();
+      // Before deregistering: a heartbeat answering after it mustn't register again.
+      this.running = false;
 
-      // Deregister from worker registry
-      if (this.client) {
+      if (this.client && registered) {
         try {
           await this.client.worker.deregister(this.config.workerId);
         } catch {
@@ -504,9 +504,23 @@ export class ActionWorker {
 
       await this.client?.close();
       this.client = null;
-      this.running = false;
+      this.endRun();
       this.log("Worker stopped");
     }
+  }
+
+  /** Clear the run's stop and drain, for the next run. */
+  private endRun(): void {
+    this.stopRequested = false;
+    this.draining = false;
+    this.noticeDue = false;
+    this.stopSignal = new AbortController();
+    this.leave = new AbortController();
+  }
+
+  /** Whether a stop or drain has ended polling. */
+  private leaving(): boolean {
+    return this.stopRequested || this.draining;
   }
 
   /** Register the actions and this worker with the server. */
@@ -538,7 +552,7 @@ export class ActionWorker {
   private async recover(actionNames: string[], cause: unknown, connection: number): Promise<void> {
     this.logger.warn(`Connection lost: ${cause}; reconnecting...`);
     const seen = { connection, closes: this.clientCloses };
-    if (!(await reconnect(this.client!, this.stopSignal.signal, this.logger, seen))) {
+    if (!(await reconnect(this.client!, this.leave.signal, this.logger, seen))) {
       if (closedSince(this.client!, seen) && !this.stopRequested) {
         this.logger.warn("The client was closed by its owner; stopping the worker");
         this.stop();
@@ -557,7 +571,7 @@ export class ActionWorker {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
     let unproven = false;
-    while (this.running && !this.stopRequested) {
+    while (!this.leaving()) {
       // The connection this iteration's poll goes on, to redial only it.
       const connection = this.client!.connection();
       try {
@@ -568,8 +582,8 @@ export class ActionWorker {
           continue;
         }
 
-        // Check if we should stop
-        if (this.stopRequested) {
+        // A stop or drain while it waited
+        if (this.leaving()) {
           break;
         }
 
@@ -585,7 +599,7 @@ export class ActionWorker {
 
         const wait = backoff.next(result.task === null, performance.now() - started, this.config.blockMs);
         if (result.task === null) {
-          if (wait > 0) await pause(wait, this.stopSignal.signal);
+          if (wait > 0) await pause(wait, this.leave.signal);
           continue;
         }
 
@@ -597,18 +611,18 @@ export class ActionWorker {
         });
         this.pendingTasks.add(taskPromise);
       } catch (err) {
-        if (this.stopRequested) break;
+        if (this.leaving()) break;
         if (isConnectionError(err)) {
           // A server that takes the connection and drops it again is not
           // redialed at once each time: until a poll succeeds after a
           // reconnect, each one waits first.
-          if (unproven) await pause(failed.next(), this.stopSignal.signal);
-          if (this.stopRequested) break;
+          if (unproven) await pause(failed.next(), this.leave.signal);
+          if (this.leaving()) break;
           await this.recover(actionNames, err, connection);
           unproven = true;
         } else if (err instanceof ServerError && err.reason === Reason.WorkerDraining) {
-          this.log("The server drained this worker, stopping...");
-          this.stop();
+          this.log("The server drained this worker; finishing its running work");
+          this.beginDrain();
         } else {
           if (err instanceof ServerError && err.reason === Reason.WorkerUnhealthy) {
             // Missed heartbeats: one now makes the worker healthy again.
@@ -620,7 +634,7 @@ export class ActionWorker {
           }
           const d = failed.next();
           this.log(`Await error: ${err}, retrying in ${d}ms...`);
-          await pause(d, this.stopSignal.signal);
+          await pause(d, this.leave.signal);
         }
       }
     }
@@ -681,7 +695,7 @@ export class ActionWorker {
 
     const sent = await sendResult(
       client,
-      this.resultGrace.signal,
+      this.leave.signal,
       this.logger,
       this.clientCloses,
       `${what} for task ${taskId}`,
@@ -736,16 +750,16 @@ export class ActionWorker {
   }
 
   /**
-   * Signal the worker to stop.
-   *
-   * This sets a flag that will cause the polling loop to exit
-   * after the current iteration completes.
+   * Signal the worker to stop: polling ends, also mid-reconnect or
+   * mid-drain, once an outstanding poll returns (within blockMs). Running
+   * handlers finish and send their results before `start()` returns. A stop
+   * before `start()` ends that run at once.
    */
   stop(): void {
     this.log("Stopping worker...");
-    this.running = false;
     this.stopRequested = true;
     this.stopSignal.abort();
+    this.leave.abort();
   }
 
   /**
@@ -759,21 +773,50 @@ export class ActionWorker {
   }
 
   /**
-   * Initiate graceful drain — no new tasks will be assigned.
-   * In-flight tasks will continue to completion.
+   * Stop issuing polls and let the running handlers finish; `start()` then
+   * returns. An outstanding poll still returns within `blockMs`. The server
+   * is told, so it assigns this worker nothing more, and heartbeats go on
+   * meanwhile; a notice that can't be sent now is tried again, and a failed
+   * one is logged, not thrown. A drain before `start()` ends that run once it
+   * has registered.
    */
   async drain(): Promise<void> {
-    if (!this.client) return;
+    this.log("Draining worker...");
+    this.beginDrain();
+    if (this.client && this.running) await this.sendNotice();
+  }
+
+  private beginDrain(): void {
+    if (!this.draining) this.noticeDue = true;
     this.draining = true;
-    await this.client.worker.drain(this.config.workerId);
-    this.log("Worker drain requested");
+    this.leave.abort();
   }
 
   /**
-   * Send a heartbeat; stop on a Draining answer. A worker silent past the
+   * Wait for the running handlers, keeping the server told of the drain: a
+   * notice that can't be sent is tried again every DRAIN_NOTICE_INTERVAL_MS
+   * while handlers run, its connection redialed; an idle worker tries once.
+   * A stop ends the wait; `start()` still waits for the handlers.
+   */
+  private async finishDrain(): Promise<void> {
+    for (;;) {
+      if (this.noticeDue) await this.sendNotice();
+      if (this.pendingTasks.size === 0 || this.stopRequested) return;
+      await nextTaskOrTick(this.pendingTasks, DRAIN_NOTICE_INTERVAL_MS, this.stopSignal.signal);
+    }
+  }
+
+  private async sendNotice(): Promise<void> {
+    if (await sendDrainNotice(this.client!, this.config.workerId, this.logger, this.clientCloses, this.stopSignal.signal)) {
+      this.noticeDue = false;
+    }
+  }
+
+  /**
+   * Send a heartbeat; drain on a Draining answer. A worker silent past the
    * server's removal time is removed, and its heartbeat answers not found:
    * it registers again, else it would keep taking work unregistered, and a
-   * draining one is drained again, since registering marks it active.
+   * draining one tells the server again, since registering marks it active.
    */
   private async heartbeat(actionNames: string[]): Promise<void> {
     const client = this.client!;
@@ -782,17 +825,21 @@ export class ActionWorker {
       status = await client.worker.heartbeat(this.config.workerId, this.activeTaskCount);
     } catch (err) {
       if (!(err instanceof ServerError && err.status === StatusCode.NotFound)) throw err;
-      // A heartbeat out when stop() ran answers after the worker deregistered:
-      // registering then would leave one the server keeps till it expires.
+      // A heartbeat out when the run ended answers after the worker
+      // deregistered: registering then would leave one the server keeps till
+      // it expires.
       if (!this.running) return;
       this.logger.warn("The server removed this worker; registering again");
       await this.registerWorker(actionNames);
-      if (this.draining) await client.worker.drain(this.config.workerId);
+      if (this.draining) {
+        this.noticeDue = true;
+        await this.sendNotice();
+      }
       return;
     }
-    if (status === WorkerStatus.Draining) {
-      this.log("Worker is draining, stopping...");
-      this.stop();
+    if (status === WorkerStatus.Draining && !this.draining) {
+      this.log("The server drained this worker; finishing its running work");
+      this.beginDrain();
     }
   }
 
@@ -801,8 +848,8 @@ export class ActionWorker {
       if (!this.client || !this.running) return;
       try {
         await this.heartbeat(actionNames);
-      } catch {
-        // Heartbeat failures are non-fatal
+      } catch (err) {
+        this.logger.warn(`Heartbeat failed: ${err}`);
       }
     }, this.config.heartbeatIntervalMs);
 
