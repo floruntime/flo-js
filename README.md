@@ -411,8 +411,10 @@ anew, and on a retry if the notice is lost), so it assigns an action worker
 nothing more, and `start()` returns once the last handler has reported. A
 drain started on the server does the same. An `ActionWorker`'s outstanding
 poll is answered at once when the server takes the drain, refused
-`worker_draining`. A `StreamWorker`'s is not: the server doesn't wake a
-group read, and the worker has one connection, which it keeps, so its
+`worker_draining`, so it learns of a server-side drain at once. A
+`StreamWorker`'s is not: the server doesn't wake a group read, so a drain
+started on the server reaches it at its next heartbeat (`heartbeatIntervalMs`,
+30 s by default); and the worker has one connection, which it keeps, so its
 outstanding read can wait up to `blockMs`. `stop()` ends polling, also
 mid-reconnect or mid-drain, once an outstanding poll returns (within
 `blockMs`);
