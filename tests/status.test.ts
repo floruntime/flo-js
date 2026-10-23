@@ -17,7 +17,7 @@ import {
   UnavailableError,
   VERSION,
   TABLE_HASH,
-  computeCRC32,
+  computeCRC32C,
   createServerError,
   isInternal,
   isUnavailable,
@@ -50,15 +50,14 @@ function response(id: bigint, data: Uint8Array = new Uint8Array(0), status = 0):
   view.setBigUint64(24, TABLE_HASH, true);
   buf[21] = status;
   buf.set(data, HEADER_SIZE);
-  view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
+  view.setUint32(16, computeCRC32C(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
   return buf;
 }
 
-/** A KV get reply body: [version:u64 LE][value]. */
-/** A kv.get answer: [version:u64][value_len:u32][value]. */
+/** A kv.get answer: [version:u64][value_len:u32][value], then no expiry (0). */
 function getBody(version: bigint, value: string): Uint8Array {
   const v = enc.encode(value);
-  const buf = new Uint8Array(12 + v.length);
+  const buf = new Uint8Array(12 + v.length + 1);
   const view = new DataView(buf.buffer);
   view.setBigUint64(0, version, true);
   view.setUint32(8, v.length, true);

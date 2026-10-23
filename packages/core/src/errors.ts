@@ -91,7 +91,7 @@ function hex16(n: bigint): string {
 }
 
 /**
- * Error thrown when CRC32 checksum validation fails.
+ * Error thrown when a frame fails its CRC32C checksum.
  */
 export class InvalidChecksumError extends FloError {
   constructor(expected: number, actual: number) {

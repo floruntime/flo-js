@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `GetResult.expiresAtMs`: when the key's TTL runs out, in ms since the epoch; null with no TTL. `VersionEntry.deleted`: whether a history version is a delete. `kv.jsonGet` returns a `JsonGetResult` (no expiry). An answer with a bad presence or bool byte, or cut short, throws `IncompleteResponseError`.
 - `StreamAppendOptions.headers`: headers stored with the record.
 - `ActionWorker` `autoTouch` option (off by default): touches each run every third of its action's timeout (at least every 100 ms) while the handler runs, asking for the worker's own timeout. It stops when a touch is refused as conflict, not found or bad request, and carries on after any other refusal.
 - `Reason.WorkerUnhealthy` (27) and `Reason.WorkerDraining` (28): an action await from a worker that missed its heartbeats, or that the server drained, is refused bad request with one of them. Match on the reason, not the message.
@@ -18,15 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** frames carry a CRC32C (Castagnoli) checksum, not IEEE CRC32, under protocol version 3; `computeCRC32` is renamed `computeCRC32C`. The table hash moves to `0x74e680eb8727c3fb` with the server.
 - **Breaking:** `worker.list` is a table op: `list({ limit, cursor })` returns a page of workers in id order and the next page's `cursor` (null on the last page); `limit` is 1 to 1024, default 1024. It used to send a raw limit and return no workers at all. `WorkerInfo` is the server's row: `tasksCompleted`/`tasksFailed` are bigints, `lastHeartbeat` is `lastHeartbeatMs`, and `metadata` is gone.
 - **Breaking:** `heartbeatIntervalMs: 0` no longer turns heartbeats off: a worker that never heartbeats is refused work after the server's heartbeat timeout. A value of 0 or less throws at construction.
-- The table hash moves to `0x2fba7dd9ae941830` with the server.
 - **Breaking:** `action.status` returns a new `ActionRunStatus` shape: `status` (pending, running, completed, failed, cancelled, timed_out), `createdAtMs`, `startedAtMs`, `completedAtMs`, `attempt`, and the run's `output` and `errorMessage`, decoded from the op table's answer. It used to return the server's raw answer, which no caller could read. The table hash moves with the server.
 
 ### Fixed
 
 - `processing.status` dropped a failed job's reason: it stopped reading after `created_at`. It now returns it as `failure_reason` (null when the server sends none), and refuses an answer whose reason runs past the end, has bytes left after it, or carries an unknown job status (which used to come back as `unknown(N)`).
-- `drain()` only sent the notice: the worker kept polling until a heartbeat came back Draining, heartbeats stopped while running handlers finished, a lost notice was never sent again, and a drain started on the server called `stop()`, which cut short the resends of results still to come. A drain, local or from the server, now stops issuing polls (an outstanding one still returns within `blockMs`), keeps heartbeating until the last handler has reported, sends the notice again after any re-registration or loss, and then `start()` returns. A drain also ends a reconnect. `drain()` no longer rejects when the notice fails (it logs and tries again), and it works before `start()`, ending that run.
+- `drain()` only sent the notice: the worker kept polling until a heartbeat came back Draining, heartbeats stopped while running handlers finished, a lost notice was never sent again, and a drain started on the server called `stop()`, which cut short the resends of results still to come. A drain, local or from the server, now stops issuing polls (the server answers an `ActionWorker`'s outstanding poll at once, refused `worker_draining`; a `StreamWorker`'s outstanding read, on its one connection, can still wait up to `blockMs`, since the server doesn't wake group reads), keeps heartbeating until the last handler has reported, sends the notice again after any re-registration or loss, and then `start()` returns. A drain also ends a reconnect. `drain()` no longer rejects when the notice fails (it logs and tries again), and it works before `start()`, ending that run.
 - A `stop()` or `drain()` during `start()`'s startup was lost: the flags were cleared after connecting. They are now cleared when a run ends, so one before or during startup ends that run.
 - A `StreamWorker` couldn't be started again after stopping: it dropped its client. It now keeps it, connecting an owned one again.
 - A `StreamWorker` stopped mid-batch left the records it hadn't started pending until the group's ack timeout; it now nacks them, so they are handed out again at once.

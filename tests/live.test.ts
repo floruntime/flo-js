@@ -66,6 +66,32 @@ describe.skipIf(!endpoint)("live", () => {
     ]);
   });
 
+  it("gets a key's expiry, absolute, and none without a TTL", async () => {
+    const { client } = await liveClient();
+    const ttl = 60000n;
+    const before = BigInt(Date.now());
+    await client.kv.put("t", encoder.encode("v"), { ttlMs: ttl });
+    const after = BigInt(Date.now());
+    const got = await client.kv.get("t");
+    expect(got!.expiresAtMs).not.toBeNull();
+    expect(got!.expiresAtMs! >= before + ttl && got!.expiresAtMs! <= after + ttl, `${got!.expiresAtMs} not in [${before + ttl}, ${after + ttl}]`).toBe(true);
+    await client.kv.put("p", encoder.encode("v"));
+    expect((await client.kv.get("p"))!.expiresAtMs).toBeNull();
+  });
+
+  it("shows a deleted version in a key's history", async () => {
+    const { client } = await liveClient();
+    await client.kv.put("h", encoder.encode("one"));
+    await client.kv.delete("h");
+    await client.kv.put("h", encoder.encode("three"));
+    const versions = await client.kv.history("h");
+    expect(versions.map((v) => ({ deleted: v.deleted, value: decoder.decode(v.value) }))).toEqual([
+      { deleted: false, value: "three" },
+      { deleted: true, value: "" },
+      { deleted: false, value: "one" },
+    ]);
+  });
+
   it("appends to a stream and reads it back in order", async () => {
     const { client } = await liveClient();
     for (const p of ["one", "two", "three"]) await client.stream.append("events", encoder.encode(p));

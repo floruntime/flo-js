@@ -35,6 +35,7 @@ import {
   type DeleteOptions,
   type GetOptions,
   type GetResult,
+  type JsonGetResult,
   type HistoryOptions,
   type KVExistsOptions,
   type KVExpireOptions,
@@ -228,10 +229,10 @@ export class KVOperations {
    * Extract the value at `path` (default "$", the whole document) from the
    * JSON document at `key`.
    *
-   * Returns a {@link GetResult} carrying the JSON-encoded bytes and the
+   * Returns a {@link JsonGetResult} carrying the JSON-encoded bytes and the
    * document's current version, or `null` if the key or path is missing.
    */
-  async jsonGet(key: string, path: string = "$", opts?: KVJsonOptions): Promise<GetResult | null> {
+  async jsonGet(key: string, path: string = "$", opts?: KVJsonOptions): Promise<JsonGetResult | null> {
     const namespace = this.sender.getNamespace(opts?.namespace);
     const resp = await this.sender.sendRequest(OpCode.KVJsonGet, namespace, textEncoder.encode(key), encodeJsonPathBody(path, opts), new Uint8Array(0));
     if (resp.status === StatusCode.NotFound) return absent(resp);

@@ -6,7 +6,7 @@ import type { RetryPolicy } from "./retry.js";
 
 // Protocol constants
 export const MAGIC = 0x004f4c46; // "FLO\0" in little-endian
-export const VERSION = 0x02;
+export const VERSION = 0x03;
 /**
  * The hash of the op table this SDK was built for, written into every
  * request header. A server built from another table refuses the request,
@@ -14,7 +14,7 @@ export const VERSION = 0x02;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0x2fba7dd9ae941830n;
+export const TABLE_HASH = 0x74e680eb8727c3fbn;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -386,6 +386,8 @@ export interface VersionEntry {
   version: bigint;
   /** When the version was written, in ms since the Unix epoch. */
   atMs: bigint;
+  /** Whether this version is a delete; its value is then empty. */
+  deleted: boolean;
   value: Uint8Array;
 }
 
@@ -424,6 +426,17 @@ export interface KVCommitResult {
  * `kv.get` returns `null` when the key is missing; check before dereferencing.
  */
 export interface GetResult {
+  value: Uint8Array;
+  version: bigint;
+  /** When the key's TTL runs out, in ms since the Unix epoch; null with no TTL. */
+  expiresAtMs: bigint | null;
+}
+
+/**
+ * Result of a KV jsonGet that found the key and path: the JSON at the path
+ * and the document's version.
+ */
+export interface JsonGetResult {
   value: Uint8Array;
   version: bigint;
 }

@@ -21,7 +21,7 @@ import {
   VERSION,
   TABLE_HASH,
   TableMismatchError,
-  computeCRC32,
+  computeCRC32C,
   parseResponseHeader,
   requestBlockMs,
   requestTakesItems,
@@ -58,7 +58,7 @@ function response(id: bigint, data: Uint8Array = new Uint8Array(0), status = 0):
   view.setBigUint64(24, TABLE_HASH, true);
   buf[21] = status;
   buf.set(data, HEADER_SIZE);
-  view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
+  view.setUint32(16, computeCRC32C(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
   return buf;
 }
 
@@ -333,7 +333,7 @@ describe("TcpTransport framing and failures", () => {
       const r = response(id, enc.encode("from elsewhere"));
       const view = new DataView(r.buffer, r.byteOffset, r.byteLength);
       view.setBigUint64(24, TABLE_HASH + 1n, true);
-      view.setUint32(16, computeCRC32(r.subarray(0, HEADER_SIZE), r.subarray(HEADER_SIZE)), true);
+      view.setUint32(16, computeCRC32C(r.subarray(0, HEADER_SIZE), r.subarray(HEADER_SIZE)), true);
       sock.write(r);
     });
     const err = await t.sendAndReceive(request(1n)).catch((e: unknown) => e);

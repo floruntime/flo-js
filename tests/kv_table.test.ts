@@ -65,9 +65,10 @@ function sender(answer: RawResponse) {
   };
 }
 
-const getAnswer = (version: bigint, value: string): RawResponse => {
+const getAnswer = (version: bigint, value: string, expiresAtMs?: bigint): RawResponse => {
   const v = enc.encode(value);
-  return { status: StatusCode.OK, data: new Uint8Array([...u64(version), v.length, 0, 0, 0, ...v]), requestId: 0n };
+  const expiry = expiresAtMs === undefined ? [0] : [1, ...u64(expiresAtMs)];
+  return { status: StatusCode.OK, data: new Uint8Array([...u64(version), v.length, 0, 0, 0, ...v, ...expiry]), requestId: 0n };
 };
 
 function refusal(status: StatusCode, reason: Reason): RawResponse {
@@ -78,9 +79,25 @@ describe("kv.get", () => {
   it("sends wait_ms, wait_for, routing_key and txn in order", async () => {
     const { s, sent } = sender(getAnswer(4n, "hi"));
     const got = await new KVOperations(s).get("k", { waitMs: 5000, waitFor: WaitFor.Change, routingKey: "rk" });
-    expect(got).toEqual({ version: 4n, value: enc.encode("hi") });
+    expect(got).toEqual({ version: 4n, value: enc.encode("hi"), expiresAtMs: null });
     expect(sent.value).toEqual(new Uint8Array([1, ...u64(5000n), 1, 1, 1, 2, 0, ...enc.encode("rk"), 0]));
     expect(sent.options).toEqual(new Uint8Array(0));
+  });
+
+  it("reads the key's expiry, absent with no TTL", async () => {
+    const at = 1_800_000_000_123n;
+    expect(await new KVOperations(sender(getAnswer(4n, "hi", at)).s).get("k")).toEqual({ version: 4n, value: enc.encode("hi"), expiresAtMs: at });
+    expect((await new KVOperations(sender(getAnswer(4n, "hi")).s).get("k"))!.expiresAtMs).toBeNull();
+    // Inside a transaction too.
+    expect((await new Transaction(sender(getAnswer(0n, "5", at)).s, "ns", "rk", 1n, 0n).get("k"))!.expiresAtMs).toBe(at);
+  });
+
+  it("refuses a bad presence byte and an answer cut inside the expiry", () => {
+    const head = [...u64(4n), 2, 0, 0, 0, ...enc.encode("hi")];
+    expect(() => decodeGetAnswer(new Uint8Array([...head, 2]))).toThrow(IncompleteResponseError);
+    expect(() => decodeGetAnswer(new Uint8Array([...head, 1, 1, 2, 3]))).toThrow(IncompleteResponseError);
+    expect(() => decodeGetAnswer(new Uint8Array([...head]))).toThrow(IncompleteResponseError);
+    expect(() => decodeGetAnswer(new Uint8Array([...head, 0, 0]))).toThrow(IncompleteResponseError);
   });
 
   it("is absent on reason not_found, and throws on any other not-found", async () => {
@@ -169,7 +186,7 @@ describe("request bodies match the server's vectors", () => {
   const cases: [string, OpCode, string, string, (kv: KVOperations) => Promise<unknown>, string, unknown][] = [
     ["delete", OpCode.KVDelete, "k", "010700000000000000010200726b00", (kv) => kv.delete("k", { casVersion: 7n, routingKey: "rk" }), "0101", true],
     ["scan", OpCode.KVScan, "p", "0102000000026331", (kv) => kv.scan("p", { limit: 2, cursor: enc.encode("c1") }), "02000100610200626201026332", { keys: ["a", "bb"], cursor: enc.encode("c2") }],
-    ["history", OpCode.KVHistory, "k", "010200000000", (kv) => kv.history("k", { limit: 2 }), "010300000000000000e803000000000000020000007633", [{ version: 3n, atMs: 1000n, value: enc.encode("v3") }]],
+    ["history", OpCode.KVHistory, "k", "010200000000", (kv) => kv.history("k", { limit: 2 }), "020300000000000000e80300000000000000020000007633" + "0200000000000000f4010000000000000100000000", [{ version: 3n, atMs: 1000n, deleted: false, value: enc.encode("v3") }, { version: 2n, atMs: 500n, deleted: true, value: new Uint8Array(0) }]],
     ["incr", OpCode.KVIncr, "k", "01fbffffffffffffff0000", (kv) => kv.incr("k", { delta: -5n }), "010400000000000000012a00000000000000", { version: 4n, value: 42n }],
     ["expire", OpCode.KVExpire, "k", "60ea000000000000000000", (kv) => kv.expire("k", 60000), "", undefined],
     ["exists", OpCode.KVExists, "k", "0000", (kv) => kv.exists("k"), "010500000000000000", true],
@@ -377,6 +394,7 @@ describe("answers are decoded whole", () => {
     ["delete, null outside a transaction", (kv) => kv.delete("k"), "00"],
     ["scan, truncated name", (kv) => kv.scan("p"), "0100050061"],
     ["history, truncated", (kv) => kv.history("k"), "0103000000"],
+    ["history, bad deleted bool", (kv) => kv.history("k"), "010300000000000000e80300000000000002020000007633"],
     ["incr, truncated", (kv) => kv.incr("k"), "010400000000000000"],
     ["expire, trailing", (kv) => kv.expire("k", 1), "00"],
     ["exists, trailing", (kv) => kv.exists("k"), "01050000000000000000"],

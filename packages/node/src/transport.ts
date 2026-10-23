@@ -15,7 +15,7 @@ import {
   TimeoutError,
   type Transport,
   UnexpectedEOFError,
-  computeCRC32,
+  computeCRC32C,
   parseResponseHeader,
   requestBlockMs,
   requestTakesItems,
@@ -305,7 +305,7 @@ export class TcpTransport implements Transport {
       }
       this.pending.delete(requestId);
 
-      const computedCRC = computeCRC32(result.subarray(0, HEADER_SIZE), payload);
+      const computedCRC = computeCRC32C(result.subarray(0, HEADER_SIZE), payload);
       if (expectedCRC !== computedCRC) {
         pending.reject(new InvalidChecksumError(expectedCRC, computedCRC));
       } else {

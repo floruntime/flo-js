@@ -4,7 +4,7 @@
  */
 
 import * as net from "node:net";
-import { HEADER_SIZE, MAGIC, Ran, Reason, StatusCode, TABLE_HASH, VERSION, computeCRC32 } from "@floruntime/core";
+import { HEADER_SIZE, MAGIC, Ran, Reason, StatusCode, TABLE_HASH, VERSION, computeCRC32C } from "@floruntime/core";
 
 export function frame(id: bigint, status: number, data: Uint8Array): Uint8Array {
   const buf = new Uint8Array(HEADER_SIZE + data.length);
@@ -16,7 +16,7 @@ export function frame(id: bigint, status: number, data: Uint8Array): Uint8Array 
   buf[21] = status;
   view.setBigUint64(24, TABLE_HASH, true);
   buf.set(data, HEADER_SIZE);
-  view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
+  view.setUint32(16, computeCRC32C(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
   return buf;
 }
 

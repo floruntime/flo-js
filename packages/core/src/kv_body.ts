@@ -11,6 +11,7 @@ import {
   Condition,
   type GetOptions,
   type GetResult,
+  type JsonGetResult,
   type KVCommitResult,
   type KVIncrResult,
   MAX_KV_VALUE_SIZE,
@@ -385,13 +386,14 @@ export function encodeTxnBody(txn: bigint): Uint8Array {
   return w.build();
 }
 
-/** kv.get's answer: version, value. */
+/** kv.get's answer: version, value, expires_at_ms (absent with no TTL). */
 export function decodeGetAnswer(data: Uint8Array): GetResult {
   const r = new AnswerReader(data);
   const version = r.u64();
   const value = r.bytes32();
+  const expiresAtMs = r.present() ? r.i64() : null;
   r.end();
-  return { version, value };
+  return { version, value, expiresAtMs };
 }
 
 /** kv.set's answer: its version, absent inside a transaction (0n then). */
@@ -427,8 +429,9 @@ export function decodeHistoryAnswer(data: Uint8Array): VersionEntry[] {
   for (let n = r.u8(); n > 0; n--) {
     const version = r.u64();
     const atMs = r.i64();
+    const deleted = r.bool();
     const value = r.bytes32();
-    out.push({ version, atMs, value });
+    out.push({ version, atMs, deleted, value });
   }
   r.end();
   return out;
@@ -481,7 +484,7 @@ export function decodeExistsAnswer(data: Uint8Array): { exists: boolean; version
 }
 
 /** kv.json_get's answer: version, document. */
-export function decodeJsonGetAnswer(data: Uint8Array): GetResult {
+export function decodeJsonGetAnswer(data: Uint8Array): JsonGetResult {
   const r = new AnswerReader(data);
   const version = r.u64();
   const value = r.bytes32();
