@@ -5,6 +5,8 @@ on:
     branches: [dev, master]
   pull_request:
     branches: [dev, master]
+  # The release runs these jobs on the tag it publishes.
+  workflow_call:
 
 permissions:
   contents: read

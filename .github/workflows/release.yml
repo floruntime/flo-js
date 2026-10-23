@@ -1,0 +1,155 @@
+name: Release
+
+# Publishes @floruntime/core and @floruntime/node to npm when a v* tag is
+# pushed, after CI passes on that commit. npm trusts this workflow directly
+# (trusted publishing, over OIDC), so no npm token is stored anywhere, and
+# each package carries a provenance statement pointing back at this run.
+on:
+  push:
+    tags:
+      - "v*"
+  # Re-runs a tag, e.g. one whose first run failed. Pick the tag itself in
+  # "Use workflow from", so the run and its provenance name the tag's commit.
+  workflow_dispatch:
+    inputs:
+      dist_tag:
+        description: "npm dist-tag (auto: latest until a stable release exists, then dev for prereleases)"
+        type: choice
+        options: [auto, dev, latest]
+        default: auto
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          [ "$REF_TYPE" = tag ] || { echo "run this from a tag, not a branch"; exit 1; }
+          [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "not a release tag: $TAG"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+
+  # Build and pack where no publish token can be minted: install scripts and
+  # the build run here, and only the tarballs reach the publish job.
+  pack:
+    needs: [resolve, ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The tag names the version: both packages must carry it.
+      - name: Check the versions
+        id: version
+        run: |
+          VERSION=${TAG#v}
+          for pkg in core node; do
+            v=$(node -p "require('./packages/$pkg/package.json').version")
+            [ "$v" = "$VERSION" ] || { echo "packages/$pkg is $v, but the tag is $TAG"; exit 1; }
+          done
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - run: pnpm -r build
+
+      # pnpm pack writes node's workspace:* dependency on core as the real
+      # version.
+      - name: Pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/pack"
+          for pkg in core node; do
+            (cd packages/$pkg && pnpm pack --pack-destination "$RUNNER_TEMP/pack")
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: ${{ runner.temp }}/pack/*.tgz
+          retention-days: 7
+
+  publish:
+    needs: [resolve, pack]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # the GitHub release
+      id-token: write # npm trusted publishing
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      VERSION: ${{ needs.pack.outputs.version }}
+      DIST_IN: ${{ inputs.dist_tag || 'auto' }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@11
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: ${{ runner.temp }}/pack
+
+      # core goes first, so node's dependency on it exists when node lands.
+      # A version already on npm (a rerun after a partial publish) is skipped.
+      - name: Publish
+        run: |
+          for pkg in core node; do
+            name=@floruntime/$pkg
+            if [ "$(npm view "$name@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+              echo "$name@$VERSION is already on npm"
+              continue
+            fi
+            DIST=$DIST_IN
+            if [ "$DIST" = auto ]; then
+              # Until a stable version exists, latest follows the newest
+              # prerelease, so a plain install gets one the server speaks.
+              stable=$(npm view "$name" versions --json 2>/dev/null | node -e '
+                let s = ""; process.stdin.on("data", d => s += d).on("end", () => {
+                  const v = s ? JSON.parse(s) : []
+                  if (v.error) {
+                    // E404: not on npm yet, so no stable version. Anything else: stop.
+                    if (v.error.code !== "E404") { console.error(v.error.summary); process.exit(1) }
+                    return console.log("no")
+                  }
+                  console.log([].concat(v).some(x => !x.includes("-")) ? "yes" : "no")
+                })')
+              case $VERSION in
+                *-*) [ "$stable" = yes ] && DIST=dev || DIST=latest ;;
+                *) DIST=latest ;;
+              esac
+            fi
+            echo "publishing $name@$VERSION as $DIST"
+            npm publish "$RUNNER_TEMP/pack/floruntime-$pkg-$VERSION.tgz" --access public --tag "$DIST"
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          prerelease: ${{ contains(needs.resolve.outputs.tag, '-') }}
+          generate_release_notes: true
