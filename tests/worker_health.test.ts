@@ -5,120 +5,28 @@
  * running; and heartbeats can't be turned off.
  */
 
-import * as net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
-import { HEADER_SIZE, MAGIC, OpCode, Ran, Reason, StatusCode, TABLE_HASH, VERSION, computeCRC32 } from "@floruntime/core";
+import { OpCode, Reason, StatusCode } from "@floruntime/core";
 import { ActionWorker, StreamWorker } from "@floruntime/node";
+import { draining, fakeServer, loadOf, notFound, oneRecord, oneTask, quiet, sleep, unhealthy, until } from "./fake_worker_server.js";
 
-function frame(id: bigint, status: number, data: Uint8Array): Uint8Array {
-  const buf = new Uint8Array(HEADER_SIZE + data.length);
-  const view = new DataView(buf.buffer);
-  view.setUint32(0, MAGIC, true);
-  view.setUint32(4, data.length, true);
-  view.setBigUint64(8, id, true);
-  buf[20] = VERSION;
-  buf[21] = status;
-  view.setBigUint64(24, TABLE_HASH, true);
-  buf.set(data, HEADER_SIZE);
-  view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
-  return buf;
-}
-
-function refusal(status: number, reason: Reason, message: string): Answer {
-  return { status, data: new Uint8Array([reason & 0xff, reason >> 8, Ran.No, ...new TextEncoder().encode(message)]) };
-}
-
-const notFound = () => refusal(StatusCode.NotFound, Reason.NotFound, "worker not found");
-const unhealthy = () => refusal(StatusCode.BadRequest, Reason.WorkerUnhealthy, "worker missed its heartbeats; send one, or register again");
-const draining = () => refusal(StatusCode.BadRequest, Reason.WorkerDraining, "worker is draining");
-
-/** A task assignment for action "a", invoked by no workflow. */
-function oneTask(): Uint8Array {
-  const buf = new Uint8Array(2 + 2 + 2 + 1 + 8 + 4 + 1);
-  const view = new DataView(buf.buffer);
-  view.setUint16(0, 2, true);
-  buf.set([0x74, 0x31], 2); // "t1"
-  view.setUint16(4, 1, true);
-  buf[6] = 0x61; // "a"
-  view.setUint32(15, 1, true); // attempt
-  return buf;
-}
-
-type Answer = { status?: number; data?: Uint8Array; delayMs?: number } | "park" | undefined;
-
-interface Seen {
-  op: number;
-  /** The request's payload after the header: namespace, key, value, options. */
-  payload: Buffer;
-}
-
-/** The current_load a heartbeat carries: its value's first u32. */
-function loadOf(payload: Buffer): number {
-  let off = 2 + payload.readUInt16LE(0); // namespace
-  off += 2 + payload.readUInt16LE(off); // key
-  return payload.readUInt32LE(off + 4);
-}
-
-/** A server that answers per `script(op, nth)`: undefined is an empty OK, "park" never answers. */
-async function fakeServer(script: (op: number, nth: number) => Answer) {
-  const seen: Seen[] = [];
-  const counts = new Map<number, number>();
-  const sockets: net.Socket[] = [];
-  const server = net.createServer((sock) => {
-    sockets.push(sock);
-    let buf = Buffer.alloc(0);
-    sock.on("error", () => {});
-    sock.on("data", (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
-      while (buf.length >= HEADER_SIZE) {
-        const total = HEADER_SIZE + buf.readUInt32LE(4);
-        if (buf.length < total) return;
-        const op = buf.readUInt16LE(20);
-        const id = buf.readBigUInt64LE(8);
-        seen.push({ op, payload: Buffer.from(buf.subarray(HEADER_SIZE, total)) });
-        buf = buf.subarray(total);
-        const nth = counts.get(op) ?? 0;
-        counts.set(op, nth + 1);
-        const a = script(op, nth);
-        if (a === "park") continue;
-        const out = frame(id, a?.status ?? StatusCode.OK, a?.data ?? new Uint8Array(0));
-        if (a?.delayMs) setTimeout(() => sock.destroyed || sock.write(out), a.delayMs);
-        else sock.write(out);
-      }
-    });
-  });
-  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-  const { port } = server.address() as net.AddressInfo;
-  return {
-    endpoint: `127.0.0.1:${port}`,
-    seen,
-    ops: () => seen.map((s) => s.op),
-    close: () => {
-      server.close();
-      sockets.forEach((s) => s.destroy());
-    },
-  };
-}
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-async function until(cond: () => boolean, ms: number): Promise<void> {
-  const deadline = Date.now() + ms;
-  while (!cond() && Date.now() < deadline) await sleep(10);
-}
-
-const quiet = { debug: () => {}, warn: () => {}, error: () => {} };
 
 type Started = { stop: () => void; drain: () => Promise<void>; done: Promise<void> };
 
-const workers: [string, number, (endpoint: string, heartbeatIntervalMs: number) => Started][] = [
-  ["ActionWorker", OpCode.ActionAwait, (endpoint, heartbeatIntervalMs) => {
+// Each worker's handler takes `handlerMs`.
+const workers: [string, number, (endpoint: string, heartbeatIntervalMs: number, handlerMs?: number) => Started][] = [
+  ["ActionWorker", OpCode.ActionAwait, (endpoint, heartbeatIntervalMs, handlerMs = 0) => {
     const w = new ActionWorker({ endpoint, blockMs: 30000, heartbeatIntervalMs, concurrency: 4, machineId: "m1", logger: quiet });
-    w.action("a", async () => new Uint8Array(0));
+    w.action("a", async () => {
+      await sleep(handlerMs);
+      return new Uint8Array(0);
+    });
     return { stop: () => w.stop(), drain: () => w.drain(), done: w.start() };
   }],
-  ["StreamWorker", OpCode.StreamGroupRead, (endpoint, heartbeatIntervalMs) => {
-    const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000, heartbeatIntervalMs, concurrency: 4, machineId: "m1", logger: quiet }, async () => {});
+  ["StreamWorker", OpCode.StreamGroupRead, (endpoint, heartbeatIntervalMs, handlerMs = 0) => {
+    const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000, heartbeatIntervalMs, concurrency: 4, machineId: "m1", logger: quiet }, async () => {
+      await sleep(handlerMs);
+    });
     return { stop: () => w.stop(), drain: () => w.drain(), done: w.start() };
   }],
 ];
@@ -174,42 +82,42 @@ describe.each(workers)("%s removed by the server", (_name, poll, start) => {
   });
 });
 
-describe("a heartbeat out when the worker stops", () => {
+describe("a heartbeat out when the run ends", () => {
   let close: (() => void) | undefined;
   afterEach(() => close?.());
 
-  // The handler holds stop's wait while the late not found arrives.
-  const slow: [string, number, Uint8Array, (endpoint: string) => Started][] = [
-    ["ActionWorker", OpCode.ActionAwait, oneTask(), (endpoint) => {
-      const w = new ActionWorker({ endpoint, blockMs: 30000, heartbeatIntervalMs: 50, concurrency: 2, logger: quiet });
-      w.action("a", async () => {
-        await sleep(400);
-        return new Uint8Array(0);
-      });
-      return { stop: () => w.stop(), drain: () => w.drain(), done: w.start() };
-    }],
-    ["StreamWorker", OpCode.StreamGroupRead, oneRecord(), (endpoint) => {
-      const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000, heartbeatIntervalMs: 50, concurrency: 2, logger: quiet }, async () => {
-        await sleep(400);
-      });
-      return { stop: () => w.stop(), drain: () => w.drain(), done: w.start() };
-    }],
-  ];
-
-  it.each(slow)("%s doesn't register again when its answer is not found", async (_name, poll, work, start) => {
-    const srv = await fakeServer((op, nth) => {
+  it.each(workers)("%s doesn't register again when its answer is not found", async (_name, poll, start) => {
+    // The not found lands while the run is deregistering, its answer held up.
+    const srv = await fakeServer((op) => {
       if (op === OpCode.WorkerHeartbeat) return { ...notFound(), delayMs: 100 };
-      // Later polls come back empty, so stop() needn't wait on a parked one.
-      if (op === poll) return nth === 0 ? { data: work } : { delayMs: 20 };
+      if (op === OpCode.WorkerDeregister) return { delayMs: 300 };
+      // Polls come back empty, so stop() needn't wait on a parked one.
+      if (op === poll) return { delayMs: 20 };
       return undefined;
     });
     close = srv.close;
-    const w = start(srv.endpoint);
+    const w = start(srv.endpoint, 50);
     await until(() => srv.ops().includes(OpCode.WorkerHeartbeat), 3000);
     w.stop();
     await w.done;
-    await sleep(200);
     expect(srv.ops().filter((o) => o === OpCode.WorkerRegister).length).toBe(1);
+  });
+
+  it.each(workers)("%s registers again on a not found while handlers it was stopped with still run", async (_name, poll, start) => {
+    // Still finishing its work, the worker must stay registered.
+    const srv = await fakeServer((op, nth) => {
+      if (op === OpCode.WorkerHeartbeat && nth === 1) return notFound();
+      if (op === poll) return nth === 0 ? { data: poll === OpCode.ActionAwait ? oneTask() : oneRecord() } : { delayMs: 20 };
+      return undefined;
+    });
+    close = srv.close;
+    const w = start(srv.endpoint, 50, 400);
+    await until(() => srv.ops().includes(OpCode.WorkerHeartbeat), 3000);
+    w.stop();
+    await w.done;
+    const ops = srv.ops();
+    expect(ops.filter((o) => o === OpCode.WorkerRegister).length).toBe(2);
+    expect(ops.lastIndexOf(OpCode.WorkerRegister)).toBeLessThan(ops.indexOf(OpCode.WorkerDeregister));
   });
 });
 
@@ -338,13 +246,3 @@ describe.each(workers)("%s heartbeats", (name, poll, start) => {
   });
 });
 
-/** A group read answer holding one record. */
-function oneRecord(): Uint8Array {
-  const buf = new Uint8Array(4 + 8 + 8 + 1 + 4 + 1 + 4 + 1 + 4);
-  const view = new DataView(buf.buffer);
-  view.setUint32(0, 1, true);
-  view.setBigUint64(4, 1n, true);
-  view.setUint32(26, 1, true); // payload_len
-  buf[30] = 0x78;
-  return buf;
-}

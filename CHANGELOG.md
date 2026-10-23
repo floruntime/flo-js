@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `drain()` only sent the notice: the worker kept polling until a heartbeat came back Draining, heartbeats stopped while running handlers finished, a lost notice was never sent again, and a drain started on the server called `stop()`, which cut short the resends of results still to come. A drain, local or from the server, now stops issuing polls (an outstanding one still returns within `blockMs`), keeps heartbeating until the last handler has reported, sends the notice again after any re-registration or loss, and then `start()` returns. A drain also ends a reconnect. `drain()` no longer rejects when the notice fails (it logs and tries again), and it works before `start()`, ending that run.
+- A `stop()` or `drain()` during `start()`'s startup was lost: the flags were cleared after connecting. They are now cleared when a run ends, so one before or during startup ends that run.
+- A `StreamWorker` couldn't be started again after stopping: it dropped its client. It now keeps it, connecting an owned one again.
+- A `StreamWorker` stopped mid-batch left the records it hadn't started pending until the group's ack timeout; it now nacks them, so they are handed out again at once.
+- Results sent while a worker drains had no bound on their reconnects; once a worker is stopping or draining, each gets up to 2 s.
+- Heartbeat failures are logged as warnings instead of being swallowed.
 - `action.invoke` returned the whole answer as the run id: its length prefix, the id and a trailing byte. A status asked with that id was never found. It now returns the id alone.
 - `stream.append` sent the bare payload, which the server refuses as a malformed batch: every append failed. It now sends the record as a batch of one, as the server reads it.
 - `ActionWorker` handed every handler a payload starting with the task's caller block: the `has_caller` byte, and for an action a workflow invoked, the caller's run id and workflow name. `parseTaskAssignment` now reads that block, and the payload is the input alone. `TaskAssignment` and `ActionContext` carry `callerRunId` and `callerWorkflowName`.

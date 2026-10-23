@@ -47,11 +47,12 @@ import {
 import { FloClient } from "./client.js";
 import { EmptyPollBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
 import {
-  RESULT_GRACE_MS,
+  DRAIN_NOTICE_INTERVAL_MS,
   closedSince,
-  graceAfter,
   isConnectionError,
+  nextTaskOrTick,
   reconnect,
+  sendDrainNotice,
   sendResult,
 } from "./reconnect.js";
 import crypto from "crypto";
@@ -210,20 +211,24 @@ export class StreamWorker {
     Omit<StreamWorkerConfig, "logger">
   >;
   private readonly logger: Logger;
-  private client: FloClient | null = null;
+  private readonly client: FloClient;
   private readonly ownedClient: boolean;
   private readonly handler: StreamRecordHandler;
   private running = false;
+  // A run's stop and drain are cleared when it ends, not when it begins, so
+  // one that lands before or during startup still ends that run.
   private stopRequested = false;
   private stopSignal = new AbortController();
-  /** Aborts RESULT_GRACE_MS after stopSignal: until then lost results are resent. */
-  private resultGrace = graceAfter(this.stopSignal.signal, RESULT_GRACE_MS);
+  /** Aborted by stop() or a drain: the poll loop leaves, and its pauses and reconnects end. */
+  private leave = new AbortController();
   /** client.closes() at start(): once it moves, the owner closed the client. */
   private clientCloses = 0;
   /** Handlers running: the load heartbeats report. */
   private activeCount = 0;
-  /** Set by drain(), so a worker registered again is drained again. */
+  /** Set by drain() or a Draining heartbeat. */
   private draining = false;
+  /** The server is to be told of the drain: at its start, and after any re-registration. */
+  private noticeDue = false;
   private readonly pendingTasks: Set<Promise<void>> = new Set();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -290,9 +295,9 @@ export class StreamWorker {
   }
 
   /**
-   * Start consuming stream records.
-   *
-   * This method blocks until `stop()` is called or an error occurs.
+   * Start consuming stream records until `stop()`, or a drain once its
+   * running handlers finish and ack. Either one before or during startup
+   * ends this run. It may be called again afterwards.
    */
   async start(): Promise<void> {
     this.log(
@@ -300,46 +305,35 @@ export class StreamWorker {
         `group=${this.config.group}, consumer=${this.config.consumer})`
     );
 
-    // Connect if we own the client
-    if (this.ownedClient && this.client && !this.client.isConnected()) {
-      await this.client.connect();
-    }
-
-    if (!this.client) {
-      throw new Error("Client not available");
-    }
-    this.clientCloses = this.client.closes();
-
-    // Set before the join so stop() can end a join's retry wait.
-    this.stopRequested = false;
-    this.draining = false;
-    this.stopSignal = new AbortController();
-    this.resultGrace = graceAfter(this.stopSignal.signal, RESULT_GRACE_MS);
-
+    this.running = true;
+    let joined = false;
     try {
-      if (!(await this.joinGroup())) return;
+      // Connect if we own the client: on a later run, again after close().
+      if (this.ownedClient && !this.client.isConnected()) {
+        await this.client.connect();
+      }
+      this.clientCloses = this.client.closes();
 
-      // Initialize state
-      this.running = true;
-
-      // Start heartbeat
-      this.startHeartbeat();
-
-      // Main polling loop
-      await this.pollLoop();
+      if (!this.stopRequested) {
+        // Left and deregistered at the end even if this answer is lost.
+        joined = true;
+        if (await this.joinGroup()) {
+          this.startHeartbeat();
+          await this.pollLoop();
+          if (this.draining && !this.stopRequested) await this.finishDrain();
+        }
+      }
     } finally {
-      // Stop heartbeat
-      this.stopHeartbeat();
-
-      // Wait for in-flight tasks
+      // Wait for in-flight tasks; heartbeats go on meanwhile.
       if (this.pendingTasks.size > 0) {
         this.log(`Waiting for ${this.pendingTasks.size} records to complete...`);
         await Promise.allSettled(this.pendingTasks);
       }
-      this.resultGrace.dispose();
+      this.stopHeartbeat();
+      // Before deregistering: a heartbeat answering after it mustn't register again.
+      this.running = false;
 
-      // Deregister and leave group
-      if (this.client) {
+      if (joined) {
         try {
           await this.client.worker.deregister(this.config.workerId);
         } catch {
@@ -357,34 +351,47 @@ export class StreamWorker {
       }
 
       // Close client if we own it
-      if (this.ownedClient && this.client) {
+      if (this.ownedClient) {
         await this.client.close();
       }
 
-      this.client = null;
-      this.running = false;
+      this.endRun();
       this.log("Stream worker stopped");
     }
+  }
+
+  /** Clear the run's stop and drain, for the next run. */
+  private endRun(): void {
+    this.stopRequested = false;
+    this.draining = false;
+    this.noticeDue = false;
+    this.stopSignal = new AbortController();
+    this.leave = new AbortController();
+  }
+
+  /** Whether a stop or drain has ended polling. */
+  private leaving(): boolean {
+    return this.stopRequested || this.draining;
   }
 
   /**
    * Join the consumer group and register this worker with the server. A
    * join the server refused without running it (overloaded or unavailable,
    * past the client's own retries) is tried again with the worker backoff;
-   * any other error is thrown. Returns false if stop() came first.
+   * any other error is thrown. Returns false if a stop or drain came first.
    */
   private async joinGroup(): Promise<boolean> {
     const failed = newWorkerBackoff();
     for (;;) {
-      if (this.stopRequested) return false;
+      if (this.leaving()) return false;
       try {
-        await this.client!.stream.groupJoin(this.config.stream, this.config.group, this.config.consumer);
+        await this.client.stream.groupJoin(this.config.stream, this.config.group, this.config.consumer);
         break;
       } catch (err) {
         if (!isRefusedUnrun(err)) throw err;
         const d = failed.next();
         this.log(`Group join refused: ${err}, retrying in ${d}ms...`);
-        await pause(d, this.stopSignal.signal);
+        await pause(d, this.leave.signal);
       }
     }
     this.log("Joined consumer group");
@@ -403,7 +410,7 @@ export class StreamWorker {
       group: this.config.group,
       consumer: this.config.consumer,
     });
-    await this.client!.worker.register(this.config.workerId, [], {
+    await this.client.worker.register(this.config.workerId, [], {
       workerType: WorkerType.Stream,
       maxConcurrency: this.config.concurrency,
       processes,
@@ -417,8 +424,8 @@ export class StreamWorker {
   private async recover(cause: unknown, connection: number): Promise<void> {
     this.logger.warn(`Connection lost: ${cause}; reconnecting...`);
     const seen = { connection, closes: this.clientCloses };
-    if (!(await reconnect(this.client!, this.stopSignal.signal, this.logger, seen))) {
-      if (closedSince(this.client!, seen) && !this.stopRequested) {
+    if (!(await reconnect(this.client, this.leave.signal, this.logger, seen))) {
+      if (closedSince(this.client, seen) && !this.stopRequested) {
         this.logger.warn("The client was closed by its owner; stopping the worker");
         this.stop();
       }
@@ -436,9 +443,9 @@ export class StreamWorker {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
     let unproven = false;
-    while (this.running && !this.stopRequested) {
+    while (!this.leaving()) {
       // The connection this iteration's poll goes on, to redial only it.
-      const connection = this.client!.connection();
+      const connection = this.client.connection();
       try {
         // Check concurrency limit
         if (this.activeCount >= this.config.concurrency) {
@@ -446,11 +453,11 @@ export class StreamWorker {
           continue;
         }
 
-        if (this.stopRequested) break;
+        if (this.leaving()) break;
 
         // Read batch from consumer group
         const started = performance.now();
-        const result = await this.client!.stream.groupRead(this.config.stream, {
+        const result = await this.client.stream.groupRead(this.config.stream, {
           group: this.config.group,
           consumer: this.config.consumer,
           limit: this.config.batchSize,
@@ -462,11 +469,13 @@ export class StreamWorker {
         const empty = !result || result.records.length === 0;
         const wait = backoff.next(empty, performance.now() - started, this.config.blockMs);
         if (empty) {
-          if (wait > 0) await pause(wait, this.stopSignal.signal);
+          if (wait > 0) await pause(wait, this.leave.signal);
           continue;
         }
 
-        // Process each record with concurrency control
+        // Process each record with concurrency control. A drain handles the
+        // whole batch, already delivered here; a stop hands back the rest.
+        let dispatched = 0;
         for (const record of result.records) {
           if (this.stopRequested) break;
 
@@ -482,28 +491,41 @@ export class StreamWorker {
             this.pendingTasks.delete(taskPromise);
           });
           this.pendingTasks.add(taskPromise);
+          dispatched++;
         }
+        if (dispatched < result.records.length) await this.handBack(result.records.slice(dispatched));
       } catch (err) {
-        if (this.stopRequested) break;
+        if (this.leaving()) break;
         if (isConnectionError(err)) {
           // A server that takes the connection and drops it again is not
           // redialed at once each time: until a read succeeds after a
           // reconnect, each one waits first.
-          if (unproven) await pause(failed.next(), this.stopSignal.signal);
-          if (this.stopRequested) break;
+          if (unproven) await pause(failed.next(), this.leave.signal);
+          if (this.leaving()) break;
           await this.recover(err, connection);
           unproven = true;
         } else {
           const d = failed.next();
           this.log(`GroupRead error: ${err}, retrying in ${d}ms...`);
-          await pause(d, this.stopSignal.signal);
+          await pause(d, this.leave.signal);
         }
       }
     }
   }
 
+  /**
+   * Nack records delivered here that a stop kept from starting, so the group
+   * hands them out again now rather than after its ack timeout.
+   */
+  private async handBack(records: StreamRecord[]): Promise<void> {
+    const opts = { group: this.config.group, consumer: this.config.consumer };
+    await sendResult(this.client, this.leave.signal, this.logger, this.clientCloses, `nack of ${records.length} records not started`, () =>
+      this.client.stream.groupNack(this.config.stream, records.map((r) => r.id), opts)
+    );
+  }
+
   private async processRecord(record: StreamRecord): Promise<void> {
-    const client = this.client!;
+    const client = this.client;
     const ctx = new StreamContext(
       record,
       client.namespace(),
@@ -525,7 +547,7 @@ export class StreamWorker {
     }
 
     const what = acked ? "ack" : "nack";
-    await sendResult(client, this.resultGrace.signal, this.logger, this.clientCloses, `${what} for record ${id}`, () =>
+    await sendResult(client, this.leave.signal, this.logger, this.clientCloses, `${what} for record ${id}`, () =>
       acked
         ? client.stream.groupAck(this.config.stream, [record.id], opts)
         : client.stream.groupNack(this.config.stream, [record.id], opts)
@@ -533,13 +555,17 @@ export class StreamWorker {
   }
 
   /**
-   * Signal the stream worker to stop.
+   * Signal the stream worker to stop: polling ends, also mid-reconnect or
+   * mid-drain, once an outstanding read returns (within blockMs), and
+   * records of the last batch not yet started are handed back. Running
+   * handlers finish and ack before `start()` returns. A stop before
+   * `start()` ends that run at once.
    */
   stop(): void {
     this.log("Stopping stream worker...");
-    this.running = false;
     this.stopRequested = true;
     this.stopSignal.abort();
+    this.leave.abort();
   }
 
   /**
@@ -547,56 +573,88 @@ export class StreamWorker {
    */
   async close(): Promise<void> {
     this.stop();
-    if (this.ownedClient && this.client) {
+    if (this.ownedClient) {
       await this.client.close();
     }
   }
 
   /**
-   * Initiate graceful drain — no new records will be consumed.
-   * In-flight records will continue to completion.
+   * Stop issuing reads and let the running handlers finish and ack;
+   * `start()` then returns. An outstanding read still returns within
+   * `blockMs`. The server is told, so the worker list shows it draining, and
+   * heartbeats go on meanwhile; a notice that can't be sent now is tried
+   * again, and a failed one is logged, not thrown. A drain before `start()`
+   * ends that run.
    */
   async drain(): Promise<void> {
-    if (!this.client) return;
+    this.log("Draining stream worker...");
+    this.beginDrain();
+    if (this.running) await this.sendNotice();
+  }
+
+  private beginDrain(): void {
+    if (!this.draining) this.noticeDue = true;
     this.draining = true;
-    await this.client.worker.drain(this.config.workerId);
-    this.log("Stream worker drain requested");
+    this.leave.abort();
   }
 
   /**
-   * Send a heartbeat; stop on a Draining answer. A worker silent past the
+   * Wait for the running handlers, keeping the server told of the drain: a
+   * notice that can't be sent is tried again every DRAIN_NOTICE_INTERVAL_MS
+   * while handlers run, its connection redialed; an idle worker tries once.
+   * A stop ends the wait; `start()` still waits for the handlers.
+   */
+  private async finishDrain(): Promise<void> {
+    for (;;) {
+      if (this.noticeDue) await this.sendNotice();
+      if (this.pendingTasks.size === 0 || this.stopRequested) return;
+      await nextTaskOrTick(this.pendingTasks, DRAIN_NOTICE_INTERVAL_MS, this.stopSignal.signal);
+    }
+  }
+
+  private async sendNotice(): Promise<void> {
+    if (await sendDrainNotice(this.client, this.config.workerId, this.logger, this.clientCloses, this.stopSignal.signal)) {
+      this.noticeDue = false;
+    }
+  }
+
+  /**
+   * Send a heartbeat; drain on a Draining answer. A worker silent past the
    * server's removal time is removed, and its heartbeat answers not found:
-   * it registers again, and a draining one is drained again, since
+   * it registers again, and a draining one tells the server again, since
    * registering marks it active.
    */
   private async heartbeat(): Promise<void> {
-    const client = this.client!;
     let status: WorkerStatus;
     try {
-      status = await client.worker.heartbeat(this.config.workerId, this.activeCount);
+      status = await this.client.worker.heartbeat(this.config.workerId, this.activeCount);
     } catch (err) {
       if (!(err instanceof ServerError && err.status === StatusCode.NotFound)) throw err;
-      // A heartbeat out when stop() ran answers after the worker deregistered:
-      // registering then would leave one the server keeps till it expires.
+      // A heartbeat out when the run ended answers after the worker
+      // deregistered: registering then would leave one the server keeps till
+      // it expires.
       if (!this.running) return;
       this.logger.warn("The server removed this worker; registering again");
       await this.registerWorker();
-      if (this.draining) await client.worker.drain(this.config.workerId);
+      if (this.draining) {
+        this.noticeDue = true;
+        await this.sendNotice();
+      }
       return;
     }
-    if (status === WorkerStatus.Draining) {
-      this.log("Worker is draining, stopping...");
-      this.stop();
+    if (status === WorkerStatus.Draining && !this.draining) {
+      this.log("The server drained this worker; finishing its running work");
+      this.beginDrain();
     }
   }
 
   private startHeartbeat(): void {
     this.heartbeatTimer = setInterval(async () => {
-      if (!this.client || !this.running) return;
+      if (!this.running) return;
       try {
         await this.heartbeat();
-      } catch {
-        // Heartbeat failures are non-fatal
+      } catch (err) {
+        this.logger.warn(`Heartbeat failed: ${err}`);
       }
     }, this.config.heartbeatIntervalMs);
 

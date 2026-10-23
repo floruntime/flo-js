@@ -160,6 +160,37 @@ describe.skipIf(!endpoint)("live", () => {
     await new Promise((r) => setTimeout(r, 1500)); // a re-run would have started by now
     expect(runs).toBe(1);
   }, 30000);
+
+  // A drain the server starts mid-run lets the running action complete once,
+  // then ends start() and deregisters the worker.
+  it("finishes the running action once when the server drains the worker, then stops", async () => {
+    const { client, namespace } = await liveClient();
+    const worker = new ActionWorker({ endpoint, namespace, workerId: "live-drain", blockMs: 1000, heartbeatIntervalMs: 200 });
+    let runs = 0;
+    let running = false;
+    worker.action("slow", async () => {
+      runs++;
+      running = true;
+      await new Promise((r) => setTimeout(r, 1000));
+      return encoder.encode("ok");
+    });
+    const done = worker.start();
+    await new Promise((r) => setTimeout(r, 200));
+    const { runId } = await client.action.invoke("slow", new Uint8Array(0));
+    const deadline = Date.now() + 15000;
+    while (!running) {
+      expect(Date.now()).toBeLessThan(deadline);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await client.worker.drain("live-drain");
+    await done; // returns by itself
+    const status = await client.action.status(runId);
+    expect(status.status).toBe("completed");
+    expect(status.attempt).toBe(1);
+    expect(runs).toBe(1);
+    const listed = await client.worker.list({});
+    expect(listed.workers.map((w) => w.id)).not.toContain("live-drain");
+  }, 30000);
 });
 
 describe.skipIf(!expiryEndpoint)("live, on a server that removes silent workers", () => {

@@ -70,7 +70,7 @@ export async function reconnect(client: FloClient, signal: AbortSignal, logger: 
 /** Sends of one result in all, the first included. */
 export const RESULT_SENDS = 3;
 
-/** How long after stop() a worker keeps reconnecting to resend a result. */
+/** How long a result sent once a worker is leaving (stopping or draining) may wait on reconnects. */
 export const RESULT_GRACE_MS = 2000;
 
 /**
@@ -118,13 +118,30 @@ function lost(err: unknown, client: FloClient, seen: Seen): boolean {
  * Send a worker's result (complete, fail, ack or nack) with `send`, which
  * builds the same request each call. If it is lost (see lost()), the worker
  * reconnects and sends it again: a resend at worst repeats a result the
- * server already has. After RESULT_SENDS sends, once `grace` aborts (some
- * time after stop()), or if the client's owner closed it, the result is
+ * server already has. After RESULT_SENDS sends, RESULT_GRACE_MS into the
+ * send once `leaving` has aborted (a stop or drain, so neither waits on a
+ * server that is gone), or if the client's owner closed it, the result is
  * dropped with an error log naming `what`; the server then hands the work
  * out again once its lease runs out. A refusal is not resent. Returns
  * whether it was delivered.
  */
 export async function sendResult(
+  client: FloClient,
+  leaving: AbortSignal,
+  logger: Logger,
+  closes: number,
+  what: string,
+  send: () => Promise<unknown>,
+): Promise<boolean> {
+  const grace = graceAfter(leaving, RESULT_GRACE_MS);
+  try {
+    return await sendWithin(client, grace.signal, logger, closes, what, send);
+  } finally {
+    grace.dispose();
+  }
+}
+
+async function sendWithin(
   client: FloClient,
   grace: AbortSignal,
   logger: Logger,
@@ -148,7 +165,7 @@ export async function sendResult(
         logger.error(`Dropped ${what} after ${sends} sends: ${err}`);
         return false;
       }
-      const gone = `Dropped ${what}: ${err}; the worker stopped ${RESULT_GRACE_MS} ms ago, or its client was closed`;
+      const gone = `Dropped ${what}: ${err}; it found no connection within ${RESULT_GRACE_MS} ms of the worker stopping or draining, or its client was closed`;
       if (grace.aborted || closedSince(client, seen)) {
         logger.error(gone);
         return false;
@@ -160,4 +177,64 @@ export async function sendResult(
       }
     }
   }
+}
+
+/** How often a draining worker tries again to tell the server. */
+export const DRAIN_NOTICE_INTERVAL_MS = 1000;
+
+/**
+ * `work`, unless `signal` aborts first: then false, and `work` is left to
+ * finish on its own, its result or error dropped.
+ */
+async function unlessAborted(work: Promise<unknown>, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) {
+    work.catch(() => {});
+    return false;
+  }
+  let onAbort = () => {};
+  const aborted = new Promise<false>((resolve) => {
+    onAbort = () => resolve(false);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([work.then(() => true), aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+    work.catch(() => {});
+  }
+}
+
+/**
+ * Tell the server `workerId` is draining, once. Returns whether that is
+ * settled: sent, refused for a reason another try won't fix, or cut short by
+ * `stop`, which a request or redial held up on a hung server mustn't delay. A
+ * notice lost with its connection redials that connection (nothing else does
+ * once the poll loop has left), unless the client's owner closed it.
+ */
+export async function sendDrainNotice(client: FloClient, workerId: string, logger: Logger, closes: number, stop: AbortSignal): Promise<boolean> {
+  const seen = { connection: client.connection(), closes };
+  try {
+    await unlessAborted(client.worker.drain(workerId), stop);
+    return true;
+  } catch (err) {
+    if (!lost(err, client, seen)) {
+      logger.warn(`Drain notice refused: ${err}`);
+      return true;
+    }
+    logger.warn(`Drain notice lost: ${err}; trying again`);
+    if (!closedSince(client, seen)) {
+      try {
+        await unlessAborted(client.redial(seen.connection), stop);
+      } catch {
+        // Tried again next round.
+      }
+    }
+    return stop.aborted;
+  }
+}
+
+/** Resolves when one of `tasks` settles, after `ms`, or when `signal` aborts. */
+export async function nextTaskOrTick(tasks: Iterable<Promise<void>>, ms: number, signal: AbortSignal): Promise<void> {
+  const settled = [...tasks].map((t) => t.catch(() => {}));
+  await Promise.race([...settled, pause(ms, signal)]);
 }
