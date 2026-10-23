@@ -7,7 +7,8 @@
  * processing opcodes (0x360–0x364).
  */
 
-import { createServerError } from "./errors.js";
+import { createServerError, IncompleteResponseError } from "./errors.js";
+import { AnswerReader } from "./kv_body.js";
 import {
   OpCode,
   type RawResponse,
@@ -110,6 +111,7 @@ export class ProcessingOperations {
     // Binary wire format:
     // [job_id_len:u16][job_id][name_len:u16][name][status:u8]
     // [batch_size:u32][records_processed:u64][created_at:i64]
+    // [reason_len:u16][reason]
     return parseWireStatus(resp.data);
   }
 
@@ -320,33 +322,31 @@ const statusNames = [
  *
  * Wire format: [job_id_len:u16][job_id][name_len:u16][name][status:u8]
  *              [batch_size:u32][records_processed:u64][created_at:i64]
+ *              [reason_len:u16][reason]  (reason empty unless failed)
  */
 function parseWireStatus(data: Uint8Array): ProcessingStatusResult {
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  let pos = 0;
-
-  const jobIdLen = view.getUint16(pos, true);
-  pos += 2;
-  const job_id = textDecoder.decode(data.subarray(pos, pos + jobIdLen));
-  pos += jobIdLen;
-
-  const nameLen = view.getUint16(pos, true);
-  pos += 2;
-  const name = textDecoder.decode(data.subarray(pos, pos + nameLen));
-  pos += nameLen;
-
-  const statusByte = data[pos++]!;
-  const status = statusNames[statusByte] ?? `unknown(${statusByte})`;
-
-  const batch_size = view.getUint32(pos, true);
-  pos += 4;
-
-  const records_processed = Number(view.getBigUint64(pos, true));
-  pos += 8;
-
-  const created_at = Number(view.getBigInt64(pos, true));
-
-  return { job_id, name, status, batch_size, records_processed, created_at };
+  const r = new AnswerReader(data);
+  const job_id = r.string16();
+  const name = r.string16();
+  const statusByte = r.u8();
+  const status = statusNames[statusByte];
+  if (status === undefined) {
+    throw new IncompleteResponseError(`unknown processing job status ${statusByte}`);
+  }
+  const batch_size = r.u32();
+  const records_processed = Number(r.u64());
+  const created_at = Number(r.i64());
+  const reason = r.string16();
+  r.end();
+  return {
+    job_id,
+    name,
+    status,
+    batch_size,
+    records_processed,
+    created_at,
+    failure_reason: reason.length > 0 ? reason : null,
+  };
 }
 
 /**

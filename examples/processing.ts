@@ -173,6 +173,7 @@ async function main() {
     console.log(`  Status: ${status.status}`);
     console.log(`  Batch size: ${status.batch_size}`);
     console.log(`  Records processed: ${status.records_processed}`);
+    if (status.failure_reason !== null) console.log(`  Failure reason: ${status.failure_reason}`);
     console.log();
 
     // ============================================================
