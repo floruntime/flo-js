@@ -34,6 +34,7 @@ export {
   type KVIncrResult,
   type PutResult,
   type GetResult,
+  type JsonGetResult,
   type MGetEntry,
   type KVCommitResult,
   // Queue types (for Node.js backend use)
@@ -193,7 +194,7 @@ export {
   workerBlockMs,
   requestBlockMs,
   requestTakesItems,
-  computeCRC32,
+  computeCRC32C,
   serializeRequest,
   parseResponseHeader,
   parseRawResponse,

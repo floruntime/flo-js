@@ -38,10 +38,20 @@ jobs:
       - name: Build flo
         working-directory: flo-src
         run: zig build --release=safe -Dcpu=x86_64_v2
+      # The server's status and reason lists, for the test that checks this
+      # SDK's copies against them.
+      - name: Write ops.json
+        working-directory: flo-src
+        run: zig build gen
       - uses: actions/upload-artifact@v4
         with:
           name: flo
           path: flo-src/zig-out/bin/flo
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ops-json
+          path: flo-src/zig-out/gen/ops.json
           retention-days: 1
 
   test:
@@ -70,6 +80,10 @@ jobs:
         with:
           name: flo
           path: ${{ runner.temp }}/flo-bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: ops-json
+          path: ${{ runner.temp }}/flo-gen
       # Two servers: the second removes a worker 1 s after its last
       # heartbeat, for the test of a removed worker registering again.
       - name: Start the pinned flo
@@ -90,12 +104,13 @@ jobs:
             [ $up = 1 ] || { echo "flo server on $port did not start"; cat flo-server.log flo-expiry-server.log; exit 1; }
           done
 
-      # CI=1 turns a missing server into a failure, not a skip.
+      # CI=1 turns a missing server or ops.json into a failure, not a skip.
       - run: pnpm exec vitest run
         env:
           CI: "1"
           FLO_ENDPOINT: localhost:4453
           FLO_EXPIRY_ENDPOINT: localhost:4463
+          FLO_OPS_JSON: ${{ runner.temp }}/flo-gen/ops.json
 
       - name: Server logs
         if: failure()

@@ -16,7 +16,7 @@ import {
   KVOperations,
   type KVRequestSender,
   type RawResponse,
-  computeCRC32,
+  computeCRC32C,
   serializeRequest,
   parseResponseHeader,
   parseDequeueResponse,
@@ -28,6 +28,7 @@ import {
   serializeStreamAppendValue,
   FloError,
 } from "@floruntime/core";
+import { crc32c } from "../packages/core/src/wire.js";
 
 describe("Wire Protocol", () => {
   describe("Constants", () => {
@@ -37,7 +38,7 @@ describe("Wire Protocol", () => {
     });
 
     it("should have correct version", () => {
-      expect(VERSION).toBe(0x02);
+      expect(VERSION).toBe(0x03);
     });
 
     it("should have correct header size", () => {
@@ -92,26 +93,20 @@ describe("Wire Protocol", () => {
     });
   });
 
-  describe("CRC32", () => {
-    it("should compute CRC32 correctly", () => {
-      const header = new Uint8Array(HEADER_SIZE);
-      const payload = new Uint8Array([1, 2, 3, 4]);
-
-      const crc = computeCRC32(header, payload);
-      expect(typeof crc).toBe("number");
-      expect(crc).toBeGreaterThanOrEqual(0);
-      expect(crc).toBeLessThanOrEqual(0xffffffff);
+  describe("CRC32C", () => {
+    it("matches the standard check value", () => {
+      expect(crc32c(new TextEncoder().encode("123456789"))).toBe(0xe3069283);
     });
 
-    it("should produce different CRC for different data", () => {
-      const header = new Uint8Array(HEADER_SIZE);
-      const payload1 = new Uint8Array([1, 2, 3, 4]);
-      const payload2 = new Uint8Array([5, 6, 7, 8]);
-
-      const crc1 = computeCRC32(header, payload1);
-      const crc2 = computeCRC32(header, payload2);
-
-      expect(crc1).not.toBe(crc2);
+    // The server's own test checks this frame for the same checksum.
+    it("covers the header without its crc field, then the body", () => {
+      const hex = (h: string) => new Uint8Array((h.match(/../g) ?? []).map((b) => parseInt(b, 16)));
+      const header = hex("464c4f00" + "05000000" + "0700000000000000" + "00000000" + "0101" + "03" + "00" + "0807060504030201");
+      expect(header.length).toBe(HEADER_SIZE);
+      expect(computeCRC32C(header, new TextEncoder().encode("hello"))).toBe(0xa2996e56);
+      // The crc field itself is not covered.
+      header.set([0xff, 0xff, 0xff, 0xff], 16);
+      expect(computeCRC32C(header, new TextEncoder().encode("hello"))).toBe(0xa2996e56);
     });
   });
 
@@ -136,7 +131,7 @@ describe("Wire Protocol", () => {
 
       // Version, then the pinned table hash at 24-31
       expect(request[22]).toBe(VERSION);
-      expect(view.getBigUint64(24, true)).toBe(0x2fba7dd9ae941830n);
+      expect(view.getBigUint64(24, true)).toBe(0x74e680eb8727c3fbn);
     });
 
     it("should include namespace in payload", () => {
@@ -191,7 +186,7 @@ describe("Wire Protocol", () => {
 
     it("refuses an answer from another protocol version or table, naming both", () => {
       const cases: [number, bigint, string][] = [
-        [1, 0n, "flo: server protocol 1, client protocol 2: upgrade the client"],
+        [1, 0n, "flo: server protocol 1, client protocol 3: upgrade the client"],
         [
           VERSION,
           TABLE_HASH + 1n,

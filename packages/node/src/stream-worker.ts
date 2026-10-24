@@ -580,10 +580,11 @@ export class StreamWorker {
 
   /**
    * Stop issuing reads and let the running handlers finish and ack;
-   * `start()` then returns. An outstanding read still returns within
-   * `blockMs`. The server is told, so the worker list shows it draining, and
-   * heartbeats go on meanwhile; a notice that can't be sent now is tried
-   * again, and a failed one is logged, not thrown. A drain before `start()`
+   * `start()` then returns. An outstanding read can still wait up to
+   * `blockMs`: the server doesn't wake a group read on a drain, and the
+   * worker keeps its one connection. The server is told, so the worker list
+   * shows it draining, and heartbeats go on meanwhile; a notice that can't
+   * be sent now is tried again, and a failed one is logged, not thrown. A drain before `start()`
    * ends that run.
    */
   async drain(): Promise<void> {

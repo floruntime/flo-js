@@ -774,10 +774,10 @@ export class ActionWorker {
 
   /**
    * Stop issuing polls and let the running handlers finish; `start()` then
-   * returns. An outstanding poll still returns within `blockMs`. The server
-   * is told, so it assigns this worker nothing more, and heartbeats go on
-   * meanwhile; a notice that can't be sent now is tried again, and a failed
-   * one is logged, not thrown. A drain before `start()` ends that run once it
+   * returns. The server is told, so it assigns this worker nothing more and
+   * answers an outstanding poll at once, refused worker_draining. Heartbeats
+   * go on meanwhile; a notice that can't be sent now is tried again, and a
+   * failed one is logged, not thrown. A drain before `start()` ends that run once it
    * has registered.
    */
   async drain(): Promise<void> {

@@ -15,7 +15,7 @@ import {
   StatusCode,
   TABLE_HASH,
   VERSION,
-  computeCRC32,
+  computeCRC32C,
   type Logger,
 } from "@floruntime/core";
 import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
@@ -30,7 +30,7 @@ function frame(id: bigint, status: number, data: Uint8Array = new Uint8Array(0))
   buf[21] = status;
   view.setBigUint64(24, TABLE_HASH, true);
   buf.set(data, HEADER_SIZE);
-  view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
+  view.setUint32(16, computeCRC32C(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
   return buf;
 }
 

@@ -21,7 +21,7 @@ import {
   TABLE_HASH,
   UnavailableError,
   VERSION,
-  computeCRC32,
+  computeCRC32C,
   normalizeRetryPolicy,
 } from "@floruntime/core";
 import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
@@ -38,7 +38,7 @@ function frame(id: bigint, status: number, data: Uint8Array = new Uint8Array(0))
   buf[21] = status;
   view.setBigUint64(24, TABLE_HASH, true);
   buf.set(data, HEADER_SIZE);
-  view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
+  view.setUint32(16, computeCRC32C(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
   return Buffer.from(buf);
 }
 
@@ -52,10 +52,10 @@ function refusal(id: bigint, status: number, ran: Ran): Buffer {
   return frame(id, status, body);
 }
 
-/** A kv.get answer: [version:u64][value_len:u32][value]. */
+/** A kv.get answer: [version:u64][value_len:u32][value], then no expiry (0). */
 function getReply(id: bigint, value: string): Buffer {
   const v = enc.encode(value);
-  const body = new Uint8Array(12 + v.length);
+  const body = new Uint8Array(12 + v.length + 1);
   const view = new DataView(body.buffer);
   view.setBigUint64(0, 1n, true);
   view.setUint32(8, v.length, true);
