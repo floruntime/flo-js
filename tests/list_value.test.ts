@@ -11,6 +11,7 @@ import {
   KVReadOnlyOperations,
   OpCode,
   OptionTag,
+  ProcessKind,
   ProcessingOperations,
   WorkerOperations,
   WorkerStatus,
@@ -209,5 +210,89 @@ describe("worker.list", () => {
     for (const bad of [page([row("w", { type: 2 })]), page([row("w", { status: 4 })])]) {
       await expect(new WorkerOperations(answering(bad).sender).list()).rejects.toBeInstanceOf(IncompleteResponseError);
     }
+  });
+});
+
+/** A worker.info answer: the row, the metadata (absent when undefined), then the processes. */
+function info(r: number[], metadata: string | undefined, processes: [string, number, bigint, bigint, bigint][]): Uint8Array {
+  const out = [...r];
+  const le = (v: bigint, n: number) => {
+    for (let i = 0n; i < BigInt(n); i++) out.push(Number((BigInt.asUintN(64, v) >> (8n * i)) & 0xffn));
+  };
+  if (metadata === undefined) out.push(0);
+  else {
+    const m = new TextEncoder().encode(metadata);
+    out.push(1);
+    le(BigInt(m.length), 2);
+    out.push(...m);
+  }
+  le(BigInt(processes.length), 2);
+  for (const [name, kind, runs, fails, lastRun] of processes) {
+    const n = new TextEncoder().encode(name);
+    le(BigInt(n.length), 2);
+    out.push(...n, kind);
+    le(runs, 8);
+    le(fails, 8);
+    le(lastRun, 8);
+  }
+  return new Uint8Array(out);
+}
+
+/** A sender that records the request and its key, and answers OK with `data`. */
+function answeringInfo(data: Uint8Array): { sender: never; sent: (Sent & { key: string })[] } {
+  const sent: (Sent & { key: string })[] = [];
+  const sender = {
+    getNamespace: (ns?: string) => ns ?? "default",
+    sendRequest: async (op: number, _ns: string, key: Uint8Array, value: Uint8Array, options: Uint8Array) => {
+      sent.push({ op, key: new TextDecoder().decode(key), value, options });
+      return { status: 0, data, requestId: 0n };
+    },
+  };
+  return { sender: sender as never, sent };
+}
+
+describe("worker.info", () => {
+  const w1 = { id: "w1", type: WorkerType.Action, status: WorkerStatus.Active, currentLoad: 3, maxConcurrency: 8, tasksCompleted: 5n, tasksFailed: 1n, registeredAtMs: 1000n, lastHeartbeatMs: -2n };
+
+  it("is a table op with an empty body, keyed by the worker id", async () => {
+    expect(isTableOp(OpCode.WorkerInfo)).toBe(true);
+    const { sender, sent } = answeringInfo(info(row("w1"), undefined, []));
+    await new WorkerOperations(sender).info("w1");
+    expect(sent[0]).toEqual({ op: OpCode.WorkerInfo, key: "w1", value: new Uint8Array(0), options: new Uint8Array(0) });
+  });
+
+  it("decodes the row as worker.list does, the metadata and the processes", async () => {
+    const data = info(row("w1", { machine: "m" }), '{"a":1}', [
+      ["echo", ProcessKind.Action, 4n, 1n, 2000n],
+      ["events/g", ProcessKind.StreamConsumer, 0n, 0n, 0n],
+    ]);
+    expect(await new WorkerOperations(answeringInfo(data).sender).info("w1")).toEqual({
+      worker: { ...w1, machineId: "m" },
+      metadata: new TextEncoder().encode('{"a":1}'),
+      processes: [
+        { name: "echo", kind: ProcessKind.Action, runCount: 4n, failCount: 1n, lastRunAtMs: 2000n },
+        { name: "events/g", kind: ProcessKind.StreamConsumer, runCount: 0n, failCount: 0n, lastRunAtMs: 0n },
+      ],
+    });
+  });
+
+  it("decodes one with no metadata and no processes", async () => {
+    const res = await new WorkerOperations(answeringInfo(info(row("w1"), undefined, [])).sender).info("w1");
+    expect(res).toEqual({ worker: { ...w1, machineId: undefined }, metadata: null, processes: [] });
+  });
+
+  it("refuses a process kind it doesn't know", async () => {
+    const bad = info(row("w1"), undefined, [["p", 2, 0n, 0n, 0n]]);
+    const err = await new WorkerOperations(answeringInfo(bad).sender).info("w1").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(IncompleteResponseError);
+    expect((err as Error).message).toContain("process kind 2");
+  });
+
+  it("refuses a cut answer and bytes left over", async () => {
+    const whole = info(row("w1", { machine: "m" }), "x", [["p", ProcessKind.Action, 1n, 0n, 5n]]);
+    for (let n = 0; n < whole.length; n++) {
+      await expect(new WorkerOperations(answeringInfo(whole.subarray(0, n)).sender).info("w1")).rejects.toBeInstanceOf(IncompleteResponseError);
+    }
+    await expect(new WorkerOperations(answeringInfo(new Uint8Array([...whole, 0])).sender).info("w1")).rejects.toBeInstanceOf(IncompleteResponseError);
   });
 });

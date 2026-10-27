@@ -13,7 +13,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { TABLE_HASH, VERSION, WorkerStatus, WorkerType, type WorkerInfo } from "@floruntime/core";
+import { NotFoundError, ProcessKind, Ran, Reason, ServerError, StatusCode, TABLE_HASH, VERSION, WorkerStatus, WorkerType, type WorkerInfo } from "@floruntime/core";
 import { ActionWorker, FloClient } from "@floruntime/node";
 
 const endpoint = process.env.FLO_ENDPOINT ?? "";
@@ -151,6 +151,42 @@ describe.skipIf(!endpoint)("live", () => {
     const second = await client.worker.list({ limit: 2, cursor: first.cursor });
     expect(second.workers.map((w) => w.id)).toEqual(["w-c"]);
     expect(second.cursor).toBeNull();
+  });
+
+  it("shows a worker's row, metadata and processes in worker.info", async () => {
+    const { client } = await liveClient();
+    await client.worker.register("w-info", [], {
+      workerType: WorkerType.Action,
+      maxConcurrency: 4,
+      machineId: "m-live",
+      metadata: '{"zone":"a"}',
+      processes: [
+        { name: "echo", kind: ProcessKind.Action },
+        { name: "events/g", kind: ProcessKind.StreamConsumer },
+      ],
+    });
+    const got = await client.worker.info("w-info");
+    expect(got.worker).toMatchObject({ id: "w-info", type: WorkerType.Action, status: WorkerStatus.Active, maxConcurrency: 4, machineId: "m-live" });
+    expect(decoder.decode(got.metadata!)).toBe('{"zone":"a"}');
+    expect(got.processes.map((p) => ({ name: p.name, kind: p.kind, runCount: p.runCount, failCount: p.failCount }))).toEqual([
+      { name: "echo", kind: ProcessKind.Action, runCount: 0n, failCount: 0n },
+      { name: "events/g", kind: ProcessKind.StreamConsumer, runCount: 0n, failCount: 0n },
+    ]);
+  });
+
+  it("refuses a registration of 1025 processes, as the server says", async () => {
+    const { client } = await liveClient();
+    const processes = Array.from({ length: 1025 }, (_, i) => ({ name: `p${i}`, kind: ProcessKind.Action }));
+    const err = await client.worker.register("w-many", [], { processes }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ServerError);
+    expect(err).toMatchObject({ status: StatusCode.BadRequest, reason: Reason.Unclassified, ran: Ran.No, serverMessage: "more than 1024 processes" });
+  });
+
+  it("answers worker.info for a missing worker not found", async () => {
+    const { client } = await liveClient();
+    const err = await client.worker.info("w-missing").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NotFoundError);
+    expect(err).toMatchObject({ status: StatusCode.NotFound, reason: Reason.NotFound });
   });
 
   // A handler past its action's 1 s timeout runs once when the worker touches

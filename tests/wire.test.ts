@@ -131,7 +131,7 @@ describe("Wire Protocol", () => {
 
       // Version, then the pinned table hash at 24-31
       expect(request[22]).toBe(VERSION);
-      expect(view.getBigUint64(24, true)).toBe(0x74e680eb8727c3fbn);
+      expect(view.getBigUint64(24, true)).toBe(0x505fdaa07e866b96n);
     });
 
     it("should include namespace in payload", () => {

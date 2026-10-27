@@ -14,7 +14,7 @@ export const VERSION = 0x03;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0x74e680eb8727c3fbn;
+export const TABLE_HASH = 0x505fdaa07e866b96n;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -1132,6 +1132,30 @@ export interface WorkerInfo {
 }
 
 /**
+ * One of a worker's processes, as worker.info answers: what it registered,
+ * with its counts.
+ */
+export interface WorkerProcess {
+  name: string;
+  kind: ProcessKind;
+  runCount: bigint;
+  failCount: bigint;
+  /** When it last ran, in ms since the Unix epoch. */
+  lastRunAtMs: bigint;
+}
+
+/**
+ * A worker's record, as worker.info answers: its row (as worker.list shows
+ * it), the metadata it registered with, and its processes.
+ */
+export interface WorkerInfoResult {
+  worker: WorkerInfo;
+  /** The metadata as registered; null when it registered none. */
+  metadata: Uint8Array | null;
+  processes: WorkerProcess[];
+}
+
+/**
  * A page of workers, in id order.
  */
 export interface WorkerListResult {
@@ -1190,6 +1214,13 @@ export interface WorkerFailOptions {
   namespace?: string;
   /** Whether to retry the task (default: true) */
   retry?: boolean;
+}
+
+/**
+ * Options for a worker's info.
+ */
+export interface WorkerInfoOptions {
+  namespace?: string;
 }
 
 /**

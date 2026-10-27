@@ -23,6 +23,9 @@ import {
   type VersionEntry,
   WaitFor,
   type WorkerInfo,
+  type WorkerInfoResult,
+  type WorkerProcess,
+  type ProcessKind,
   type WorkerListResult,
   type WorkerStatus,
   type WorkerType,
@@ -78,6 +81,7 @@ const TABLE_OPS: ReadonlySet<OpCode> = new Set([
   OpCode.KVExists,
   OpCode.ActionStatus,
   OpCode.WorkerList,
+  OpCode.WorkerInfo,
 ]);
 
 /** Whether `op`'s request carries a schema-coded body, not a value and options. */
@@ -569,38 +573,61 @@ export function encodeWorkerListBody(limit: number, cursor: Uint8Array | null | 
 
 const WORKER_TYPES = 2; // action, stream
 const WORKER_STATUSES = 4; // active, idle, draining, unhealthy
+const PROCESS_KINDS = 2; // action, stream_consumer
+
+/** One worker row, as worker.list and worker.info answer it. */
+function readWorkerRow(r: AnswerReader): WorkerInfo {
+  const id = r.string16();
+  const type = r.u8();
+  if (type >= WORKER_TYPES) throw new IncompleteResponseError(`worker type ${type} is not one this client knows`);
+  const status = r.u8();
+  if (status >= WORKER_STATUSES) throw new IncompleteResponseError(`worker status ${status} is not one this client knows`);
+  const currentLoad = r.u32();
+  const maxConcurrency = r.u32();
+  const tasksCompleted = r.u64();
+  const tasksFailed = r.u64();
+  const registeredAtMs = r.i64();
+  const lastHeartbeatMs = r.i64();
+  const machineId = r.present() ? new TextDecoder().decode(r.bytes8()) : undefined;
+  return {
+    id,
+    type: type as WorkerType,
+    status: status as WorkerStatus,
+    currentLoad,
+    maxConcurrency,
+    tasksCompleted,
+    tasksFailed,
+    registeredAtMs,
+    lastHeartbeatMs,
+    machineId,
+  };
+}
 
 /** worker.list's answer: the page's workers in id order, then the next page's cursor (null on the last page). */
 export function decodeWorkerListAnswer(data: Uint8Array): WorkerListResult {
   const r = new AnswerReader(data);
   const workers: WorkerInfo[] = [];
-  for (let n = r.u16(); n > 0; n--) {
-    const id = r.string16();
-    const type = r.u8();
-    if (type >= WORKER_TYPES) throw new IncompleteResponseError(`worker type ${type} is not one this client knows`);
-    const status = r.u8();
-    if (status >= WORKER_STATUSES) throw new IncompleteResponseError(`worker status ${status} is not one this client knows`);
-    const currentLoad = r.u32();
-    const maxConcurrency = r.u32();
-    const tasksCompleted = r.u64();
-    const tasksFailed = r.u64();
-    const registeredAtMs = r.i64();
-    const lastHeartbeatMs = r.i64();
-    const machineId = r.present() ? new TextDecoder().decode(r.bytes8()) : undefined;
-    workers.push({
-      id,
-      type: type as WorkerType,
-      status: status as WorkerStatus,
-      currentLoad,
-      maxConcurrency,
-      tasksCompleted,
-      tasksFailed,
-      registeredAtMs,
-      lastHeartbeatMs,
-      machineId,
-    });
-  }
+  for (let n = r.u16(); n > 0; n--) workers.push(readWorkerRow(r));
   const cursor = r.present() ? r.bytes16() : null;
   r.end();
   return { workers, cursor };
+}
+
+/** worker.info's answer: the worker's row, its metadata, then its processes. */
+export function decodeWorkerInfoAnswer(data: Uint8Array): WorkerInfoResult {
+  const r = new AnswerReader(data);
+  const worker = readWorkerRow(r);
+  const metadata = r.present() ? r.bytes16() : null;
+  const processes: WorkerProcess[] = [];
+  for (let n = r.u16(); n > 0; n--) {
+    const name = r.string16();
+    const kind = r.u8();
+    if (kind >= PROCESS_KINDS) throw new IncompleteResponseError(`process kind ${kind} is not one this client knows`);
+    const runCount = r.u64();
+    const failCount = r.u64();
+    const lastRunAtMs = r.i64();
+    processes.push({ name, kind: kind as ProcessKind, runCount, failCount, lastRunAtMs });
+  }
+  r.end();
+  return { worker, metadata, processes };
 }

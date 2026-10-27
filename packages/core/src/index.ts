@@ -91,12 +91,15 @@ export {
   type WorkerAwaitResult,
   type WorkerInfo,
   type WorkerListResult,
+  type WorkerInfoResult,
+  type WorkerProcess,
   type WorkerRegisterOptions,
   type WorkerAwaitOptions,
   type WorkerTouchOptions,
   type WorkerCompleteOptions,
   type WorkerFailOptions,
   type WorkerListOptions,
+  type WorkerInfoOptions,
   type WorkerHeartbeatOptions,
   type WorkerDeregisterOptions,
   type WorkerDrainOptions,
@@ -218,6 +221,7 @@ export {
   MAX_WORKER_LIST_LIMIT,
   decodeActionStatusAnswer,
   decodeWorkerListAnswer,
+  decodeWorkerInfoAnswer,
   encodeWorkerListBody,
 } from "./kv_body.js";
 export {

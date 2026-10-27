@@ -225,6 +225,7 @@ Workers execute tasks for registered actions.
 | `complete` | `complete(workerId, taskId, result, opts?) → Promise<void>` | Complete task |
 | `fail` | `fail(workerId, taskId, error, opts?) → Promise<void>` | Fail task |
 | `list` | `list({ limit?, cursor? }?) → Promise<WorkerListResult>` | A page of workers in id order; pass `cursor` on for the next, null on the last |
+| `info` | `info(workerId, opts?) → Promise<WorkerInfoResult>` | A worker's row (as `list` shows it, with `machineId`), its registered `metadata` (bytes, or null) and its `processes` (`name`, `kind`, `runCount`, `failCount`, `lastRunAtMs`); throws `NotFoundError` for a worker that isn't registered |
 
 #### Worker Example
 

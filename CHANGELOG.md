@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `worker.info(workerId)`: the worker's row, decoded as `worker.list` decodes it, its registered metadata, and its processes with their kind and counts (`WorkerInfoResult`, `WorkerProcess`). A worker that isn't registered throws `NotFoundError`. A registration the server refuses (more than 1024 processes, a name or machine id too long) throws its `ServerError` with the server's reason and message; the client doesn't check those limits itself.
 - `GetResult.expiresAtMs`: when the key's TTL runs out, in ms since the epoch; null with no TTL. `VersionEntry.deleted`: whether a history version is a delete. `kv.jsonGet` returns a `JsonGetResult` (no expiry). An answer with a bad presence or bool byte, or cut short, throws `IncompleteResponseError`.
 - `StreamAppendOptions.headers`: headers stored with the record.
 - `ActionWorker` `autoTouch` option (off by default): touches each run every third of its action's timeout (at least every 100 ms) while the handler runs, asking for the worker's own timeout. It stops when a touch is refused as conflict, not found or bad request, and carries on after any other refusal.
@@ -19,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking:** frames carry a CRC32C (Castagnoli) checksum, not IEEE CRC32, under protocol version 3; `computeCRC32` is renamed `computeCRC32C`. The table hash moves to `0x74e680eb8727c3fb` with the server.
+- **Breaking:** frames carry a CRC32C (Castagnoli) checksum, not IEEE CRC32, under protocol version 3; `computeCRC32` is renamed `computeCRC32C`. The table hash moves to `0x505fdaa07e866b96` with the server.
 - **Breaking:** `worker.list` is a table op: `list({ limit, cursor })` returns a page of workers in id order and the next page's `cursor` (null on the last page); `limit` is 1 to 1024, default 1024. It used to send a raw limit and return no workers at all. `WorkerInfo` is the server's row: `tasksCompleted`/`tasksFailed` are bigints, `lastHeartbeat` is `lastHeartbeatMs`, and `metadata` is gone.
 - **Breaking:** `heartbeatIntervalMs: 0` no longer turns heartbeats off: a worker that never heartbeats is refused work after the server's heartbeat timeout. A value of 0 or less throws at construction.
 - **Breaking:** `action.status` returns a new `ActionRunStatus` shape: `status` (pending, running, completed, failed, cancelled, timed_out), `createdAtMs`, `startedAtMs`, `completedAtMs`, `attempt`, and the run's `output` and `errorMessage`, decoded from the op table's answer. It used to return the server's raw answer, which no caller could read. The table hash moves with the server.
