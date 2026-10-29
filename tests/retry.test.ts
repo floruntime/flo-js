@@ -12,6 +12,7 @@ import {
   IncompleteResponseError,
   MAGIC,
   OpCode,
+  OutcomePendingError,
   OverloadedError,
   Ran,
   Reason,
@@ -21,7 +22,8 @@ import {
   TABLE_HASH,
   UnavailableError,
   VERSION,
-  computeCRC32,
+  computeCRC32C,
+  isOutcomePending,
   normalizeRetryPolicy,
 } from "@floruntime/core";
 import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
@@ -38,24 +40,25 @@ function frame(id: bigint, status: number, data: Uint8Array = new Uint8Array(0))
   buf[21] = status;
   view.setBigUint64(24, TABLE_HASH, true);
   buf.set(data, HEADER_SIZE);
-  view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
+  view.setUint32(16, computeCRC32C(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
   return Buffer.from(buf);
 }
 
-/** A refusal of `id` with `status` and `ran`. */
-function refusal(id: bigint, status: number, ran: Ran): Buffer {
+/** A refusal of `id` with `status`, `ran` and `reason`. */
+function refusal(id: bigint, status: number, ran: Ran, reason: Reason = Reason.Unclassified): Buffer {
   const text = enc.encode("busy");
   const body = new Uint8Array(3 + text.length);
-  body[0] = Reason.Unclassified;
+  body[0] = reason & 0xff;
+  body[1] = reason >> 8;
   body[2] = ran;
   body.set(text, 3);
   return frame(id, status, body);
 }
 
-/** A kv.get answer: [version:u64][value_len:u32][value]. */
+/** A kv.get answer: [version:u64][value_len:u32][value], then no expiry (0). */
 function getReply(id: bigint, value: string): Buffer {
   const v = enc.encode(value);
-  const body = new Uint8Array(12 + v.length);
+  const body = new Uint8Array(12 + v.length + 1);
   const view = new DataView(body.buffer);
   view.setBigUint64(0, 1n, true);
   view.setUint32(8, v.length, true);
@@ -148,6 +151,17 @@ describe("only refusals that didn't run are retried", () => {
       expect((e as ServerError).ran).toBe(Ran.Yes);
     }],
     ["conflict, not run", (id) => refusal(id, StatusCode.Conflict, Ran.No), (e) => expect(e).toBeInstanceOf(ConflictError)],
+    // An operator has to repair a halted shard: retrying is no use.
+    ["unavailable, not run, shard halted", (id) => refusal(id, StatusCode.Unavailable, Ran.No, Reason.ShardHalted), (e) => {
+      expect(e).toBeInstanceOf(UnavailableError);
+      expect(e).toMatchObject({ reason: Reason.ShardHalted, ran: Ran.No });
+    }],
+    // Committed, not applied: resending would write it twice.
+    ["outcome pending", (id) => refusal(id, StatusCode.OutcomePending, Ran.Unknown, Reason.ShardHalted), (e) => {
+      expect(e).toBeInstanceOf(OutcomePendingError);
+      expect(e).toMatchObject({ status: StatusCode.OutcomePending, reason: Reason.ShardHalted, ran: Ran.Unknown, serverMessage: "busy" });
+      expect(isOutcomePending(e)).toBe(true);
+    }],
     ["overloaded, no ran byte", (id) => frame(id, StatusCode.Overloaded, new Uint8Array([0, 0])), (e) =>
       expect(e).toBeInstanceOf(IncompleteResponseError)],
   ];
@@ -160,6 +174,22 @@ describe("only refusals that didn't run are retried", () => {
       expect(srv.seen.length).toBe(1);
     });
   }
+});
+
+describe("a halted shard's read", () => {
+  it("is a success marked stale, over the wire, and an unknown flag is refused", async () => {
+    const flagged = (b: Buffer, flags: number) => {
+      b[22] = flags;
+      b.writeUInt32LE(computeCRC32C(b.subarray(0, HEADER_SIZE), b.subarray(HEADER_SIZE)), 16);
+      return b;
+    };
+    const srv = await serve((_op, n, id) => flagged(getReply(id, "v"), [0x01, 0x00, 0x02][n]!));
+    const c = await connect(srv.endpoint, fastRetry);
+    expect(await c.kv.get("k")).toMatchObject({ stale: true });
+    expect(await c.kv.get("k")).toMatchObject({ stale: false });
+    await expect(c.kv.get("k")).rejects.toBeInstanceOf(IncompleteResponseError);
+    expect(srv.seen.length).toBe(3);
+  });
 });
 
 describe("retries stop at maxAttempts", () => {

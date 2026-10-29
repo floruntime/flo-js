@@ -31,6 +31,7 @@ import {
 } from "./kv_body.js";
 import {
   type GetResult,
+  type KVExistsResult,
   type KVCommitResult,
   OpCode,
   type PutOptions,
@@ -149,11 +150,12 @@ export class Transaction {
     decodeEmptyAnswer((await send(this.sender, OpCode.KVExpire, this.namespace, key, body)).data);
   }
 
-  /** Check key existence inside the transaction (sees buffered writes). */
-  async exists(key: string): Promise<boolean> {
+  /** Check key existence inside the transaction (sees buffered writes; version 0 for one). */
+  async exists(key: string): Promise<KVExistsResult> {
     this.checkAlive();
     const body = encodeExistsBody({ routingKey: this.routingKey }, this.id);
-    return decodeExistsAnswer((await send(this.sender, OpCode.KVExists, this.namespace, key, body)).data).exists;
+    const resp = await send(this.sender, OpCode.KVExists, this.namespace, key, body);
+    return { ...decodeExistsAnswer(resp.data), stale: resp.stale === true };
   }
 
   // ── Disallowed inside a transaction ───────────────────────────────

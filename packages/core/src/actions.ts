@@ -3,7 +3,7 @@
  */
 
 import { createServerError, IncompleteResponseError } from "./errors.js";
-import { decodeActionStatusAnswer, decodeWorkerListAnswer, encodeWorkerListBody, MAX_WORKER_LIST_LIMIT } from "./kv_body.js";
+import { decodeActionStatusAnswer, decodeWorkerInfoAnswer, decodeWorkerListAnswer, encodeWorkerListBody, MAX_WORKER_LIST_LIMIT } from "./kv_body.js";
 import {
   type ActionDeleteOptions,
   type ActionInvokeOptions,
@@ -25,6 +25,8 @@ import {
   type WorkerDrainOptions,
   type WorkerFailOptions,
   type WorkerHeartbeatOptions,
+  type WorkerInfoOptions,
+  type WorkerInfoResult,
   type WorkerListOptions,
   type WorkerListResult,
   type WorkerRegisterOptions,
@@ -482,17 +484,32 @@ export class WorkerOperations {
   }
 
   /**
-   * List a page of the namespace's workers, in id order. Pass the answer's
-   * cursor to the next call for the page after; it is null on the last page.
+   * List a page of the namespace's workers, in id order, or only those that
+   * run `action`. Pass the answer's cursor to the next call for the page
+   * after; it is null on the last page.
    */
   async list(opts?: WorkerListOptions): Promise<WorkerListResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-    const body = encodeWorkerListBody(opts?.limit ?? MAX_WORKER_LIST_LIMIT, opts?.cursor);
+    const body = encodeWorkerListBody(opts?.limit ?? MAX_WORKER_LIST_LIMIT, opts?.cursor, opts?.action);
     const resp = await this.sender.sendRequest(OpCode.WorkerList, namespace, new Uint8Array(0), body, new Uint8Array(0));
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
     return decodeWorkerListAnswer(resp.data);
+  }
+
+  /**
+   * A worker's record: its row, the metadata it registered with, and its
+   * processes with their counts. A worker that isn't registered throws
+   * NotFoundError.
+   */
+  async info(workerId: string, opts?: WorkerInfoOptions): Promise<WorkerInfoResult> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+    const resp = await this.sender.sendRequest(OpCode.WorkerInfo, namespace, textEncoder.encode(workerId), new Uint8Array(0), new Uint8Array(0));
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+    return decodeWorkerInfoAnswer(resp.data);
   }
 }
 

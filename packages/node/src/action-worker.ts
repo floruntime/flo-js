@@ -34,6 +34,7 @@ import {
   ProcessKind,
   Reason,
   ServerError,
+  isOutcomePending,
   StatusCode,
   WorkerStatus,
   WorkerType,
@@ -45,7 +46,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { EmptyPollBackoff, HaltBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
 import {
   DRAIN_NOTICE_INTERVAL_MS,
   closedSince,
@@ -479,10 +480,11 @@ export class ActionWorker {
         // Deregistered at the end even if this answer is lost: the
         // registration may still have taken.
         registered = true;
-        await this.register(actionNames);
-        this.startHeartbeat(actionNames);
-        await this.pollLoop(actionNames);
-        if (this.draining && !this.stopRequested) await this.finishDrain();
+        if (await this.registerThroughHalts(actionNames)) {
+          this.startHeartbeat(actionNames);
+          await this.pollLoop(actionNames);
+          if (this.draining && !this.stopRequested) await this.finishDrain();
+        }
       }
     } finally {
       // Wait for running tasks; heartbeats go on meanwhile.
@@ -521,6 +523,23 @@ export class ActionWorker {
   /** Whether a stop or drain has ended polling. */
   private leaving(): boolean {
     return this.stopRequested || this.draining;
+  }
+
+  /**
+   * Register, waiting out a halted shard; false if a stop or drain ended
+   * the wait.
+   */
+  private async registerThroughHalts(actionNames: string[]): Promise<boolean> {
+    const halted = new HaltBackoff(this.logger);
+    for (;;) {
+      try {
+        await this.register(actionNames);
+        return true;
+      } catch (err) {
+        if (!(await halted.waitIf(err, "Register", this.leave.signal))) throw err;
+        if (this.leaving()) return false;
+      }
+    }
   }
 
   /** Register the actions and this worker with the server. */
@@ -562,6 +581,8 @@ export class ActionWorker {
     try {
       await this.register(actionNames);
     } catch (err) {
+      // Committed but not applied: resending it would write it twice.
+      if (isOutcomePending(err)) throw err;
       // A connection error here surfaces again on the next poll.
       this.logger.warn(`Re-register after reconnect failed: ${err}`);
     }
@@ -570,6 +591,7 @@ export class ActionWorker {
   private async pollLoop(actionNames: string[]): Promise<void> {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
+    const halted = new HaltBackoff(this.logger);
     let unproven = false;
     while (!this.leaving()) {
       // The connection this iteration's poll goes on, to redial only it.
@@ -595,6 +617,7 @@ export class ActionWorker {
           { blockMs: this.config.blockMs }
         );
         failed.reset();
+        halted.reset();
         unproven = false;
 
         const wait = backoff.next(result.task === null, performance.now() - started, this.config.blockMs);
@@ -620,9 +643,13 @@ export class ActionWorker {
           if (this.leaving()) break;
           await this.recover(actionNames, err, connection);
           unproven = true;
+        } else if (isOutcomePending(err)) {
+          throw err;
         } else if (err instanceof ServerError && err.reason === Reason.WorkerDraining) {
           this.log("The server drained this worker; finishing its running work");
           this.beginDrain();
+        } else if (await halted.waitIf(err, "Await", this.leave.signal)) {
+          // Polled again once the wait is over.
         } else {
           if (err instanceof ServerError && err.reason === Reason.WorkerUnhealthy) {
             // Missed heartbeats: one now makes the worker healthy again.
@@ -774,10 +801,10 @@ export class ActionWorker {
 
   /**
    * Stop issuing polls and let the running handlers finish; `start()` then
-   * returns. An outstanding poll still returns within `blockMs`. The server
-   * is told, so it assigns this worker nothing more, and heartbeats go on
-   * meanwhile; a notice that can't be sent now is tried again, and a failed
-   * one is logged, not thrown. A drain before `start()` ends that run once it
+   * returns. The server is told, so it assigns this worker nothing more and
+   * answers an outstanding poll at once, refused worker_draining. Heartbeats
+   * go on meanwhile; a notice that can't be sent now is tried again, and a
+   * failed one is logged, not thrown. A drain before `start()` ends that run once it
    * has registered.
    */
   async drain(): Promise<void> {

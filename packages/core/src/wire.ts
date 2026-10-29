@@ -24,55 +24,38 @@ import {
   OpCode,
   OptionTag,
   type RawResponse,
+  RESPONSE_STALE,
   type StatusCode,
   VERSION,
   TABLE_HASH,
 } from "./types.js";
 import { isTableOp } from "./kv_body.js";
 
-/**
- * CRC32 lookup table (IEEE polynomial).
- */
-const CRC32_TABLE = new Uint32Array(256);
+/** CRC32C (Castagnoli, reflected polynomial 0x82F63B78) lookup table. */
+const CRC32C_TABLE = new Uint32Array(256);
+for (let i = 0; i < 256; i++) {
+  let crc = i;
+  for (let j = 0; j < 8; j++) crc = crc & 1 ? (crc >>> 1) ^ 0x82f63b78 : crc >>> 1;
+  CRC32C_TABLE[i] = crc >>> 0;
+}
 
-// Initialize CRC32 table
-(function initCRC32Table() {
-  const polynomial = 0xedb88320;
-  for (let i = 0; i < 256; i++) {
-    let crc = i;
-    for (let j = 0; j < 8; j++) {
-      if (crc & 1) {
-        crc = (crc >>> 1) ^ polynomial;
-      } else {
-        crc = crc >>> 1;
-      }
-    }
-    CRC32_TABLE[i] = crc >>> 0;
-  }
-})();
-
-/**
- * Compute CRC32 checksum for data.
- */
-function crc32(data: Uint8Array): number {
+/** CRC32C of `parts`, in order. */
+export function crc32c(...parts: Uint8Array[]): number {
   let crc = 0xffffffff;
-  for (let i = 0; i < data.length; i++) {
-    crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ data[i]!) & 0xff]!;
+  for (const data of parts) {
+    for (let i = 0; i < data.length; i++) {
+      crc = (crc >>> 8) ^ CRC32C_TABLE[(crc ^ data[i]!) & 0xff]!;
+    }
   }
   return (crc ^ 0xffffffff) >>> 0;
 }
 
 /**
- * Compute CRC32 for header (excluding crc32 field) + payload.
+ * A frame's checksum: CRC32C over the header without its crc field
+ * (bytes 16..20), then the payload.
  */
-export function computeCRC32(header: Uint8Array, payload: Uint8Array): number {
-  // CRC32 is computed over: header[0..16] + header[20..32] + payload
-  const totalLen = 16 + 12 + payload.length;
-  const combined = new Uint8Array(totalLen);
-  combined.set(header.subarray(0, 16), 0);
-  combined.set(header.subarray(20, 32), 16);
-  combined.set(payload, 28);
-  return crc32(combined);
+export function computeCRC32C(header: Uint8Array, payload: Uint8Array): number {
+  return crc32c(header.subarray(0, 16), header.subarray(20, 32), payload);
 }
 
 /**
@@ -289,11 +272,11 @@ export function serializeRequest(
   const buf = new Uint8Array(HEADER_SIZE + payloadLen);
   const view = new DataView(buf.buffer);
 
-  // Build header (without CRC32)
+  // Build header (without its checksum)
   view.setUint32(0, MAGIC, true); // magic
   view.setUint32(4, payloadLen, true); // payload_length
   view.setBigUint64(8, requestId, true); // request_id
-  // CRC32 at [16:20] - filled later
+  // Checksum at [16:20] - filled later
   view.setUint16(20, opCode, true); // op_code (u16 LE)
   buf[22] = VERSION; // version
   buf[23] = 0; // flags
@@ -329,8 +312,8 @@ export function serializeRequest(
     buf.set(options, offset);
   }
 
-  // Compute and fill CRC32
-  const crcValue = computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE));
+  // Compute and fill the checksum
+  const crcValue = computeCRC32C(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE));
   view.setUint32(16, crcValue, true);
 
   return buf;
@@ -338,11 +321,11 @@ export function serializeRequest(
 
 /**
  * Parse a response header.
- * Returns [status, dataLen, requestId, crc].
+ * Returns [status, dataLen, requestId, crc, flags].
  */
 export function parseResponseHeader(
   header: Uint8Array
-): [StatusCode, number, bigint, number] {
+): [StatusCode, number, bigint, number, number] {
   if (header.length < HEADER_SIZE) {
     throw new IncompleteResponseError("header too short");
   }
@@ -369,7 +352,7 @@ export function parseResponseHeader(
     throw new TableMismatchError(version, tableHash);
   }
 
-  return [status, dataLen, requestId, crcValue];
+  return [status, dataLen, requestId, crcValue, header[22]!];
 }
 
 /**
@@ -379,8 +362,13 @@ export function parseRawResponse(
   header: Uint8Array,
   data: Uint8Array
 ): RawResponse {
-  const [status, , requestId] = parseResponseHeader(header);
-  return { status, data, requestId };
+  const [status, , requestId, , flags] = parseResponseHeader(header);
+  // The table hash pins both sides, so a flag this client doesn't know
+  // means the answer can't be read as this client reads it.
+  if ((flags & ~RESPONSE_STALE) !== 0) {
+    throw new IncompleteResponseError(`unknown response flags 0x${flags.toString(16).padStart(2, "0")}`);
+  }
+  return { status, data, requestId, stale: (flags & RESPONSE_STALE) !== 0 };
 }
 
 /**

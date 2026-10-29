@@ -23,7 +23,9 @@ import {
   Reason,
   reasonName,
   ServerError,
+  StaleNotFoundError,
   StatusCode,
+  isNotFound,
   KVReadOnlyOperations,
   Transaction,
   WaitFor,
@@ -65,9 +67,10 @@ function sender(answer: RawResponse) {
   };
 }
 
-const getAnswer = (version: bigint, value: string): RawResponse => {
+const getAnswer = (version: bigint, value: string, expiresAtMs?: bigint): RawResponse => {
   const v = enc.encode(value);
-  return { status: StatusCode.OK, data: new Uint8Array([...u64(version), v.length, 0, 0, 0, ...v]), requestId: 0n };
+  const expiry = expiresAtMs === undefined ? [0] : [1, ...u64(expiresAtMs)];
+  return { status: StatusCode.OK, data: new Uint8Array([...u64(version), v.length, 0, 0, 0, ...v, ...expiry]), requestId: 0n };
 };
 
 function refusal(status: StatusCode, reason: Reason): RawResponse {
@@ -78,9 +81,25 @@ describe("kv.get", () => {
   it("sends wait_ms, wait_for, routing_key and txn in order", async () => {
     const { s, sent } = sender(getAnswer(4n, "hi"));
     const got = await new KVOperations(s).get("k", { waitMs: 5000, waitFor: WaitFor.Change, routingKey: "rk" });
-    expect(got).toEqual({ version: 4n, value: enc.encode("hi") });
+    expect(got).toEqual({ version: 4n, value: enc.encode("hi"), expiresAtMs: null, stale: false });
     expect(sent.value).toEqual(new Uint8Array([1, ...u64(5000n), 1, 1, 1, 2, 0, ...enc.encode("rk"), 0]));
     expect(sent.options).toEqual(new Uint8Array(0));
+  });
+
+  it("reads the key's expiry, absent with no TTL", async () => {
+    const at = 1_800_000_000_123n;
+    expect(await new KVOperations(sender(getAnswer(4n, "hi", at)).s).get("k")).toEqual({ version: 4n, value: enc.encode("hi"), expiresAtMs: at, stale: false });
+    expect((await new KVOperations(sender(getAnswer(4n, "hi")).s).get("k"))!.expiresAtMs).toBeNull();
+    // Inside a transaction too.
+    expect((await new Transaction(sender(getAnswer(0n, "5", at)).s, "ns", "rk", 1n, 0n).get("k"))!.expiresAtMs).toBe(at);
+  });
+
+  it("refuses a bad presence byte and an answer cut inside the expiry", () => {
+    const head = [...u64(4n), 2, 0, 0, 0, ...enc.encode("hi")];
+    expect(() => decodeGetAnswer(new Uint8Array([...head, 2]))).toThrow(IncompleteResponseError);
+    expect(() => decodeGetAnswer(new Uint8Array([...head, 1, 1, 2, 3]))).toThrow(IncompleteResponseError);
+    expect(() => decodeGetAnswer(new Uint8Array([...head]))).toThrow(IncompleteResponseError);
+    expect(() => decodeGetAnswer(new Uint8Array([...head, 0, 0]))).toThrow(IncompleteResponseError);
   });
 
   it("is absent on reason not_found, and throws on any other not-found", async () => {
@@ -168,12 +187,13 @@ function seq(...answers: RawResponse[]) {
 describe("request bodies match the server's vectors", () => {
   const cases: [string, OpCode, string, string, (kv: KVOperations) => Promise<unknown>, string, unknown][] = [
     ["delete", OpCode.KVDelete, "k", "010700000000000000010200726b00", (kv) => kv.delete("k", { casVersion: 7n, routingKey: "rk" }), "0101", true],
-    ["scan", OpCode.KVScan, "p", "0102000000026331", (kv) => kv.scan("p", { limit: 2, cursor: enc.encode("c1") }), "02000100610200626201026332", { keys: ["a", "bb"], cursor: enc.encode("c2") }],
-    ["history", OpCode.KVHistory, "k", "010200000000", (kv) => kv.history("k", { limit: 2 }), "010300000000000000e803000000000000020000007633", [{ version: 3n, atMs: 1000n, value: enc.encode("v3") }]],
+    ["scan", OpCode.KVScan, "p", "0102000000026331", (kv) => kv.scan("p", { limit: 2, cursor: enc.encode("c1") }), "02000100610200626201026332", { keys: ["a", "bb"], cursor: enc.encode("c2"), stale: false }],
+    ["history", OpCode.KVHistory, "k", "01020000000000", (kv) => kv.history("k", { limit: 2 }), "020300000000000000e80300000000000000020000007633" + "0200000000000000f4010000000000000100000000" + "01", { versions: [{ version: 3n, atMs: 1000n, deleted: false, value: enc.encode("v3") }, { version: 2n, atMs: 500n, deleted: true, value: new Uint8Array(0) }], more: true, stale: false }],
+    ["history before a version", OpCode.KVHistory, "k", "010200000001070000000000000000", (kv) => kv.history("k", { limit: 2, beforeVersion: 7n }), "0000", { versions: [], more: false, stale: false }],
     ["incr", OpCode.KVIncr, "k", "01fbffffffffffffff0000", (kv) => kv.incr("k", { delta: -5n }), "010400000000000000012a00000000000000", { version: 4n, value: 42n }],
     ["expire", OpCode.KVExpire, "k", "60ea000000000000000000", (kv) => kv.expire("k", 60000), "", undefined],
-    ["exists", OpCode.KVExists, "k", "0000", (kv) => kv.exists("k"), "010500000000000000", true],
-    ["jsonGet", OpCode.KVJsonGet, "k", "010300242e6100", (kv) => kv.jsonGet("k", "$.a"), "0300000000000000020000007b7d", { version: 3n, value: enc.encode("{}") }],
+    ["exists", OpCode.KVExists, "k", "0000", (kv) => kv.exists("k"), "010500000000000000", { exists: true, version: 5n, stale: false }],
+    ["jsonGet", OpCode.KVJsonGet, "k", "010300242e6100", (kv) => kv.jsonGet("k", "$.a"), "0300000000000000020000007b7d", { version: 3n, value: enc.encode("{}"), stale: false }],
     ["jsonSet", OpCode.KVJsonSet, "k", "01010024020000007b7d010200726b", (kv) => kv.jsonSet("k", "$", enc.encode("{}"), { routingKey: "rk" }), "0300000000000000", { version: 3n }],
     ["jsonDel", OpCode.KVJsonDel, "k", "010300242e6200", (kv) => kv.jsonDel("k", "$.b"), "00", null],
   ];
@@ -186,13 +206,13 @@ describe("request bodies match the server's vectors", () => {
   }
 
   it("history with a routing key", async () => {
-    const { s, sent } = seq(ok("00"));
-    expect(await new KVOperations(s).history("k", { limit: 2, routingKey: "rk" })).toEqual([]);
-    expect(sent[0]!.value).toEqual(hex("0102000000" + "01" + "0200" + "726b"));
+    const { s, sent } = seq(ok("0000"));
+    expect(await new KVOperations(s).history("k", { limit: 2, routingKey: "rk" })).toEqual({ versions: [], more: false, stale: false });
+    expect(sent[0]!.value).toEqual(hex("0102000000" + "00" + "01" + "0200" + "726b"));
   });
 
   it("history of a missing key is empty", async () => {
-    expect(await new KVOperations(seq(refusal(StatusCode.NotFound, Reason.NotFound)).s).history("k")).toEqual([]);
+    expect(await new KVOperations(seq(refusal(StatusCode.NotFound, Reason.NotFound)).s).history("k")).toEqual({ versions: [], more: false, stale: false });
     const err = await new KVOperations(seq(refusal(StatusCode.NotFound, Reason.NoSuchTransaction)).s).history("k").catch((e) => e);
     expect((err as ServerError).reason).toBe(Reason.NoSuchTransaction);
   });
@@ -207,14 +227,14 @@ describe("request bodies match the server's vectors", () => {
 
   it("scan's last page has no cursor", async () => {
     const { s } = seq(ok("000000"));
-    expect(await new KVOperations(s).scan("")).toEqual({ keys: [], cursor: null });
+    expect(await new KVOperations(s).scan("")).toEqual({ keys: [], cursor: null, stale: false });
   });
 
   it("mget", async () => {
     const { s, sent } = seq(ok("0200010200000000000000010000007800000000000000000000000000" + "00"));
     expect(await new KVOperations(s).mget(["a", "b"])).toEqual([
-      { key: "a", found: true, version: 2n, value: enc.encode("x") },
-      { key: "b", found: false, version: 0n, value: new Uint8Array(0) },
+      { key: "a", found: true, version: 2n, value: enc.encode("x"), stale: false },
+      { key: "b", found: false, version: 0n, value: new Uint8Array(0), stale: false },
     ]);
     expect(sent[0]).toEqual({ op: OpCode.KVMGet, key: "", value: hex("020001006101006200"), options: new Uint8Array(0) });
   });
@@ -311,7 +331,7 @@ describe("transaction ops", () => {
     await txn.delete("k");
     await txn.incr("k", -5n);
     await txn.expire("k", 0);
-    expect(await txn.exists("k")).toBe(false);
+    expect(await txn.exists("k")).toEqual({ exists: false, version: 0n, stale: false });
     const rk = "010200726b";
     const t = "01" + "0900000000000000";
     expect(sent.map((x) => [x.op, x.key])).toEqual([
@@ -377,6 +397,9 @@ describe("answers are decoded whole", () => {
     ["delete, null outside a transaction", (kv) => kv.delete("k"), "00"],
     ["scan, truncated name", (kv) => kv.scan("p"), "0100050061"],
     ["history, truncated", (kv) => kv.history("k"), "0103000000"],
+    ["history, bad deleted bool", (kv) => kv.history("k"), "010300000000000000e8030000000000000202000000763300"],
+    ["history, no more", (kv) => kv.history("k"), "010300000000000000e80300000000000000020000007633"],
+    ["history, bad more bool", (kv) => kv.history("k"), "0002"],
     ["incr, truncated", (kv) => kv.incr("k"), "010400000000000000"],
     ["expire, trailing", (kv) => kv.expire("k", 1), "00"],
     ["exists, trailing", (kv) => kv.exists("k"), "01050000000000000000"],
@@ -415,5 +438,52 @@ describe("the worker refusals", () => {
       const err = createServerError(StatusCode.BadRequest, new Uint8Array([reason, 0, Ran.No, 0x78]));
       expect(err).toMatchObject({ status: StatusCode.BadRequest, reason, ran: Ran.No });
     }
+  });
+});
+
+describe("a halted shard's reads", () => {
+  it("come back stale, not as errors, on every KV read", async () => {
+    const stale = (h: string): RawResponse => ({ ...ok(h), stale: true });
+    const { s } = seq(
+      stale("0400000000000000020000006869" + "00"),
+      stale("0300000000000000020000007b7d"),
+      stale("0100" + "01" + "0200000000000000" + "0100000078" + "00"),
+      stale("000000"),
+      stale("0000"),
+      stale("010500000000000000")
+    );
+    const kv = new KVOperations(s);
+    expect((await kv.get("k"))!.stale).toBe(true);
+    expect((await kv.jsonGet("k"))!.stale).toBe(true);
+    expect((await kv.mget(["a"]))[0]!.stale).toBe(true);
+    expect((await kv.scan("")).stale).toBe(true);
+    expect((await kv.history("k")).stale).toBe(true);
+    expect((await kv.exists("k")).stale).toBe(true);
+  });
+});
+
+describe("a key a halted shard didn't find", () => {
+  const staleRefusal = (r: Reason): RawResponse => ({ ...refusal(StatusCode.NotFound, r), stale: true });
+
+  it("is a StaleNotFoundError from get and jsonGet, not plain absent", async () => {
+    for (const call of [(kv: KVOperations) => kv.get("k"), (kv: KVOperations) => kv.jsonGet("k")]) {
+      const err = await call(new KVOperations(seq(staleRefusal(Reason.NotFound)).s)).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(StaleNotFoundError);
+      expect(isNotFound(err)).toBe(true);
+      expect(err).toMatchObject({ stale: true, status: StatusCode.NotFound, reason: Reason.NotFound, serverMessage: "why" });
+      // Without the flag it is plain absent, as before.
+      expect(await call(new KVOperations(seq(refusal(StatusCode.NotFound, Reason.NotFound)).s))).toBeNull();
+    }
+    const txn = new Transaction(seq(staleRefusal(Reason.NotFound)).s, "ns", "rk", 1n, 0n);
+    await expect(txn.get("k")).rejects.toBeInstanceOf(StaleNotFoundError);
+  });
+
+  it("keeps the stale mark on exists, an mget entry and history", async () => {
+    const stale = (h: string): RawResponse => ({ ...ok(h), stale: true });
+    const { s } = seq(stale("000000000000000000"), stale("0100" + "00" + "00".repeat(12) + "00"), staleRefusal(Reason.NotFound));
+    const kv = new KVOperations(s);
+    expect(await kv.exists("k")).toEqual({ exists: false, version: 0n, stale: true });
+    expect(await kv.mget(["a"])).toEqual([{ key: "a", found: false, version: 0n, value: new Uint8Array(0), stale: true }]);
+    expect(await kv.history("k")).toEqual({ versions: [], more: false, stale: true });
   });
 });

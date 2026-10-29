@@ -91,7 +91,7 @@ function hex16(n: bigint): string {
 }
 
 /**
- * Error thrown when CRC32 checksum validation fails.
+ * Error thrown when a frame fails its CRC32C checksum.
  */
 export class InvalidChecksumError extends FloError {
   constructor(expected: number, actual: number) {
@@ -99,6 +99,17 @@ export class InvalidChecksumError extends FloError {
       `flo: invalid checksum: expected 0x${expected.toString(16).padStart(8, "0")}, got 0x${actual.toString(16).padStart(8, "0")}`
     );
     this.name = "InvalidChecksumError";
+  }
+}
+
+/**
+ * Error thrown when an answer's header claims more data than the server
+ * ever sends. The connection is closed: nothing after it can be framed.
+ */
+export class AnswerTooLargeError extends FloError {
+  constructor(dataLen: number, max: number) {
+    super(`flo: answer of ${dataLen} data bytes is over the ${max} an answer carries`);
+    this.name = "AnswerTooLargeError";
   }
 }
 
@@ -207,6 +218,20 @@ export class NotFoundError extends ServerError {
 }
 
 /**
+ * Error thrown by a KV get or JSON get whose key was not found by a halted
+ * shard: absent as of the entry the shard halted at, not necessarily now.
+ * It is a NotFoundError, so `isNotFound` still matches; `stale` is true.
+ */
+export class StaleNotFoundError extends NotFoundError {
+  readonly stale = true;
+
+  constructor(message?: string) {
+    super(message);
+    this.name = "StaleNotFoundError";
+  }
+}
+
+/**
  * Error thrown when the request parameters are invalid.
  */
 export class BadRequestError extends ServerError {
@@ -249,12 +274,28 @@ export class OverloadedError extends ServerError {
 /**
  * Error thrown when a write reached no leader, or the shard stopped taking
  * writes or is offline. Retryable, but an offline shard stays unavailable
- * until an operator acts; the server's message says which case it is.
+ * until an operator acts; the server's message says which case it is. With
+ * reason `ShardHalted` the shard halted and takes no writes until an
+ * operator repairs it; the client doesn't retry that one.
  */
 export class UnavailableError extends ServerError {
   constructor(message?: string) {
     super(StatusCode.Unavailable, message);
     this.name = "UnavailableError";
+  }
+}
+
+/**
+ * Error thrown for a write that committed but hasn't applied: its shard
+ * halted at it or before it (reason `ShardHalted`, ran `Unknown`). The
+ * message says whether it applies when the shard resumes. Never resent:
+ * the write is committed, so sending it again would write it twice, or
+ * halt again.
+ */
+export class OutcomePendingError extends ServerError {
+  constructor(message?: string) {
+    super(StatusCode.OutcomePending, message);
+    this.name = "OutcomePendingError";
   }
 }
 
@@ -312,6 +353,8 @@ function serverErrorFor(status: StatusCode, message: string): ServerError {
       return new UnavailableError(message);
     case StatusCode.InternalError:
       return new InternalError(message);
+    case StatusCode.OutcomePending:
+      return new OutcomePendingError(message);
     default:
       return new ServerError(status, message);
   }
@@ -357,6 +400,13 @@ export function isOverloaded(err: unknown): err is OverloadedError {
  */
 export function isUnavailable(err: unknown): err is UnavailableError {
   return err instanceof ServerError && err.status === StatusCode.Unavailable;
+}
+
+/**
+ * Check if an error is an OutcomePendingError.
+ */
+export function isOutcomePending(err: unknown): err is OutcomePendingError {
+  return err instanceof ServerError && err.status === StatusCode.OutcomePending;
 }
 
 /**

@@ -76,11 +76,11 @@ interface ClientOptions {
 | `delete` | `delete(key, opts?) → Promise<boolean>` | Delete key; whether it existed (a missing key is not an error) |
 | `mget` | `mget(keys, opts?) → Promise<MGetEntry[]>` | Up to 256 keys of at most 4096 bytes; one entry per key, in order. `routingKey` looks every key up on that routing key's shard |
 | `scan` | `scan(prefix, opts?) → Promise<ScanResult>` | One page of key names (`keys`) and the next page's `cursor` (null on the last) |
-| `history` | `history(key, opts?) → Promise<VersionEntry[]>` | Versions newest first: `version`, `atMs` (write time), `value`; none for a missing key |
+| `history` | `history(key, opts?) → Promise<HistoryResult>` | A page of `versions`, newest first: `version`, `atMs` (write time), `deleted`, `value`; none for a missing key. `limit` (1 to 65, default 10) and `beforeVersion` (exclusive) pick the page; `more` says older versions follow: pass the page's last version as `beforeVersion` |
 | `incr` | `incr(key, opts?) → Promise<KVIncrResult>` | Add `delta` (default 1) to a counter; its new `value` and `version` |
 | `expire` | `expire(key, ttlMs, opts?) → Promise<void>` | Set a key's TTL in ms; 0 clears it |
-| `exists` | `exists(key, opts?) → Promise<boolean>` | Whether the key is present |
-| `jsonGet` | `jsonGet(key, path = "$", opts?) → Promise<GetResult \| null>` | The JSON at `path`; null if the key or path is missing |
+| `exists` | `exists(key, opts?) → Promise<KVExistsResult>` | Whether the key is present (`exists`), and its `version`. **An object, so always truthy: read `.exists`; `if (await kv.exists(k))` is always true** |
+| `jsonGet` | `jsonGet(key, path = "$", opts?) → Promise<JsonGetResult \| null>` | The JSON at `path`; null if the key or path is missing |
 | `jsonSet` | `jsonSet(key, path, json, opts?) → Promise<PutResult>` | Set the JSON at `path` ("$" replaces the document) |
 | `jsonDel` | `jsonDel(key, path = "$", opts?) → Promise<bigint \| null>` | Remove the JSON at `path`; the new version, or null when "$" deleted the key |
 | `begin` | `begin(routingKey, opts?) → Promise<Transaction>` | Open a transaction on `routingKey`'s shard |
@@ -88,6 +88,28 @@ interface ClientOptions {
 Every op takes `namespace` in its options; every op but `scan` takes
 `routingKey`, which routes the request in place of the key.
 `delete` and `expire` take `casVersion`: the key's version they require.
+
+Every KV read result (`get`, `jsonGet`, each `mget` entry, `scan`,
+`history`, `exists`) carries `stale`. It is set when a halted shard
+answered: the read succeeded, served from the shard's state just before the
+entry it halted at, and nothing written since. It is not an error. A key
+such a shard didn't find is not reported as absent: `get` and `jsonGet`
+throw `StaleNotFoundError` (a `NotFoundError` with `stale` true), since the
+key was absent only as of the halt. Only KV reads carry `stale` for now:
+other reads (streams, queues) and the read-only client's `get` drop it.
+
+`history` returns one page at a time. To read every kept version:
+
+```typescript
+let beforeVersion: bigint | undefined;
+for (;;) {
+  const page = await client.kv.history("k", { limit: 20, beforeVersion });
+  for (const v of page.versions) console.log(v.version, v.deleted, v.value);
+  const last = page.versions.at(-1);
+  if (!page.more || last === undefined) break;
+  beforeVersion = last.version;
+}
+```
 
 #### Get Options
 
@@ -224,7 +246,8 @@ Workers execute tasks for registered actions.
 | `touch` | `touch(workerId, taskId, opts?) → Promise<void>` | Extend task lease |
 | `complete` | `complete(workerId, taskId, result, opts?) → Promise<void>` | Complete task |
 | `fail` | `fail(workerId, taskId, error, opts?) → Promise<void>` | Fail task |
-| `list` | `list({ limit?, cursor? }?) → Promise<WorkerListResult>` | A page of workers in id order; pass `cursor` on for the next, null on the last |
+| `list` | `list({ limit?, cursor?, action? }?) → Promise<WorkerListResult>` | A page of workers in id order, or only those that run `action`; pass `cursor` on for the next, null on the last |
+| `info` | `info(workerId, opts?) → Promise<WorkerInfoResult>` | A worker's row (as `list` shows it, with `machineId`), its registered `metadata` (bytes, or null) and its `processes` (`name`, `kind`, `runCount`, `failCount`, `lastRunAtMs`); throws `NotFoundError` for a worker that isn't registered |
 
 #### Worker Example
 
@@ -364,11 +387,13 @@ try {
 | `TimeoutError` | Operation timed out |
 | `BlockTooLongError` | `blockMs` or `waitMs` over 300000, refused before sending |
 | `NotFoundError` | Resource not found |
+| `StaleNotFoundError` | A `NotFoundError` from `get` or `jsonGet` on a halted shard: the key was absent as of the halt; `stale` is true |
 | `ConflictError` | CAS version mismatch |
 | `BadRequestError` | Invalid request |
 | `UnauthorizedError` | Authentication failed |
 | `OverloadedError` | Server overloaded, and the client's retries ran out |
-| `UnavailableError` | No leader, or the shard isn't taking writes, and the client's retries ran out |
+| `UnavailableError` | No leader, or the shard isn't taking writes, and the client's retries ran out. With `reason === Reason.ShardHalted` the shard halted, and takes no writes until an operator repairs it; never retried |
+| `OutcomePendingError` | The write committed but hasn't applied: its shard halted at it or before it (`reason` ShardHalted, `ran` Unknown); the message says whether it applies when the shard resumes. Never retried |
 | `InternalError` | Internal server error |
 
 ### Retries
@@ -377,7 +402,22 @@ When the server refuses a request as `overloaded` or `unavailable` and says it
 didn't run it (`err.ran === Ran.No`), the client sends it again itself, as a
 new request, after a jittered wait. Because the server never ran it, this is
 safe for writes too. Any other refusal, or one that may have run, comes
-straight back.
+straight back. Two never come back to be retried: `unavailable` with reason
+`shard_halted` (an operator has to repair the shard, so resending is no
+use), and `outcome_pending` (the write is committed; resending it would
+write it twice, or halt the shard again).
+
+Workers are different: registering, a `StreamWorker`'s group join and the
+poll loops are safe to repeat, so on `unavailable` with reason
+`shard_halted` (not run) a worker keeps trying,
+waiting from 100 ms doubling to 30 s and logging each refusal at warn with
+the server's message, and carries on by itself once the shard is repaired.
+A worker started during a halt comes up once it is. `stop()` or `drain()`
+ends a wait at once. An `outcome_pending` refusal of any of those calls
+(an action registration, say, committed at the entry the shard halted at)
+is not resent: `start()` throws `OutcomePendingError` with the server's
+message. A handler's result (complete, fail, ack, nack) refused by a halted
+shard is logged and dropped, not resent.
 
 | `retry` field | Default | |
 |---|---|---|
@@ -406,12 +446,18 @@ dropped. Delivery is at-least-once: a handler may see the same task or record
 again, so make it safe to repeat.
 
 `drain()` stops issuing polls and lets the running handlers finish,
-heartbeats going on; an outstanding poll still returns within `blockMs`. The
-server is told (again after the worker registers anew, and on a retry if the
-notice is lost), so it assigns an action worker nothing more, and `start()`
-returns once the last handler has reported. A drain started on the server
-does the same. `stop()` ends polling, also mid-reconnect or mid-drain, once
-an outstanding poll returns;
+heartbeats going on. The server is told (again after the worker registers
+anew, and on a retry if the notice is lost), so it assigns an action worker
+nothing more, and `start()` returns once the last handler has reported. A
+drain started on the server does the same. An `ActionWorker`'s outstanding
+poll is answered at once when the server takes the drain, refused
+`worker_draining`, so it learns of a server-side drain at once. A
+`StreamWorker`'s is not: the server doesn't wake a group read, so a drain
+started on the server reaches it at its next heartbeat (`heartbeatIntervalMs`,
+30 s by default); and the worker has one connection, which it keeps, so its
+outstanding read can wait up to `blockMs`. `stop()` ends polling, also
+mid-reconnect or mid-drain, once an outstanding poll returns (within
+`blockMs`);
 running handlers still finish, and a `StreamWorker` hands back the records of
 its last batch it hasn't started. Either one before or during `start()` ends
 that run, and both workers can be started again afterwards.

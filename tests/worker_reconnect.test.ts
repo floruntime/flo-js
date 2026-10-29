@@ -6,7 +6,7 @@
 
 import * as net from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HEADER_SIZE, MAGIC, OpCode, TABLE_HASH, VERSION, computeCRC32, type Logger } from "@floruntime/core";
+import { HEADER_SIZE, MAGIC, OpCode, TABLE_HASH, VERSION, computeCRC32C, type Logger } from "@floruntime/core";
 import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
 import { reconnect } from "../packages/node/src/reconnect.js";
 
@@ -19,7 +19,7 @@ function reply(id: bigint, data: Uint8Array = new Uint8Array(0)): Uint8Array {
   buf[20] = VERSION;
   view.setBigUint64(24, TABLE_HASH, true);
   buf.set(data, HEADER_SIZE);
-  view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
+  view.setUint32(16, computeCRC32C(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
   return buf;
 }
 

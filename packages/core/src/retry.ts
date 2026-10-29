@@ -3,13 +3,15 @@
  */
 
 import { createServerError, ServerError } from "./errors.js";
-import { Ran, type RawResponse, StatusCode } from "./types.js";
+import { Ran, type RawResponse, Reason, StatusCode } from "./types.js";
 
 /**
  * How often a request the server refused without running it is sent again.
  * Only a refusal whose status is overloaded or unavailable and whose `ran`
  * is `Ran.No` is retried: the server says it never ran, so resending is safe
- * for any operation, writes included. Each retry is a new request with a
+ * for any operation, writes included. Unavailable with reason ShardHalted
+ * is not retried (an operator has to repair the shard), nor is outcome
+ * pending (the write committed; resending it would write it twice). Each retry is a new request with a
  * new id; the server routes it afresh.
  */
 export interface RetryPolicy {
@@ -69,12 +71,17 @@ export function refusedUnrun(resp: RawResponse): boolean {
   return isRefusedUnrun(createServerError(resp.status, resp.data));
 }
 
-/** Whether err is a refusal the server says it didn't run, worth trying again later. */
+/**
+ * Whether err is a refusal the server says it didn't run, worth trying
+ * again later. A halted shard (reason ShardHalted) isn't: it takes no
+ * writes until an operator repairs it.
+ */
 export function isRefusedUnrun(err: unknown): boolean {
   return (
     err instanceof ServerError &&
     (err.status === StatusCode.Overloaded || err.status === StatusCode.Unavailable) &&
-    err.ran === Ran.No
+    err.ran === Ran.No &&
+    err.reason !== Reason.ShardHalted
   );
 }
 

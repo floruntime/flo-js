@@ -20,8 +20,10 @@ import {
   UnexpectedEOFError,
   VERSION,
   TABLE_HASH,
+  MAX_ANSWER_BYTES,
+  AnswerTooLargeError,
   TableMismatchError,
-  computeCRC32,
+  computeCRC32C,
   parseResponseHeader,
   requestBlockMs,
   requestTakesItems,
@@ -58,7 +60,7 @@ function response(id: bigint, data: Uint8Array = new Uint8Array(0), status = 0):
   view.setBigUint64(24, TABLE_HASH, true);
   buf[21] = status;
   buf.set(data, HEADER_SIZE);
-  view.setUint32(16, computeCRC32(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
+  view.setUint32(16, computeCRC32C(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
   return buf;
 }
 
@@ -328,12 +330,38 @@ describe("TcpTransport framing and failures", () => {
     });
   });
 
+  it("refuses an answer claiming more than an answer carries, from its header alone", async () => {
+    let serverSock: net.Socket | undefined;
+    const t = await connect((sock, id) => {
+      serverSock = sock;
+      // Only the header is sent: the client must not wait for the rest.
+      const r = response(id).subarray(0, HEADER_SIZE);
+      new DataView(r.buffer, r.byteOffset, r.byteLength).setUint32(4, MAX_ANSWER_BYTES - HEADER_SIZE + 1, true);
+      sock.write(r);
+    });
+    const err = await t.sendAndReceive(request(1n)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AnswerTooLargeError);
+    expect((err as Error).message).toContain(`${MAX_ANSWER_BYTES - HEADER_SIZE + 1}`);
+    expect(t.isConnected()).toBe(false);
+    await new Promise<void>((resolve) => {
+      if (serverSock!.readableEnded) resolve();
+      else serverSock!.once("end", () => resolve());
+    });
+  });
+
+  it("takes an answer of exactly the most an answer carries", async () => {
+    const body = new Uint8Array(MAX_ANSWER_BYTES - HEADER_SIZE);
+    const t = await connect((sock, id) => sock.write(response(id, body)));
+    const got = await t.sendAndReceive(request(1n));
+    expect(got.length).toBe(MAX_ANSWER_BYTES);
+  });
+
   it("refuses an answer from another table unread and closes the connection", async () => {
     const t = await connect((sock, id) => {
       const r = response(id, enc.encode("from elsewhere"));
       const view = new DataView(r.buffer, r.byteOffset, r.byteLength);
       view.setBigUint64(24, TABLE_HASH + 1n, true);
-      view.setUint32(16, computeCRC32(r.subarray(0, HEADER_SIZE), r.subarray(HEADER_SIZE)), true);
+      view.setUint32(16, computeCRC32C(r.subarray(0, HEADER_SIZE), r.subarray(HEADER_SIZE)), true);
       sock.write(r);
     });
     const err = await t.sendAndReceive(request(1n)).catch((e: unknown) => e);

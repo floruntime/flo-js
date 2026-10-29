@@ -9,13 +9,15 @@ import {
   StatusCode,
   createServerError,
   HEADER_SIZE,
+  MAX_ANSWER_BYTES,
+  AnswerTooLargeError,
   InvalidChecksumError,
   InvalidEndpointError,
   NotConnectedError,
   TimeoutError,
   type Transport,
   UnexpectedEOFError,
-  computeCRC32,
+  computeCRC32C,
   parseResponseHeader,
   requestBlockMs,
   requestTakesItems,
@@ -273,6 +275,12 @@ export class TcpTransport implements Transport {
         return;
       }
 
+      // Refused before buffering it: no answer is this large.
+      if (dataLen > MAX_ANSWER_BYTES - HEADER_SIZE) {
+        this.failAndDestroy(new AnswerTooLargeError(dataLen, MAX_ANSWER_BYTES - HEADER_SIZE));
+        return;
+      }
+
       const totalLen = HEADER_SIZE + dataLen;
       if (this.receivedLen < totalLen) return;
       if (this.received[0]!.length < totalLen) this.joinReceived();
@@ -305,7 +313,7 @@ export class TcpTransport implements Transport {
       }
       this.pending.delete(requestId);
 
-      const computedCRC = computeCRC32(result.subarray(0, HEADER_SIZE), payload);
+      const computedCRC = computeCRC32C(result.subarray(0, HEADER_SIZE), payload);
       if (expectedCRC !== computedCRC) {
         pending.reject(new InvalidChecksumError(expectedCRC, computedCRC));
       } else {

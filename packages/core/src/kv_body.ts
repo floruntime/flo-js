@@ -11,6 +11,7 @@ import {
   Condition,
   type GetOptions,
   type GetResult,
+  type JsonGetResult,
   type KVCommitResult,
   type KVIncrResult,
   MAX_KV_VALUE_SIZE,
@@ -20,8 +21,12 @@ import {
   type PutResult,
   type ScanResult,
   type VersionEntry,
+  type HistoryResult,
   WaitFor,
   type WorkerInfo,
+  type WorkerInfoResult,
+  type WorkerProcess,
+  type ProcessKind,
   type WorkerListResult,
   type WorkerStatus,
   type WorkerType,
@@ -77,6 +82,7 @@ const TABLE_OPS: ReadonlySet<OpCode> = new Set([
   OpCode.KVExists,
   OpCode.ActionStatus,
   OpCode.WorkerList,
+  OpCode.WorkerInfo,
 ]);
 
 /** Whether `op`'s request carries a schema-coded body, not a value and options. */
@@ -275,12 +281,14 @@ export function encodeScanBody(limit: number, cursor: Uint8Array | undefined): U
   return w.build();
 }
 
-/** kv.history's request: limit (1 to 65), routing_key. */
-export function encodeHistoryBody(limit: number, opts?: { routingKey?: string }): Uint8Array {
+/** kv.history's request: limit (1 to 65), before_version, routing_key. */
+export function encodeHistoryBody(limit: number, opts?: { beforeVersion?: bigint; routingKey?: string }): Uint8Array {
   checkLimit("limit", limit, MAX_HISTORY_LIMIT);
+  checkU64("beforeVersion", opts?.beforeVersion);
   const w = new BodyWriter();
   w.u8(1);
   w.u32(limit);
+  w.optU64(opts?.beforeVersion);
   w.routingKey(opts?.routingKey);
   return w.build();
 }
@@ -385,13 +393,14 @@ export function encodeTxnBody(txn: bigint): Uint8Array {
   return w.build();
 }
 
-/** kv.get's answer: version, value. */
-export function decodeGetAnswer(data: Uint8Array): GetResult {
+/** kv.get's answer: version, value, expires_at_ms (absent with no TTL). */
+export function decodeGetAnswer(data: Uint8Array, stale = false): GetResult {
   const r = new AnswerReader(data);
   const version = r.u64();
   const value = r.bytes32();
+  const expiresAtMs = r.present() ? r.i64() : null;
   r.end();
-  return { version, value };
+  return { version, value, expiresAtMs, stale };
 }
 
 /** kv.set's answer: its version, absent inside a transaction (0n then). */
@@ -411,27 +420,29 @@ export function decodeDeleteAnswer(data: Uint8Array): boolean | null {
 }
 
 /** kv.scan's answer: names, then the next page's cursor (null on the last page). */
-export function decodeScanAnswer(data: Uint8Array): ScanResult {
+export function decodeScanAnswer(data: Uint8Array, stale = false): ScanResult {
   const r = new AnswerReader(data);
   const keys: string[] = [];
   for (let n = r.u16(); n > 0; n--) keys.push(r.string16());
   const cursor = r.present() ? r.bytes8() : null;
   r.end();
-  return { keys, cursor };
+  return { keys, cursor, stale };
 }
 
-/** kv.history's answer: versions, newest first. */
-export function decodeHistoryAnswer(data: Uint8Array): VersionEntry[] {
+/** kv.history's answer: versions, newest first, then whether older ones follow. */
+export function decodeHistoryAnswer(data: Uint8Array, stale = false): HistoryResult {
   const r = new AnswerReader(data);
   const out: VersionEntry[] = [];
   for (let n = r.u8(); n > 0; n--) {
     const version = r.u64();
     const atMs = r.i64();
+    const deleted = r.bool();
     const value = r.bytes32();
-    out.push({ version, atMs, value });
+    out.push({ version, atMs, deleted, value });
   }
+  const more = r.bool();
   r.end();
-  return out;
+  return { versions: out, more, stale };
 }
 
 /** One kv.mget answer: the entries it holds, and the index of the first key it didn't answer. */
@@ -481,12 +492,12 @@ export function decodeExistsAnswer(data: Uint8Array): { exists: boolean; version
 }
 
 /** kv.json_get's answer: version, document. */
-export function decodeJsonGetAnswer(data: Uint8Array): GetResult {
+export function decodeJsonGetAnswer(data: Uint8Array, stale = false): JsonGetResult {
   const r = new AnswerReader(data);
   const version = r.u64();
   const value = r.bytes32();
   r.end();
-  return { version, value };
+  return { version, value, stale };
 }
 
 /** kv.json_set's answer: version. */
@@ -552,8 +563,8 @@ export function decodeActionStatusAnswer(runId: string, data: Uint8Array): impor
   return { runId, status, createdAtMs, startedAtMs, completedAtMs, attempt, output, errorMessage, workerId };
 }
 
-/** worker.list's request: limit (1 to 1024), cursor (empty for the first page). */
-export function encodeWorkerListBody(limit: number, cursor: Uint8Array | null | undefined): Uint8Array {
+/** worker.list's request: limit (1 to 1024), cursor (empty for the first page), action (empty for every worker). */
+export function encodeWorkerListBody(limit: number, cursor: Uint8Array | null | undefined, action?: string): Uint8Array {
   checkLimit("limit", limit, MAX_WORKER_LIST_LIMIT);
   const c = cursor ?? new Uint8Array(0);
   if (c.length > MAX_WORKER_ID) throw new FloError(`flo: worker list cursor is ${c.length} bytes, at most ${MAX_WORKER_ID}`);
@@ -561,43 +572,67 @@ export function encodeWorkerListBody(limit: number, cursor: Uint8Array | null | 
   w.u8(1);
   w.u32(limit);
   w.bytes16(c);
+  w.bytes16(textEncoder.encode(action ?? ""));
   return w.build();
 }
 
 const WORKER_TYPES = 2; // action, stream
 const WORKER_STATUSES = 4; // active, idle, draining, unhealthy
+const PROCESS_KINDS = 2; // action, stream_consumer
+
+/** One worker row, as worker.list and worker.info answer it. */
+function readWorkerRow(r: AnswerReader): WorkerInfo {
+  const id = r.string16();
+  const type = r.u8();
+  if (type >= WORKER_TYPES) throw new IncompleteResponseError(`worker type ${type} is not one this client knows`);
+  const status = r.u8();
+  if (status >= WORKER_STATUSES) throw new IncompleteResponseError(`worker status ${status} is not one this client knows`);
+  const currentLoad = r.u32();
+  const maxConcurrency = r.u32();
+  const tasksCompleted = r.u64();
+  const tasksFailed = r.u64();
+  const registeredAtMs = r.i64();
+  const lastHeartbeatMs = r.i64();
+  const machineId = r.present() ? new TextDecoder().decode(r.bytes8()) : undefined;
+  return {
+    id,
+    type: type as WorkerType,
+    status: status as WorkerStatus,
+    currentLoad,
+    maxConcurrency,
+    tasksCompleted,
+    tasksFailed,
+    registeredAtMs,
+    lastHeartbeatMs,
+    machineId,
+  };
+}
 
 /** worker.list's answer: the page's workers in id order, then the next page's cursor (null on the last page). */
 export function decodeWorkerListAnswer(data: Uint8Array): WorkerListResult {
   const r = new AnswerReader(data);
   const workers: WorkerInfo[] = [];
-  for (let n = r.u16(); n > 0; n--) {
-    const id = r.string16();
-    const type = r.u8();
-    if (type >= WORKER_TYPES) throw new IncompleteResponseError(`worker type ${type} is not one this client knows`);
-    const status = r.u8();
-    if (status >= WORKER_STATUSES) throw new IncompleteResponseError(`worker status ${status} is not one this client knows`);
-    const currentLoad = r.u32();
-    const maxConcurrency = r.u32();
-    const tasksCompleted = r.u64();
-    const tasksFailed = r.u64();
-    const registeredAtMs = r.i64();
-    const lastHeartbeatMs = r.i64();
-    const machineId = r.present() ? new TextDecoder().decode(r.bytes8()) : undefined;
-    workers.push({
-      id,
-      type: type as WorkerType,
-      status: status as WorkerStatus,
-      currentLoad,
-      maxConcurrency,
-      tasksCompleted,
-      tasksFailed,
-      registeredAtMs,
-      lastHeartbeatMs,
-      machineId,
-    });
-  }
+  for (let n = r.u16(); n > 0; n--) workers.push(readWorkerRow(r));
   const cursor = r.present() ? r.bytes16() : null;
   r.end();
   return { workers, cursor };
+}
+
+/** worker.info's answer: the worker's row, its metadata, then its processes. */
+export function decodeWorkerInfoAnswer(data: Uint8Array): WorkerInfoResult {
+  const r = new AnswerReader(data);
+  const worker = readWorkerRow(r);
+  const metadata = r.present() ? r.bytes16() : null;
+  const processes: WorkerProcess[] = [];
+  for (let n = r.u16(); n > 0; n--) {
+    const name = r.string16();
+    const kind = r.u8();
+    if (kind >= PROCESS_KINDS) throw new IncompleteResponseError(`process kind ${kind} is not one this client knows`);
+    const runCount = r.u64();
+    const failCount = r.u64();
+    const lastRunAtMs = r.i64();
+    processes.push({ name, kind: kind as ProcessKind, runCount, failCount, lastRunAtMs });
+  }
+  r.end();
+  return { worker, metadata, processes };
 }

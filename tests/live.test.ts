@@ -13,7 +13,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { TABLE_HASH, VERSION, WorkerStatus, WorkerType, type WorkerInfo } from "@floruntime/core";
+import { NotFoundError, ProcessKind, Ran, Reason, ServerError, StatusCode, TABLE_HASH, VERSION, WorkerStatus, WorkerType, type WorkerInfo } from "@floruntime/core";
 import { ActionWorker, FloClient } from "@floruntime/node";
 
 const endpoint = process.env.FLO_ENDPOINT ?? "";
@@ -64,6 +64,55 @@ describe.skipIf(!endpoint)("live", () => {
       { key: "missing", found: false, value: null, version: 0n },
       { key: "b", found: true, value: "2", version: b!.version },
     ]);
+  });
+
+  it("gets a key's expiry, absolute, and none without a TTL", async () => {
+    const { client } = await liveClient();
+    const ttl = 60000n;
+    const before = BigInt(Date.now());
+    await client.kv.put("t", encoder.encode("v"), { ttlMs: ttl });
+    const after = BigInt(Date.now());
+    const got = await client.kv.get("t");
+    expect(got!.expiresAtMs).not.toBeNull();
+    expect(got!.expiresAtMs! >= before + ttl && got!.expiresAtMs! <= after + ttl, `${got!.expiresAtMs} not in [${before + ttl}, ${after + ttl}]`).toBe(true);
+    await client.kv.put("p", encoder.encode("v"));
+    expect((await client.kv.get("p"))!.expiresAtMs).toBeNull();
+  });
+
+  it("shows a deleted version in a key's history", async () => {
+    const { client } = await liveClient();
+    await client.kv.put("h", encoder.encode("one"));
+    await client.kv.delete("h");
+    await client.kv.put("h", encoder.encode("three"));
+    const { versions, more, stale } = await client.kv.history("h");
+    expect([more, stale]).toEqual([false, false]);
+    expect(versions.map((v) => ({ deleted: v.deleted, value: decoder.decode(v.value) }))).toEqual([
+      { deleted: false, value: "three" },
+      { deleted: true, value: "" },
+      { deleted: false, value: "one" },
+    ]);
+  });
+
+  it("pages a key's history with beforeVersion, newest first, each version once", async () => {
+    const { client } = await liveClient();
+    const written: bigint[] = [];
+    for (let i = 1; i <= 5; i++) written.push((await client.kv.put("pg", encoder.encode(`v${i}`))).version);
+    const pages: { versions: bigint[]; more: boolean }[] = [];
+    let before: bigint | undefined;
+    for (;;) {
+      const page = await client.kv.history("pg", { limit: 2, beforeVersion: before });
+      pages.push({ versions: page.versions.map((v) => v.version), more: page.more });
+      if (!page.more) break;
+      before = page.versions[page.versions.length - 1]!.version;
+    }
+    const newest = [...written].reverse();
+    expect(pages).toEqual([
+      { versions: newest.slice(0, 2), more: true },
+      { versions: newest.slice(2, 4), more: true },
+      { versions: newest.slice(4), more: false },
+    ]);
+    // Before the oldest: nothing, and nothing more.
+    expect(await client.kv.history("pg", { limit: 2, beforeVersion: written[0]! })).toEqual({ versions: [], more: false, stale: false });
   });
 
   it("appends to a stream and reads it back in order", async () => {
@@ -125,6 +174,67 @@ describe.skipIf(!endpoint)("live", () => {
     const second = await client.worker.list({ limit: 2, cursor: first.cursor });
     expect(second.workers.map((w) => w.id)).toEqual(["w-c"]);
     expect(second.cursor).toBeNull();
+  });
+
+  it("shows a worker's row, metadata and processes in worker.info", async () => {
+    const { client } = await liveClient();
+    await client.worker.register("w-info", [], {
+      workerType: WorkerType.Action,
+      maxConcurrency: 4,
+      machineId: "m-live",
+      metadata: '{"zone":"a"}',
+      processes: [
+        { name: "echo", kind: ProcessKind.Action },
+        { name: "events/g", kind: ProcessKind.StreamConsumer },
+      ],
+    });
+    const got = await client.worker.info("w-info");
+    expect(got.worker).toMatchObject({ id: "w-info", type: WorkerType.Action, status: WorkerStatus.Active, maxConcurrency: 4, machineId: "m-live" });
+    expect(decoder.decode(got.metadata!)).toBe('{"zone":"a"}');
+    expect(got.processes.map((p) => ({ name: p.name, kind: p.kind, runCount: p.runCount, failCount: p.failCount }))).toEqual([
+      { name: "echo", kind: ProcessKind.Action, runCount: 0n, failCount: 0n },
+      { name: "events/g", kind: ProcessKind.StreamConsumer, runCount: 0n, failCount: 0n },
+    ]);
+  });
+
+  it("refuses a registration of 1025 processes, as the server says", async () => {
+    const { client } = await liveClient();
+    const processes = Array.from({ length: 1025 }, (_, i) => ({ name: `p${i}`, kind: ProcessKind.Action }));
+    const err = await client.worker.register("w-many", [], { processes }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ServerError);
+    expect(err).toMatchObject({ status: StatusCode.BadRequest, reason: Reason.OutOfRange, ran: Ran.No, serverMessage: "more than 1024 processes" });
+  });
+
+  it("refuses a process name or machine id past its limit as field_too_long", async () => {
+    const { client } = await liveClient();
+    const cases: [string, Parameters<FloClient["worker"]["register"]>[2], string][] = [
+      ["w-long-name", { processes: [{ name: "p".repeat(4097), kind: ProcessKind.Action }] }, "process name longer than 4096 bytes"],
+      ["w-long-machine", { machineId: "m".repeat(256) }, "machine id longer than 255 bytes"],
+    ];
+    for (const [id, opts, message] of cases) {
+      const err = await client.worker.register(id, ["a"], opts).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ServerError);
+      expect(err).toMatchObject({ status: StatusCode.BadRequest, reason: Reason.FieldTooLong, ran: Ran.No, serverMessage: message });
+    }
+  });
+
+  it("lists only the workers that run an action", async () => {
+    const { client } = await liveClient();
+    await client.worker.register("w-x1", ["x"]);
+    await client.worker.register("w-y", ["y"]);
+    await client.worker.register("w-x2", ["x", "y"]);
+    const ids = async (action?: string) => (await client.worker.list({ action })).workers.map((w) => w.id);
+    expect(await ids("x")).toEqual(["w-x1", "w-x2"]);
+    expect(await ids("y")).toEqual(["w-x2", "w-y"]);
+    expect(await ids("z")).toEqual([]);
+    expect(await ids()).toEqual(["w-x1", "w-x2", "w-y"]);
+  });
+
+  it("answers worker.info for a missing worker not found", async () => {
+    const { client } = await liveClient();
+    const err = await client.worker.info("w-missing").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NotFoundError);
+    expect(err).toMatchObject({ status: StatusCode.NotFound, reason: Reason.NotFound });
   });
 
   // A handler past its action's 1 s timeout runs once when the worker touches

@@ -36,6 +36,7 @@ import {
   WorkerStatus,
   WorkerType,
   consoleLogger,
+  isOutcomePending,
   isRefusedUnrun,
   silentLogger,
   type ProcessEntry,
@@ -45,7 +46,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { EmptyPollBackoff, HaltBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
 import {
   DRAIN_NOTICE_INTERVAL_MS,
   closedSince,
@@ -382,12 +383,14 @@ export class StreamWorker {
    */
   private async joinGroup(): Promise<boolean> {
     const failed = newWorkerBackoff();
+    const halted = new HaltBackoff(this.logger);
     for (;;) {
       if (this.leaving()) return false;
       try {
         await this.client.stream.groupJoin(this.config.stream, this.config.group, this.config.consumer);
         break;
       } catch (err) {
+        if (await halted.waitIf(err, "Group join", this.leave.signal)) continue;
         if (!isRefusedUnrun(err)) throw err;
         const d = failed.next();
         this.log(`Group join refused: ${err}, retrying in ${d}ms...`);
@@ -395,8 +398,16 @@ export class StreamWorker {
       }
     }
     this.log("Joined consumer group");
-    await this.registerWorker();
-    return true;
+    halted.reset();
+    for (;;) {
+      try {
+        await this.registerWorker();
+        return true;
+      } catch (err) {
+        if (!(await halted.waitIf(err, "Register", this.leave.signal))) throw err;
+        if (this.leaving()) return false;
+      }
+    }
   }
 
   /** Register this worker, with the same options each time. */
@@ -434,6 +445,8 @@ export class StreamWorker {
     try {
       await this.joinGroup();
     } catch (err) {
+      // Committed but not applied: resending it would write it twice.
+      if (isOutcomePending(err)) throw err;
       // A connection error here surfaces again on the next read.
       this.logger.warn(`Re-join after reconnect failed: ${err}`);
     }
@@ -442,6 +455,7 @@ export class StreamWorker {
   private async pollLoop(): Promise<void> {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
+    const halted = new HaltBackoff(this.logger);
     let unproven = false;
     while (!this.leaving()) {
       // The connection this iteration's poll goes on, to redial only it.
@@ -464,6 +478,7 @@ export class StreamWorker {
           blockMs: this.config.blockMs,
         });
         failed.reset();
+        halted.reset();
         unproven = false;
 
         const empty = !result || result.records.length === 0;
@@ -504,7 +519,9 @@ export class StreamWorker {
           if (this.leaving()) break;
           await this.recover(err, connection);
           unproven = true;
-        } else {
+        } else if (isOutcomePending(err)) {
+          throw err;
+        } else if (!(await halted.waitIf(err, "GroupRead", this.leave.signal))) {
           const d = failed.next();
           this.log(`GroupRead error: ${err}, retrying in ${d}ms...`);
           await pause(d, this.leave.signal);
@@ -580,10 +597,11 @@ export class StreamWorker {
 
   /**
    * Stop issuing reads and let the running handlers finish and ack;
-   * `start()` then returns. An outstanding read still returns within
-   * `blockMs`. The server is told, so the worker list shows it draining, and
-   * heartbeats go on meanwhile; a notice that can't be sent now is tried
-   * again, and a failed one is logged, not thrown. A drain before `start()`
+   * `start()` then returns. An outstanding read can still wait up to
+   * `blockMs`: the server doesn't wake a group read on a drain, and the
+   * worker keeps its one connection. The server is told, so the worker list
+   * shows it draining, and heartbeats go on meanwhile; a notice that can't
+   * be sent now is tried again, and a failed one is logged, not thrown. A drain before `start()`
    * ends that run.
    */
   async drain(): Promise<void> {

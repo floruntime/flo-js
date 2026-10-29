@@ -6,7 +6,7 @@ import type { RetryPolicy } from "./retry.js";
 
 // Protocol constants
 export const MAGIC = 0x004f4c46; // "FLO\0" in little-endian
-export const VERSION = 0x02;
+export const VERSION = 0x03;
 /**
  * The hash of the op table this SDK was built for, written into every
  * request header. A server built from another table refuses the request,
@@ -14,7 +14,7 @@ export const VERSION = 0x02;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0x2fba7dd9ae941830n;
+export const TABLE_HASH = 0x05fe53f432e943c4n;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -66,6 +66,8 @@ export enum Reason {
   WorkerUnhealthy = 27,
   /** An action await from a worker the server has drained: it takes no more work. */
   WorkerDraining = 28,
+  /** The shard halted at an entry every replica fails the same way; it takes no writes until an operator repairs it. */
+  ShardHalted = 29,
 }
 
 /** Whether a refused request took effect: retry logic reads this, not the message. */
@@ -106,6 +108,7 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.StaleReport]: "stale_report",
   [Reason.WorkerUnhealthy]: "worker_unhealthy",
   [Reason.WorkerDraining]: "worker_draining",
+  [Reason.ShardHalted]: "shard_halted",
 };
 
 /** The server's name for a reason, as it appears in messages. */
@@ -113,6 +116,12 @@ export function reasonName(r: Reason): string {
   return REASON_NAMES[r];
 }
 export const HEADER_SIZE = 32;
+
+/** Most bytes one answer frame carries, header included; the server sends no more. */
+export const MAX_ANSWER_BYTES = 256 * 1024;
+
+/** Response flag: a halted shard answered from its state before the halt. */
+export const RESPONSE_STALE = 0x01;
 
 // Size limits (for client-side validation)
 export const MAX_NAMESPACE_SIZE = 255;
@@ -290,6 +299,7 @@ export const StatusCode = {
   Overloaded: 10,
   RateLimited: 11, // Request rate limit exceeded (WebSocket)
   Unavailable: 12, // No leader, or the shard isn't taking writes; retryable
+  OutcomePending: 13, // Committed but not applied: its shard halted; never resent
 } as const;
 
 export type StatusCode = (typeof StatusCode)[keyof typeof StatusCode];
@@ -325,6 +335,8 @@ export function statusCodeToString(status: StatusCode): string {
       return "Request rate limit exceeded";
     case StatusCode.Unavailable:
       return "Unavailable: no leader or the shard isn't taking writes; retry";
+    case StatusCode.OutcomePending:
+      return "Outcome pending: committed, but its shard halted before applying it";
     default:
       // A newer server can send a status this SDK predates.
       return `Unknown status ${status as number}`;
@@ -377,6 +389,8 @@ export type OptionTag = (typeof OptionTag)[keyof typeof OptionTag];
 export interface ScanResult {
   keys: string[];
   cursor: Uint8Array | null;
+  /** Served by a halted shard from its state just before the entry it halted at; not an error. */
+  stale: boolean;
 }
 
 /**
@@ -386,6 +400,8 @@ export interface VersionEntry {
   version: bigint;
   /** When the version was written, in ms since the Unix epoch. */
   atMs: bigint;
+  /** Whether this version is a delete; its value is then empty. */
+  deleted: boolean;
   value: Uint8Array;
 }
 
@@ -426,6 +442,44 @@ export interface KVCommitResult {
 export interface GetResult {
   value: Uint8Array;
   version: bigint;
+  /** When the key's TTL runs out, in ms since the Unix epoch; null with no TTL. */
+  expiresAtMs: bigint | null;
+  /** Served by a halted shard from its state just before the entry it halted at; not an error. */
+  stale: boolean;
+}
+
+/**
+ * Result of a KV jsonGet that found the key and path: the JSON at the path
+ * and the document's version.
+ */
+export interface JsonGetResult {
+  value: Uint8Array;
+  version: bigint;
+  /** Served by a halted shard from its state just before the entry it halted at; not an error. */
+  stale: boolean;
+}
+
+/**
+ * Result of a KV exists: whether the key exists, and its version (0 when
+ * absent).
+ */
+export interface KVExistsResult {
+  exists: boolean;
+  version: bigint;
+  /** Served by a halted shard from its state just before the entry it halted at; not an error. */
+  stale: boolean;
+}
+
+/**
+ * One page of a key's versions, newest first. When `more` is set, older
+ * kept versions follow: ask again with `beforeVersion` set to the last
+ * version here.
+ */
+export interface HistoryResult {
+  versions: VersionEntry[];
+  more: boolean;
+  /** Served by a halted shard from its state just before the entry it halted at; not an error. */
+  stale: boolean;
 }
 
 /**
@@ -437,6 +491,8 @@ export interface MGetEntry {
   value: Uint8Array;
   version: bigint;
   found: boolean;
+  /** Served by a halted shard from its state just before the entry it halted at; not an error. */
+  stale: boolean;
 }
 
 /**
@@ -695,6 +751,8 @@ export interface HistoryOptions {
   namespace?: string;
   /** Most versions to return, 1 to 65; 10 when unset. */
   limit?: number;
+  /** Only versions older than this one (exclusive); unset starts from the newest. */
+  beforeVersion?: bigint;
   /** Routes the request in place of the key. */
   routingKey?: string;
 }
@@ -816,6 +874,11 @@ export interface RawResponse {
   status: StatusCode;
   data: Uint8Array;
   requestId: bigint;
+  /**
+   * A halted shard answered this read from its state just before the entry
+   * it halted at (the RESPONSE_STALE flag). Not an error.
+   */
+  stale?: boolean;
 }
 
 /**
@@ -1119,6 +1182,30 @@ export interface WorkerInfo {
 }
 
 /**
+ * One of a worker's processes, as worker.info answers: what it registered,
+ * with its counts.
+ */
+export interface WorkerProcess {
+  name: string;
+  kind: ProcessKind;
+  runCount: bigint;
+  failCount: bigint;
+  /** When it last ran, in ms since the Unix epoch. */
+  lastRunAtMs: bigint;
+}
+
+/**
+ * A worker's record, as worker.info answers: its row (as worker.list shows
+ * it), the metadata it registered with, and its processes.
+ */
+export interface WorkerInfoResult {
+  worker: WorkerInfo;
+  /** The metadata as registered; null when it registered none. */
+  metadata: Uint8Array | null;
+  processes: WorkerProcess[];
+}
+
+/**
  * A page of workers, in id order.
  */
 export interface WorkerListResult {
@@ -1180,6 +1267,13 @@ export interface WorkerFailOptions {
 }
 
 /**
+ * Options for a worker's info.
+ */
+export interface WorkerInfoOptions {
+  namespace?: string;
+}
+
+/**
  * Options for listing workers.
  */
 export interface WorkerListOptions {
@@ -1188,6 +1282,8 @@ export interface WorkerListOptions {
   limit?: number;
   /** The previous page's cursor; omit for the first page. */
   cursor?: Uint8Array | null;
+  /** Only workers that run this action; unset or empty for all. */
+  action?: string;
 }
 
 /**

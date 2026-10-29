@@ -2,7 +2,7 @@
  * KV operations for Flo SDK.
  */
 
-import { createServerError, IncompleteResponseError, ServerError } from "./errors.js";
+import { createServerError, IncompleteResponseError, ServerError, StaleNotFoundError } from "./errors.js";
 import {
   decodeDeleteAnswer,
   decodeEmptyAnswer,
@@ -35,6 +35,7 @@ import {
   type DeleteOptions,
   type GetOptions,
   type GetResult,
+  type JsonGetResult,
   type HistoryOptions,
   type KVExistsOptions,
   type KVExpireOptions,
@@ -51,7 +52,8 @@ import {
   type ScanOptions,
   type ScanResult,
   StatusCode,
-  type VersionEntry,
+  type HistoryResult,
+  type KVExistsResult,
 } from "./types.js";
 
 /**
@@ -78,12 +80,30 @@ function absent(resp: RawResponse): null {
   throw err;
 }
 
+/**
+ * Null for a key that is absent; a halted shard's not-found, absent only as
+ * of its halt, throws StaleNotFoundError instead, so it can't pass for one.
+ */
+function absentKey(resp: RawResponse): null {
+  if (resp.stale === true) {
+    const err = createServerError(resp.status, resp.data);
+    if (err instanceof ServerError && err.reason === Reason.NotFound) {
+      const stale = new StaleNotFoundError(err.serverMessage);
+      stale.reason = err.reason;
+      stale.ran = err.ran;
+      stale.message = err.message;
+      throw stale;
+    }
+  }
+  return absent(resp);
+}
+
 /** kv.get, inside transaction `txn` when given. */
 export async function kvGet(sender: Pick<RequestSender, "sendRequest">, namespace: string, key: string, opts?: GetOptions, txn?: bigint): Promise<GetResult | null> {
   const resp = await sender.sendRequest(OpCode.KVGet, namespace, textEncoder.encode(key), encodeGetBody(opts, txn), new Uint8Array(0));
-  if (resp.status === StatusCode.NotFound) return absent(resp);
+  if (resp.status === StatusCode.NotFound) return absentKey(resp);
   if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
-  return decodeGetAnswer(resp.data);
+  return decodeGetAnswer(resp.data, resp.stale === true);
 }
 
 /** kv.set, inside transaction `txn` when given. */
@@ -98,7 +118,7 @@ export async function kvScan(sender: Pick<RequestSender, "sendRequest">, namespa
   const body = encodeScanBody(opts?.limit ?? MAX_SCAN_LIMIT, opts?.cursor);
   const resp = await sender.sendRequest(OpCode.KVScan, namespace, textEncoder.encode(prefix), body, new Uint8Array(0));
   if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
-  return decodeScanAnswer(resp.data);
+  return decodeScanAnswer(resp.data, resp.stale === true);
 }
 
 /**
@@ -152,7 +172,7 @@ export class KVOperations {
         if (page.entries.length !== answered || answered === 0 || answered > asked || (page.next !== null && answered === asked)) {
           throw new IncompleteResponseError(`kv.mget answered ${page.entries.length} entries, next ${page.next}, for ${asked} keys`);
         }
-        for (const e of page.entries) out.push({ key: keys[out.length]!, ...e });
+        for (const e of page.entries) out.push({ key: keys[out.length]!, ...e, stale: resp.stale === true });
       }
     }
     return out;
@@ -179,15 +199,17 @@ export class KVOperations {
   }
 
   /**
-   * History returns a key's versions, newest first, each with its write
-   * time; a missing key has none.
+   * History returns a page of a key's versions, newest first, each with its
+   * write time and whether it is a delete; a missing key has none. When
+   * `more` is set, older kept versions follow: ask again with
+   * `beforeVersion` set to the last version of this page.
    */
-  async history(key: string, opts?: HistoryOptions): Promise<VersionEntry[]> {
+  async history(key: string, opts?: HistoryOptions): Promise<HistoryResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
     const resp = await this.sender.sendRequest(OpCode.KVHistory, namespace, textEncoder.encode(key), encodeHistoryBody(opts?.limit ?? 10, opts), new Uint8Array(0));
-    if (resp.status === StatusCode.NotFound) return absent(resp) ?? [];
+    if (resp.status === StatusCode.NotFound) return absent(resp) ?? { versions: [], more: false, stale: resp.stale === true };
     if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
-    return decodeHistoryAnswer(resp.data);
+    return decodeHistoryAnswer(resp.data, resp.stale === true);
   }
 
   // ─── Counters, TTLs, exists, JSON paths ─────
@@ -217,26 +239,27 @@ export class KVOperations {
   }
 
   /**
-   * Returns true if `key` is present, without transferring its value.
+   * Whether `key` is present, and its version, without transferring its
+   * value.
    */
-  async exists(key: string, opts?: KVExistsOptions): Promise<boolean> {
+  async exists(key: string, opts?: KVExistsOptions): Promise<KVExistsResult> {
     const resp = await this.send(OpCode.KVExists, opts?.namespace, key, encodeExistsBody(opts));
-    return decodeExistsAnswer(resp.data).exists;
+    return { ...decodeExistsAnswer(resp.data), stale: resp.stale === true };
   }
 
   /**
    * Extract the value at `path` (default "$", the whole document) from the
    * JSON document at `key`.
    *
-   * Returns a {@link GetResult} carrying the JSON-encoded bytes and the
+   * Returns a {@link JsonGetResult} carrying the JSON-encoded bytes and the
    * document's current version, or `null` if the key or path is missing.
    */
-  async jsonGet(key: string, path: string = "$", opts?: KVJsonOptions): Promise<GetResult | null> {
+  async jsonGet(key: string, path: string = "$", opts?: KVJsonOptions): Promise<JsonGetResult | null> {
     const namespace = this.sender.getNamespace(opts?.namespace);
     const resp = await this.sender.sendRequest(OpCode.KVJsonGet, namespace, textEncoder.encode(key), encodeJsonPathBody(path, opts), new Uint8Array(0));
-    if (resp.status === StatusCode.NotFound) return absent(resp);
+    if (resp.status === StatusCode.NotFound) return absentKey(resp);
     if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
-    return decodeJsonGetAnswer(resp.data);
+    return decodeJsonGetAnswer(resp.data, resp.stale === true);
   }
 
   /**
