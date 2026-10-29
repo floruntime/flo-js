@@ -856,6 +856,8 @@ export class ActionWorker {
       // deregistered: registering then would leave one the server keeps till
       // it expires.
       if (!this.running) return;
+      // Only worker.register is sent again: the server keeps workers in
+      // memory, so it can't halt a shard or answer outcome_pending.
       this.logger.warn("The server removed this worker; registering again");
       await this.registerWorker(actionNames);
       if (this.draining) {
