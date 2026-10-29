@@ -15,6 +15,7 @@ export {
   Ran,
   reasonName,
   HEADER_SIZE,
+  RESPONSE_STALE,
   MAX_NAMESPACE_SIZE,
   MAX_KEY_SIZE,
   MAX_VALUE_SIZE,
@@ -34,6 +35,8 @@ export {
   type KVIncrResult,
   type PutResult,
   type GetResult,
+  type HistoryResult,
+  type KVExistsResult,
   type JsonGetResult,
   type MGetEntry,
   type KVCommitResult,
@@ -169,6 +172,7 @@ export {
   UnauthorizedError,
   OverloadedError,
   UnavailableError,
+  OutcomePendingError,
   InternalError,
   createServerError,
   // Error type guards
@@ -178,6 +182,7 @@ export {
   isUnauthorized,
   isOverloaded,
   isUnavailable,
+  isOutcomePending,
   isInternal,
 } from "./errors.js";
 

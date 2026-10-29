@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `StatusCode.OutcomePending` (13) and `OutcomePendingError` (`isOutcomePending`): a write that committed but hasn't applied because its shard halted (reason `shard_halted`, ran unknown). `Reason.ShardHalted` (29): with `UnavailableError`, a write to a halted shard was refused. The client never retries either: an outcome-pending write is committed, so resending would write it twice, and a halted shard takes no writes until an operator repairs it. A `StreamWorker`'s group join refused `shard_halted` fails `start()` instead of retrying.
+- `stale` on every KV read result (`GetResult`, `JsonGetResult`, `MGetEntry`, `ScanResult`, `HistoryResult`, `KVExistsResult`) and `RawResponse.stale`: a halted shard answered the read from its state just before the entry it halted at. It is not an error. `RESPONSE_STALE` names the flag; an answer with any other flag bit throws `IncompleteResponseError`.
+- `HistoryOptions.beforeVersion` (exclusive) and `HistoryResult.more`: `kv.history` pages through a key's versions.
+- `WorkerListOptions.action`: list only the workers that run that action.
 - `worker.info(workerId)`: the worker's row, decoded as `worker.list` decodes it, its registered metadata, and its processes with their kind and counts (`WorkerInfoResult`, `WorkerProcess`). A worker that isn't registered throws `NotFoundError`. A registration the server refuses (more than 1024 processes, a name or machine id too long) throws its `ServerError` with the server's reason and message; the client doesn't check those limits itself.
 - `GetResult.expiresAtMs`: when the key's TTL runs out, in ms since the epoch; null with no TTL. `VersionEntry.deleted`: whether a history version is a delete. `kv.jsonGet` returns a `JsonGetResult` (no expiry). An answer with a bad presence or bool byte, or cut short, throws `IncompleteResponseError`.
 - `StreamAppendOptions.headers`: headers stored with the record.
@@ -20,7 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking:** frames carry a CRC32C (Castagnoli) checksum, not IEEE CRC32, under protocol version 3; `computeCRC32` is renamed `computeCRC32C`. The table hash moves to `0x505fdaa07e866b96` with the server.
+- **Breaking:** `kv.history` returns `{ versions, more, stale }`, not a bare array. `kv.exists` and a transaction's `exists` return `{ exists, version, stale }`, not a boolean. `parseResponseHeader` also returns the header's flags.
+- A worker registration with more than 1024 processes is refused with reason `out_of_range`; a process name over 4096 bytes, processes too long to list together, or a machine id over 255 bytes with `field_too_long`. The client passes them through; it checks none of these itself.
+- **Breaking:** frames carry a CRC32C (Castagnoli) checksum, not IEEE CRC32, under protocol version 3; `computeCRC32` is renamed `computeCRC32C`. The table hash moves to `0x05fe53f432e943c4` with the server (flo `51735a8`).
 - **Breaking:** `worker.list` is a table op: `list({ limit, cursor })` returns a page of workers in id order and the next page's `cursor` (null on the last page); `limit` is 1 to 1024, default 1024. It used to send a raw limit and return no workers at all. `WorkerInfo` is the server's row: `tasksCompleted`/`tasksFailed` are bigints, `lastHeartbeat` is `lastHeartbeatMs`, and `metadata` is gone.
 - **Breaking:** `heartbeatIntervalMs: 0` no longer turns heartbeats off: a worker that never heartbeats is refused work after the server's heartbeat timeout. A value of 0 or less throws at construction.
 - **Breaking:** `action.status` returns a new `ActionRunStatus` shape: `status` (pending, running, completed, failed, cancelled, timed_out), `createdAtMs`, `startedAtMs`, `completedAtMs`, `attempt`, and the run's `output` and `errorMessage`, decoded from the op table's answer. It used to return the server's raw answer, which no caller could read. The table hash moves with the server.

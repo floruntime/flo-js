@@ -24,6 +24,7 @@ import {
   OpCode,
   OptionTag,
   type RawResponse,
+  RESPONSE_STALE,
   type StatusCode,
   VERSION,
   TABLE_HASH,
@@ -320,11 +321,11 @@ export function serializeRequest(
 
 /**
  * Parse a response header.
- * Returns [status, dataLen, requestId, crc].
+ * Returns [status, dataLen, requestId, crc, flags].
  */
 export function parseResponseHeader(
   header: Uint8Array
-): [StatusCode, number, bigint, number] {
+): [StatusCode, number, bigint, number, number] {
   if (header.length < HEADER_SIZE) {
     throw new IncompleteResponseError("header too short");
   }
@@ -351,7 +352,7 @@ export function parseResponseHeader(
     throw new TableMismatchError(version, tableHash);
   }
 
-  return [status, dataLen, requestId, crcValue];
+  return [status, dataLen, requestId, crcValue, header[22]!];
 }
 
 /**
@@ -361,8 +362,13 @@ export function parseRawResponse(
   header: Uint8Array,
   data: Uint8Array
 ): RawResponse {
-  const [status, , requestId] = parseResponseHeader(header);
-  return { status, data, requestId };
+  const [status, , requestId, , flags] = parseResponseHeader(header);
+  // The table hash pins both sides, so a flag this client doesn't know
+  // means the answer can't be read as this client reads it.
+  if ((flags & ~RESPONSE_STALE) !== 0) {
+    throw new IncompleteResponseError(`unknown response flags 0x${flags.toString(16).padStart(2, "0")}`);
+  }
+  return { status, data, requestId, stale: (flags & RESPONSE_STALE) !== 0 };
 }
 
 /**

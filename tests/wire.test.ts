@@ -19,6 +19,8 @@ import {
   computeCRC32C,
   serializeRequest,
   parseResponseHeader,
+  parseRawResponse,
+  RESPONSE_STALE,
   parseDequeueResponse,
   parseEnqueueResponse,
   serializeSeqs,
@@ -131,7 +133,7 @@ describe("Wire Protocol", () => {
 
       // Version, then the pinned table hash at 24-31
       expect(request[22]).toBe(VERSION);
-      expect(view.getBigUint64(24, true)).toBe(0x505fdaa07e866b96n);
+      expect(view.getBigUint64(24, true)).toBe(0x05fe53f432e943c4n);
     });
 
     it("should include namespace in payload", () => {
@@ -201,6 +203,31 @@ describe("Wire Protocol", () => {
         view.setBigUint64(24, table, true);
         expect(() => parseResponseHeader(header)).toThrow(TableMismatchError);
         expect(() => parseResponseHeader(header)).toThrow(message);
+      }
+    });
+  });
+
+  describe("parseRawResponse", () => {
+    const answer = (flags: number) => {
+      const header = new Uint8Array(HEADER_SIZE);
+      const view = new DataView(header.buffer);
+      view.setUint32(0, MAGIC, true);
+      header[20] = VERSION;
+      header[21] = StatusCode.OK;
+      header[22] = flags;
+      view.setBigUint64(24, TABLE_HASH, true);
+      return header;
+    };
+
+    it("reads a halted shard's answer as stale, and any other as not", () => {
+      expect(RESPONSE_STALE).toBe(0x01);
+      expect(parseRawResponse(answer(RESPONSE_STALE), new Uint8Array(0)).stale).toBe(true);
+      expect(parseRawResponse(answer(0), new Uint8Array(0)).stale).toBe(false);
+    });
+
+    it("refuses a flag it doesn't know", () => {
+      for (const flags of [0x02, 0x80, 0x03]) {
+        expect(() => parseRawResponse(answer(flags), new Uint8Array(0))).toThrow(IncompleteResponseError);
       }
     });
   });

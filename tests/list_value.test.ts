@@ -161,19 +161,25 @@ function answering(data: Uint8Array): { sender: never; sent: Sent[] } {
 }
 
 describe("worker.list", () => {
-  it("is a table op: its body is limit (present) then a u16-prefixed cursor", async () => {
+  it("is a table op: its body is limit (present), then a u16-prefixed cursor and action", async () => {
     expect(isTableOp(OpCode.WorkerList)).toBe(true);
     const { sender, sent } = answering(page([]));
     await new WorkerOperations(sender).list({ limit: 5, cursor });
     expect(sent[0]!.op).toBe(OpCode.WorkerList);
-    expect(Array.from(sent[0]!.value)).toEqual([1, 5, 0, 0, 0, 4, 0, ...cursor]);
+    expect(Array.from(sent[0]!.value)).toEqual([1, 5, 0, 0, 0, 4, 0, ...cursor, 0, 0]);
     expect(sent[0]!.options.length).toBe(0);
+  });
+
+  it("sends an action to list only the workers that run it", async () => {
+    const { sender, sent } = answering(page([]));
+    await new WorkerOperations(sender).list({ limit: 5, action: "echo" });
+    expect(Array.from(sent[0]!.value)).toEqual([1, 5, 0, 0, 0, 0, 0, 4, 0, ...new TextEncoder().encode("echo")]);
   });
 
   it("asks for 1024 workers (the server's default) from the first page by default", async () => {
     const { sender, sent } = answering(page([]));
     await new WorkerOperations(sender).list();
-    expect(Array.from(sent[0]!.value)).toEqual([1, 0, 4, 0, 0, 0, 0]);
+    expect(Array.from(sent[0]!.value)).toEqual([1, 0, 4, 0, 0, 0, 0, 0, 0]);
   });
 
   it("refuses a limit outside 1 to 1024 before sending", async () => {

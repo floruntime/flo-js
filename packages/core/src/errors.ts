@@ -249,12 +249,28 @@ export class OverloadedError extends ServerError {
 /**
  * Error thrown when a write reached no leader, or the shard stopped taking
  * writes or is offline. Retryable, but an offline shard stays unavailable
- * until an operator acts; the server's message says which case it is.
+ * until an operator acts; the server's message says which case it is. With
+ * reason `ShardHalted` the shard halted and takes no writes until an
+ * operator repairs it; the client doesn't retry that one.
  */
 export class UnavailableError extends ServerError {
   constructor(message?: string) {
     super(StatusCode.Unavailable, message);
     this.name = "UnavailableError";
+  }
+}
+
+/**
+ * Error thrown for a write that committed but hasn't applied: its shard
+ * halted at it or before it (reason `ShardHalted`, ran `Unknown`). The
+ * message says whether it applies when the shard resumes. Never resent:
+ * the write is committed, so sending it again would write it twice, or
+ * halt again.
+ */
+export class OutcomePendingError extends ServerError {
+  constructor(message?: string) {
+    super(StatusCode.OutcomePending, message);
+    this.name = "OutcomePendingError";
   }
 }
 
@@ -312,6 +328,8 @@ function serverErrorFor(status: StatusCode, message: string): ServerError {
       return new UnavailableError(message);
     case StatusCode.InternalError:
       return new InternalError(message);
+    case StatusCode.OutcomePending:
+      return new OutcomePendingError(message);
     default:
       return new ServerError(status, message);
   }
@@ -357,6 +375,13 @@ export function isOverloaded(err: unknown): err is OverloadedError {
  */
 export function isUnavailable(err: unknown): err is UnavailableError {
   return err instanceof ServerError && err.status === StatusCode.Unavailable;
+}
+
+/**
+ * Check if an error is an OutcomePendingError.
+ */
+export function isOutcomePending(err: unknown): err is OutcomePendingError {
+  return err instanceof ServerError && err.status === StatusCode.OutcomePending;
 }
 
 /**
