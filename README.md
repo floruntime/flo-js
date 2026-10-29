@@ -89,10 +89,27 @@ Every op takes `namespace` in its options; every op but `scan` takes
 `routingKey`, which routes the request in place of the key.
 `delete` and `expire` take `casVersion`: the key's version they require.
 
-Every read result (`get`, `jsonGet`, each `mget` entry, `scan`, `history`,
-`exists`) carries `stale`. It is set when a halted shard answered: the read
-succeeded, served from the shard's state just before the entry it halted
-at, and nothing written since. It is not an error.
+Every KV read result (`get`, `jsonGet`, each `mget` entry, `scan`,
+`history`, `exists`) carries `stale`. It is set when a halted shard
+answered: the read succeeded, served from the shard's state just before the
+entry it halted at, and nothing written since. It is not an error. A key
+such a shard didn't find is not reported as absent: `get` and `jsonGet`
+throw `StaleNotFoundError` (a `NotFoundError` with `stale` true), since the
+key was absent only as of the halt. Only KV reads carry `stale` for now:
+other reads (streams, queues) and the read-only client's `get` drop it.
+
+`history` returns one page at a time. To read every kept version:
+
+```typescript
+let beforeVersion: bigint | undefined;
+for (;;) {
+  const page = await client.kv.history("k", { limit: 20, beforeVersion });
+  for (const v of page.versions) console.log(v.version, v.deleted, v.value);
+  const last = page.versions.at(-1);
+  if (!page.more || last === undefined) break;
+  beforeVersion = last.version;
+}
+```
 
 #### Get Options
 
@@ -370,6 +387,7 @@ try {
 | `TimeoutError` | Operation timed out |
 | `BlockTooLongError` | `blockMs` or `waitMs` over 300000, refused before sending |
 | `NotFoundError` | Resource not found |
+| `StaleNotFoundError` | A `NotFoundError` from `get` or `jsonGet` on a halted shard: the key was absent as of the halt; `stale` is true |
 | `ConflictError` | CAS version mismatch |
 | `BadRequestError` | Invalid request |
 | `UnauthorizedError` | Authentication failed |
@@ -388,6 +406,13 @@ straight back. Two never come back to be retried: `unavailable` with reason
 `shard_halted` (an operator has to repair the shard, so resending is no
 use), and `outcome_pending` (the write is committed; resending it would
 write it twice, or halt the shard again).
+
+Workers are different: registering, a `StreamWorker`'s group join and the
+poll loops are safe to repeat, so on `shard_halted` a worker keeps trying,
+waiting from 100 ms doubling to 30 s and logging each refusal at warn with
+the server's message, and carries on by itself once the shard is repaired.
+A worker started during a halt comes up once it is. `stop()` or `drain()`
+ends a wait at once.
 
 | `retry` field | Default | |
 |---|---|---|

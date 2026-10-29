@@ -207,6 +207,20 @@ export class NotFoundError extends ServerError {
 }
 
 /**
+ * Error thrown by a KV get or JSON get whose key was not found by a halted
+ * shard: absent as of the entry the shard halted at, not necessarily now.
+ * It is a NotFoundError, so `isNotFound` still matches; `stale` is true.
+ */
+export class StaleNotFoundError extends NotFoundError {
+  readonly stale = true;
+
+  constructor(message?: string) {
+    super(message);
+    this.name = "StaleNotFoundError";
+  }
+}
+
+/**
  * Error thrown when the request parameters are invalid.
  */
 export class BadRequestError extends ServerError {

@@ -292,16 +292,6 @@ describe("StreamWorker group join", () => {
     expect(srv.of(OpCode.StreamGroupJoin).length).toBe(1);
   });
 
-  it("is fatal on a halted shard, though not run", async () => {
-    const srv = await serve((op, _n, id) =>
-      op === OpCode.StreamGroupJoin ? refusal(id, StatusCode.Unavailable, Ran.No, Reason.ShardHalted) : frame(id, StatusCode.OK)
-    );
-    const c = await connect(srv.endpoint, noRetry);
-    const w = new StreamWorker(c, { stream: "s" }, async () => {});
-    await expect(w.start()).rejects.toMatchObject({ reason: Reason.ShardHalted });
-    expect(srv.of(OpCode.StreamGroupJoin).length).toBe(1);
-  });
-
   it("stops at once while waiting to retry", async () => {
     const srv = await serve((op, _n, id) =>
       op === OpCode.StreamGroupJoin ? refusal(id, StatusCode.Unavailable, Ran.No) : frame(id, StatusCode.OK)

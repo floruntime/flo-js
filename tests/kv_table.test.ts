@@ -23,7 +23,9 @@ import {
   Reason,
   reasonName,
   ServerError,
+  StaleNotFoundError,
   StatusCode,
+  isNotFound,
   KVReadOnlyOperations,
   Transaction,
   WaitFor,
@@ -457,5 +459,31 @@ describe("a halted shard's reads", () => {
     expect((await kv.scan("")).stale).toBe(true);
     expect((await kv.history("k")).stale).toBe(true);
     expect((await kv.exists("k")).stale).toBe(true);
+  });
+});
+
+describe("a key a halted shard didn't find", () => {
+  const staleRefusal = (r: Reason): RawResponse => ({ ...refusal(StatusCode.NotFound, r), stale: true });
+
+  it("is a StaleNotFoundError from get and jsonGet, not plain absent", async () => {
+    for (const call of [(kv: KVOperations) => kv.get("k"), (kv: KVOperations) => kv.jsonGet("k")]) {
+      const err = await call(new KVOperations(seq(staleRefusal(Reason.NotFound)).s)).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(StaleNotFoundError);
+      expect(isNotFound(err)).toBe(true);
+      expect(err).toMatchObject({ stale: true, status: StatusCode.NotFound, reason: Reason.NotFound, serverMessage: "why" });
+      // Without the flag it is plain absent, as before.
+      expect(await call(new KVOperations(seq(refusal(StatusCode.NotFound, Reason.NotFound)).s))).toBeNull();
+    }
+    const txn = new Transaction(seq(staleRefusal(Reason.NotFound)).s, "ns", "rk", 1n, 0n);
+    await expect(txn.get("k")).rejects.toBeInstanceOf(StaleNotFoundError);
+  });
+
+  it("keeps the stale mark on exists, an mget entry and history", async () => {
+    const stale = (h: string): RawResponse => ({ ...ok(h), stale: true });
+    const { s } = seq(stale("000000000000000000"), stale("0100" + "00" + "00".repeat(12) + "00"), staleRefusal(Reason.NotFound));
+    const kv = new KVOperations(s);
+    expect(await kv.exists("k")).toEqual({ exists: false, version: 0n, stale: true });
+    expect(await kv.mget(["a"])).toEqual([{ key: "a", found: false, version: 0n, value: new Uint8Array(0), stale: true }]);
+    expect(await kv.history("k")).toEqual({ versions: [], more: false, stale: true });
   });
 });

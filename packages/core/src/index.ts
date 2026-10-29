@@ -167,6 +167,7 @@ export {
   TimeoutError,
   ServerError,
   NotFoundError,
+  StaleNotFoundError,
   BadRequestError,
   ConflictError,
   UnauthorizedError,

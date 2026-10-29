@@ -2,7 +2,7 @@
  * KV operations for Flo SDK.
  */
 
-import { createServerError, IncompleteResponseError, ServerError } from "./errors.js";
+import { createServerError, IncompleteResponseError, ServerError, StaleNotFoundError } from "./errors.js";
 import {
   decodeDeleteAnswer,
   decodeEmptyAnswer,
@@ -80,10 +80,28 @@ function absent(resp: RawResponse): null {
   throw err;
 }
 
+/**
+ * Null for a key that is absent; a halted shard's not-found, absent only as
+ * of its halt, throws StaleNotFoundError instead, so it can't pass for one.
+ */
+function absentKey(resp: RawResponse): null {
+  if (resp.stale === true) {
+    const err = createServerError(resp.status, resp.data);
+    if (err instanceof ServerError && err.reason === Reason.NotFound) {
+      const stale = new StaleNotFoundError(err.serverMessage);
+      stale.reason = err.reason;
+      stale.ran = err.ran;
+      stale.message = err.message;
+      throw stale;
+    }
+  }
+  return absent(resp);
+}
+
 /** kv.get, inside transaction `txn` when given. */
 export async function kvGet(sender: Pick<RequestSender, "sendRequest">, namespace: string, key: string, opts?: GetOptions, txn?: bigint): Promise<GetResult | null> {
   const resp = await sender.sendRequest(OpCode.KVGet, namespace, textEncoder.encode(key), encodeGetBody(opts, txn), new Uint8Array(0));
-  if (resp.status === StatusCode.NotFound) return absent(resp);
+  if (resp.status === StatusCode.NotFound) return absentKey(resp);
   if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
   return decodeGetAnswer(resp.data, resp.stale === true);
 }
@@ -239,7 +257,7 @@ export class KVOperations {
   async jsonGet(key: string, path: string = "$", opts?: KVJsonOptions): Promise<JsonGetResult | null> {
     const namespace = this.sender.getNamespace(opts?.namespace);
     const resp = await this.sender.sendRequest(OpCode.KVJsonGet, namespace, textEncoder.encode(key), encodeJsonPathBody(path, opts), new Uint8Array(0));
-    if (resp.status === StatusCode.NotFound) return absent(resp);
+    if (resp.status === StatusCode.NotFound) return absentKey(resp);
     if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
     return decodeJsonGetAnswer(resp.data, resp.stale === true);
   }

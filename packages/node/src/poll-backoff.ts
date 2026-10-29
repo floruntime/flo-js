@@ -1,4 +1,4 @@
-import { Backoff } from "@floruntime/core";
+import { Backoff, type Logger, Reason, ServerError } from "@floruntime/core";
 
 /** The longest delay Node's timers keep; past it they fire after 1 ms. */
 export const MAX_TIMER_MS = 2_147_483_647;
@@ -55,4 +55,42 @@ export const WORKER_MAX_BACKOFF_MS = 5000;
 
 export function newWorkerBackoff(): Backoff {
   return new Backoff(WORKER_INITIAL_BACKOFF_MS, WORKER_MAX_BACKOFF_MS);
+}
+
+// While a worker's shard is halted, its supervision calls wait this way.
+export const HALT_INITIAL_BACKOFF_MS = 100;
+export const HALT_MAX_BACKOFF_MS = 30_000;
+
+/** Whether err is a refusal from a halted shard. */
+export function isShardHalted(err: unknown): err is ServerError {
+  return err instanceof ServerError && err.reason === Reason.ShardHalted;
+}
+
+/**
+ * Pacing for a worker's supervision calls (registering, joining its group,
+ * polling) while their shard is halted. They are safe to repeat, so a
+ * worker keeps trying and carries on by itself once an operator repairs the
+ * shard. A client's own requests are never retried on a halt.
+ */
+export class HaltBackoff {
+  private readonly backoff = new Backoff(HALT_INITIAL_BACKOFF_MS, HALT_MAX_BACKOFF_MS);
+
+  constructor(private readonly logger: Logger) {}
+
+  /**
+   * If err is a halt, log it, wait (less if `signal` aborts) and return
+   * true; otherwise return false at once.
+   */
+  async waitIf(err: unknown, call: string, signal: AbortSignal): Promise<boolean> {
+    if (!isShardHalted(err)) return false;
+    const d = this.backoff.next();
+    this.logger.warn(`${call} refused, shard halted: ${err.serverMessage}; retrying in ${d}ms`);
+    await pause(d, signal);
+    return true;
+  }
+
+  /** Start the waits again from the bottom, after a call that went through. */
+  reset(): void {
+    this.backoff.reset();
+  }
 }
