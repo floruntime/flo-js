@@ -9,6 +9,8 @@ import {
   StatusCode,
   createServerError,
   HEADER_SIZE,
+  MAX_ANSWER_BYTES,
+  AnswerTooLargeError,
   InvalidChecksumError,
   InvalidEndpointError,
   NotConnectedError,
@@ -270,6 +272,12 @@ export class TcpTransport implements Transport {
       } catch (err) {
         // The stream can't be re-framed past a bad header.
         this.failAndDestroy(err as Error);
+        return;
+      }
+
+      // Refused before buffering it: no answer is this large.
+      if (dataLen > MAX_ANSWER_BYTES - HEADER_SIZE) {
+        this.failAndDestroy(new AnswerTooLargeError(dataLen, MAX_ANSWER_BYTES - HEADER_SIZE));
         return;
       }
 

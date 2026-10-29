@@ -79,7 +79,7 @@ interface ClientOptions {
 | `history` | `history(key, opts?) → Promise<HistoryResult>` | A page of `versions`, newest first: `version`, `atMs` (write time), `deleted`, `value`; none for a missing key. `limit` (1 to 65, default 10) and `beforeVersion` (exclusive) pick the page; `more` says older versions follow: pass the page's last version as `beforeVersion` |
 | `incr` | `incr(key, opts?) → Promise<KVIncrResult>` | Add `delta` (default 1) to a counter; its new `value` and `version` |
 | `expire` | `expire(key, ttlMs, opts?) → Promise<void>` | Set a key's TTL in ms; 0 clears it |
-| `exists` | `exists(key, opts?) → Promise<KVExistsResult>` | Whether the key is present (`exists`), and its `version` |
+| `exists` | `exists(key, opts?) → Promise<KVExistsResult>` | Whether the key is present (`exists`), and its `version`. **An object, so always truthy: read `.exists`; `if (await kv.exists(k))` is always true** |
 | `jsonGet` | `jsonGet(key, path = "$", opts?) → Promise<JsonGetResult \| null>` | The JSON at `path`; null if the key or path is missing |
 | `jsonSet` | `jsonSet(key, path, json, opts?) → Promise<PutResult>` | Set the JSON at `path` ("$" replaces the document) |
 | `jsonDel` | `jsonDel(key, path = "$", opts?) → Promise<bigint \| null>` | Remove the JSON at `path`; the new version, or null when "$" deleted the key |
@@ -408,11 +408,16 @@ use), and `outcome_pending` (the write is committed; resending it would
 write it twice, or halt the shard again).
 
 Workers are different: registering, a `StreamWorker`'s group join and the
-poll loops are safe to repeat, so on `shard_halted` a worker keeps trying,
+poll loops are safe to repeat, so on `unavailable` with reason
+`shard_halted` (not run) a worker keeps trying,
 waiting from 100 ms doubling to 30 s and logging each refusal at warn with
 the server's message, and carries on by itself once the shard is repaired.
 A worker started during a halt comes up once it is. `stop()` or `drain()`
-ends a wait at once.
+ends a wait at once. An `outcome_pending` refusal of any of those calls
+(an action registration, say, committed at the entry the shard halted at)
+is not resent: `start()` throws `OutcomePendingError` with the server's
+message. A handler's result (complete, fail, ack, nack) refused by a halted
+shard is logged and dropped, not resent.
 
 | `retry` field | Default | |
 |---|---|---|

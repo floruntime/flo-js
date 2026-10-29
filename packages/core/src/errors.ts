@@ -103,6 +103,17 @@ export class InvalidChecksumError extends FloError {
 }
 
 /**
+ * Error thrown when an answer's header claims more data than the server
+ * ever sends. The connection is closed: nothing after it can be framed.
+ */
+export class AnswerTooLargeError extends FloError {
+  constructor(dataLen: number, max: number) {
+    super(`flo: answer of ${dataLen} data bytes is over the ${max} an answer carries`);
+    this.name = "AnswerTooLargeError";
+  }
+}
+
+/**
  * Error thrown when the response is incomplete.
  */
 export class IncompleteResponseError extends FloError {

@@ -20,6 +20,8 @@ import {
   UnexpectedEOFError,
   VERSION,
   TABLE_HASH,
+  MAX_ANSWER_BYTES,
+  AnswerTooLargeError,
   TableMismatchError,
   computeCRC32C,
   parseResponseHeader,
@@ -326,6 +328,32 @@ describe("TcpTransport framing and failures", () => {
       if (serverSock!.readableEnded) resolve();
       else serverSock!.once("end", () => resolve());
     });
+  });
+
+  it("refuses an answer claiming more than an answer carries, from its header alone", async () => {
+    let serverSock: net.Socket | undefined;
+    const t = await connect((sock, id) => {
+      serverSock = sock;
+      // Only the header is sent: the client must not wait for the rest.
+      const r = response(id).subarray(0, HEADER_SIZE);
+      new DataView(r.buffer, r.byteOffset, r.byteLength).setUint32(4, MAX_ANSWER_BYTES - HEADER_SIZE + 1, true);
+      sock.write(r);
+    });
+    const err = await t.sendAndReceive(request(1n)).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AnswerTooLargeError);
+    expect((err as Error).message).toContain(`${MAX_ANSWER_BYTES - HEADER_SIZE + 1}`);
+    expect(t.isConnected()).toBe(false);
+    await new Promise<void>((resolve) => {
+      if (serverSock!.readableEnded) resolve();
+      else serverSock!.once("end", () => resolve());
+    });
+  });
+
+  it("takes an answer of exactly the most an answer carries", async () => {
+    const body = new Uint8Array(MAX_ANSWER_BYTES - HEADER_SIZE);
+    const t = await connect((sock, id) => sock.write(response(id, body)));
+    const got = await t.sendAndReceive(request(1n));
+    expect(got.length).toBe(MAX_ANSWER_BYTES);
   });
 
   it("refuses an answer from another table unread and closes the connection", async () => {

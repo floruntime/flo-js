@@ -36,6 +36,7 @@ import {
   WorkerStatus,
   WorkerType,
   consoleLogger,
+  isOutcomePending,
   isRefusedUnrun,
   silentLogger,
   type ProcessEntry,
@@ -444,6 +445,8 @@ export class StreamWorker {
     try {
       await this.joinGroup();
     } catch (err) {
+      // Committed but not applied: resending it would write it twice.
+      if (isOutcomePending(err)) throw err;
       // A connection error here surfaces again on the next read.
       this.logger.warn(`Re-join after reconnect failed: ${err}`);
     }
@@ -516,6 +519,8 @@ export class StreamWorker {
           if (this.leaving()) break;
           await this.recover(err, connection);
           unproven = true;
+        } else if (isOutcomePending(err)) {
+          throw err;
         } else if (!(await halted.waitIf(err, "GroupRead", this.leave.signal))) {
           const d = failed.next();
           this.log(`GroupRead error: ${err}, retrying in ${d}ms...`);

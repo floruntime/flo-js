@@ -34,6 +34,7 @@ import {
   ProcessKind,
   Reason,
   ServerError,
+  isOutcomePending,
   StatusCode,
   WorkerStatus,
   WorkerType,
@@ -580,6 +581,8 @@ export class ActionWorker {
     try {
       await this.register(actionNames);
     } catch (err) {
+      // Committed but not applied: resending it would write it twice.
+      if (isOutcomePending(err)) throw err;
       // A connection error here surfaces again on the next poll.
       this.logger.warn(`Re-register after reconnect failed: ${err}`);
     }
@@ -640,6 +643,8 @@ export class ActionWorker {
           if (this.leaving()) break;
           await this.recover(actionNames, err, connection);
           unproven = true;
+        } else if (isOutcomePending(err)) {
+          throw err;
         } else if (err instanceof ServerError && err.reason === Reason.WorkerDraining) {
           this.log("The server drained this worker; finishing its running work");
           this.beginDrain();

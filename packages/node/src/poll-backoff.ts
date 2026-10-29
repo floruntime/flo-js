@@ -1,4 +1,4 @@
-import { Backoff, type Logger, Reason, ServerError } from "@floruntime/core";
+import { Backoff, type Logger, Ran, Reason, ServerError, StatusCode } from "@floruntime/core";
 
 /** The longest delay Node's timers keep; past it they fire after 1 ms. */
 export const MAX_TIMER_MS = 2_147_483_647;
@@ -61,9 +61,13 @@ export function newWorkerBackoff(): Backoff {
 export const HALT_INITIAL_BACKOFF_MS = 100;
 export const HALT_MAX_BACKOFF_MS = 30_000;
 
-/** Whether err is a refusal from a halted shard. */
+/**
+ * Whether err is a halted shard refusing a request it didn't run. An
+ * outcome_pending refusal carries the same reason but committed, so it is
+ * not one: resending it would write it twice, or halt the shard again.
+ */
 export function isShardHalted(err: unknown): err is ServerError {
-  return err instanceof ServerError && err.reason === Reason.ShardHalted;
+  return err instanceof ServerError && err.status === StatusCode.Unavailable && err.ran === Ran.No && err.reason === Reason.ShardHalted;
 }
 
 /**
@@ -83,10 +87,15 @@ export class HaltBackoff {
    */
   async waitIf(err: unknown, call: string, signal: AbortSignal): Promise<boolean> {
     if (!isShardHalted(err)) return false;
-    const d = this.backoff.next();
+    const d = this.nextWait();
     this.logger.warn(`${call} refused, shard halted: ${err.serverMessage}; retrying in ${d}ms`);
     await pause(d, signal);
     return true;
+  }
+
+  /** The next wait in ms: jittered, its ceiling doubling to HALT_MAX_BACKOFF_MS. */
+  nextWait(): number {
+    return this.backoff.next();
   }
 
   /** Start the waits again from the bottom, after a call that went through. */

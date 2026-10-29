@@ -117,6 +117,9 @@ export function reasonName(r: Reason): string {
 }
 export const HEADER_SIZE = 32;
 
+/** Most bytes one answer frame carries, header included; the server sends no more. */
+export const MAX_ANSWER_BYTES = 256 * 1024;
+
 /** Response flag: a halted shard answered from its state before the halt. */
 export const RESPONSE_STALE = 0x01;
 
