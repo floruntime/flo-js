@@ -13,7 +13,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { NotFoundError, ProcessKind, Ran, Reason, ServerError, StatusCode, TABLE_HASH, VERSION, WorkerStatus, WorkerType, type WorkerInfo } from "@floruntime/core";
+import { ConflictError, NotFoundError, ProcessKind, Ran, Reason, ServerError, StatusCode, TABLE_HASH, VERSION, WorkerStatus, WorkerType, type WorkerInfo } from "@floruntime/core";
 import { ActionWorker, FloClient } from "@floruntime/node";
 
 const endpoint = process.env.FLO_ENDPOINT ?? "";
@@ -120,6 +120,15 @@ describe.skipIf(!endpoint)("live", () => {
     for (const p of ["one", "two", "three"]) await client.stream.append("events", encoder.encode(p));
     const res = await client.stream.read("events");
     expect(res.records.map((r) => decoder.decode(r.payload))).toEqual(["one", "two", "three"]);
+  });
+
+  it("deletes a stream: a non-empty one only with force, a missing one without complaint", async () => {
+    const { client } = await liveClient();
+    await client.stream.append("doomed", encoder.encode("x"));
+    await expect(client.stream.delete("doomed")).rejects.toBeInstanceOf(ConflictError);
+    await client.stream.delete("doomed", { force: true });
+    expect((await client.stream.read("doomed")).records).toHaveLength(0);
+    await client.stream.delete("doomed");
   });
 
   it("enqueues, dequeues and acks a message", async () => {

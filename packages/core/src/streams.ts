@@ -313,6 +313,36 @@ export class StreamOperations {
   }
 
   /**
+   * Delete a stream's records and metadata.
+   *
+   * A non-empty stream is refused with `ConflictError` unless `force` is set.
+   * Deleting a stream that doesn't exist succeeds.
+   *
+   * @param stream - Stream name
+   * @param opts - Optional namespace override; `force` to delete a non-empty stream
+   */
+  async delete(stream: string, opts?: { namespace?: string; force?: boolean }): Promise<void> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+
+    const builder = new OptionsBuilder();
+    if (opts?.force) {
+      builder.addFlag(OptionTag.Force);
+    }
+
+    const resp = await this.sender.sendRequest(
+      OpCode.StreamDelete,
+      namespace,
+      textEncoder.encode(stream),
+      new Uint8Array(0),
+      builder.build()
+    );
+
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+  }
+
+  /**
    * Read records as part of a consumer group.
    *
    * Consumer groups enable load balancing across multiple consumers.

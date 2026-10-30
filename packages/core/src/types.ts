@@ -204,6 +204,7 @@ export const OpCode = {
   StreamList: 0x13b,
   StreamCreate: 0x13d,
   StreamAlter: 0x13f,
+  StreamDelete: 0x140,
 
   // ── Stream Consumer Groups (0x150 – 0x16F) ──
   StreamGroupCreate: 0x150,
@@ -368,6 +369,7 @@ export const OptionTag = {
   PartitionKey: 0x25, // string: Key for partition routing
   MaxAgeSeconds: 0x26, // u64: Maximum age in seconds for retention
   DryRun: 0x28, // void: Flag to preview what would be deleted without deleting
+  Force: 0x2c, // void: Allow a destructive op, e.g. deleting a non-empty stream
 
   // Consumer Group Options (0x30 - 0x3F)
   AckTimeoutMS: 0x30, // u32: Time before unacked message auto-redelivers (overrides default)

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `stream.delete(stream, { namespace?, force? })` (`OpCode.StreamDelete`, 0x140; `OptionTag.Force`, 0x2c): deletes a stream's records and metadata. A non-empty stream is refused with `ConflictError` unless `force` is set; deleting a missing stream succeeds.
 - `StatusCode.NoNamespace` (14) and `NoNamespaceError` (`isNoNamespace`): the namespace a request names doesn't exist. It is not a `NotFoundError`, which means a missing key, so a `kv.get` in a missing namespace throws rather than returning null. `Reason.AdminOnly` (30): the op is served only on a node's admin socket. `OpCode.NamespaceEnsure` (0x016, sent only between shards) and `OpCode.ClusterRepairSkip` (0x034, admin socket only) are known; the client sends neither. The table hash moves with the server in the same release.
 - `ActionListOptions.cursor`: `action.list` pages; pass the previous page's `cursor` to get the next.
 - `MAX_ANSWER_BYTES` and `AnswerTooLargeError`: an answer whose header claims more than 256 KiB, header included, is refused from its header alone; the connection is closed and the requests waiting on it fail, rather than buffering whatever the peer sends.
