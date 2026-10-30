@@ -85,15 +85,17 @@ describe("list requests", () => {
     });
   }
 
-  it("action.list sends [limit] in the value", async () => {
+  it("action.list sends [limit][cursor] in the value", async () => {
     const { sender, sent } = capture();
     await expect(new ActionOperations(sender).list({ limit: 5 })).rejects.toThrow("captured");
+    await expect(new ActionOperations(sender).list({ limit: 5, cursor })).rejects.toThrow("captured");
     expect(sent[0]!.op).toBe(OpCode.ActionList);
     expect(Array.from(sent[0]!.value)).toEqual([5, 0, 0, 0]);
+    expect(Array.from(sent[1]!.value)).toEqual([5, 0, 0, 0, ...cursor]);
     expect(sent[0]!.options.length).toBe(0);
   });
 
-  it("kv.scan and the web kv.scan send limit (present) then a u8-prefixed cursor, and no options", async () => {
+  it("kv.scan and the web kv.scan send limit (present) then a u16-prefixed cursor, and no options", async () => {
     for (const call of [
       (s: never) => new KVOperations(s).scan("p", { limit: 5, cursor }),
       (s: never) => new KVReadOnlyOperations(s).scan("p", { limit: 5, cursor }),
@@ -101,7 +103,7 @@ describe("list requests", () => {
       const { sender, sent } = capture();
       await expect(call(sender)).rejects.toThrow("captured");
       expect(sent[0]!.op).toBe(OpCode.KVScan);
-      expect(Array.from(sent[0]!.value)).toEqual([1, 5, 0, 0, 0, 4, ...cursor]);
+      expect(Array.from(sent[0]!.value)).toEqual([1, 5, 0, 0, 0, 4, 0, ...cursor]);
       expect(sent[0]!.options.length).toBe(0);
     }
   });
@@ -109,7 +111,7 @@ describe("list requests", () => {
   it("kv.scan asks for 1024 names (the server's default) from the first page by default", async () => {
     const { sender, sent } = capture();
     await expect(new KVOperations(sender).scan("p")).rejects.toThrow("captured");
-    expect(Array.from(sent[0]!.value)).toEqual([1, 0, 4, 0, 0, 0]);
+    expect(Array.from(sent[0]!.value)).toEqual([1, 0, 4, 0, 0, 0, 0]);
   });
 });
 
@@ -159,6 +161,37 @@ function answering(data: Uint8Array): { sender: never; sent: Sent[] } {
   };
   return { sender: sender as never, sent };
 }
+
+/** An action.list answer: [count:u32]([name_len:u16][name][value_len:u32])*[has_more:u8][cursor_len:u16][cursor]. */
+function actionPage(names: string[], next?: Uint8Array): Uint8Array {
+  const out = [names.length, 0, 0, 0];
+  for (const n of names) {
+    const b = new TextEncoder().encode(n);
+    out.push(b.length & 0xff, b.length >> 8, ...b, 0, 0, 0, 0);
+  }
+  const c = next ?? new Uint8Array(0);
+  out.push(next ? 1 : 0, c.length & 0xff, c.length >> 8, ...c);
+  return new Uint8Array(out);
+}
+
+describe("action.list", () => {
+  it("returns a page of names and the cursor that asks for the next", async () => {
+    const first = answering(actionPage(["a", "b"], cursor));
+    expect(await new ActionOperations(first.sender).list({ limit: 2 })).toEqual({ names: ["a", "b"], hasMore: true, cursor });
+    const last = answering(actionPage(["c"]));
+    expect(await new ActionOperations(last.sender).list({ limit: 2, cursor })).toEqual({ names: ["c"], hasMore: false, cursor: null });
+    expect(Array.from(last.sent[0]!.value)).toEqual([2, 0, 0, 0, ...cursor]);
+  });
+
+  it("refuses an answer cut short, with bytes left over, or with has_more and no cursor", async () => {
+    const whole = actionPage(["a"], cursor);
+    for (let n = 0; n < whole.length; n++) {
+      await expect(new ActionOperations(answering(whole.subarray(0, n)).sender).list()).rejects.toBeInstanceOf(IncompleteResponseError);
+    }
+    await expect(new ActionOperations(answering(new Uint8Array([...whole, 0])).sender).list()).rejects.toBeInstanceOf(IncompleteResponseError);
+    await expect(new ActionOperations(answering(new Uint8Array([0, 0, 0, 0, 1, 0, 0])).sender).list()).rejects.toBeInstanceOf(IncompleteResponseError);
+  });
+});
 
 describe("worker.list", () => {
   it("is a table op: its body is limit (present), then a u16-prefixed cursor and action", async () => {

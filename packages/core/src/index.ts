@@ -169,6 +169,7 @@ export {
   ServerError,
   NotFoundError,
   StaleNotFoundError,
+  NoNamespaceError,
   AnswerTooLargeError,
   BadRequestError,
   ConflictError,
@@ -180,6 +181,7 @@ export {
   createServerError,
   // Error type guards
   isNotFound,
+  isNoNamespace,
   isConflict,
   isBadRequest,
   isUnauthorized,
@@ -252,6 +254,7 @@ export {
   WorkerOperations,
   type RequestSender as ActionRequestSender,
   parseActionInvokeAnswer,
+  decodeActionListAnswer,
 } from "./actions.js";
 export {
   WorkflowOperations,

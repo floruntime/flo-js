@@ -3,7 +3,7 @@
  */
 
 import { createServerError, IncompleteResponseError } from "./errors.js";
-import { decodeActionStatusAnswer, decodeWorkerInfoAnswer, decodeWorkerListAnswer, encodeWorkerListBody, MAX_WORKER_LIST_LIMIT } from "./kv_body.js";
+import { AnswerReader, decodeActionStatusAnswer, decodeWorkerInfoAnswer, decodeWorkerListAnswer, encodeWorkerListBody, MAX_WORKER_LIST_LIMIT } from "./kv_body.js";
 import {
   type ActionDeleteOptions,
   type ActionInvokeOptions,
@@ -163,15 +163,15 @@ export class ActionOperations {
   }
 
   /**
-   * List registered actions.
+   * List a page of registered action names. Pass the result's `cursor` to
+   * get the next page.
    *
    * @param opts - List options
-   * @returns ActionListResult with list of actions
    */
   async list(opts?: ActionListOptions): Promise<ActionListResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
-    const value = serializeListValue(opts?.limit ?? 100);
+    const value = serializeListValue(opts?.limit ?? 100, opts?.cursor);
 
     const resp = await this.sender.sendRequest(
       OpCode.ActionList,
@@ -185,8 +185,7 @@ export class ActionOperations {
       throw createServerError(resp.status, resp.data);
     }
 
-    // Parse list response - format TBD based on server implementation
-    return { actions: [] };
+    return decodeActionListAnswer(resp.data);
   }
 
   /**
@@ -521,4 +520,24 @@ export function parseActionInvokeAnswer(data: Uint8Array): string {
     throw new IncompleteResponseError(`invoke answer: run id length ${len} in ${data.length} bytes`);
   }
   return textDecoder.decode(data.subarray(2, 2 + len));
+}
+
+/**
+ * action.list's answer: [count:u32]([name_len:u16][name][value_len:u32][value])*
+ * [has_more:u8][cursor_len:u16][cursor]. The server sends each value empty.
+ */
+export function decodeActionListAnswer(data: Uint8Array): ActionListResult {
+  const r = new AnswerReader(data);
+  const names: string[] = [];
+  for (let n = r.u32(); n > 0; n--) {
+    names.push(r.string16());
+    r.bytes32();
+  }
+  const hasMore = r.bool();
+  const cursor = r.bytes16();
+  r.end();
+  if (hasMore !== cursor.length > 0) {
+    throw new IncompleteResponseError(`action list answer: has_more ${hasMore} with a cursor of ${cursor.length} bytes`);
+  }
+  return { names, hasMore, cursor: hasMore ? cursor : null };
 }
