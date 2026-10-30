@@ -1450,8 +1450,22 @@ export interface WorkflowEnableOptions {
  */
 export interface WorkflowListDefinitionsOptions {
   namespace?: string;
+  /** Most definitions on the page (default 100). */
   limit?: number;
-  cursor?: Uint8Array;
+  /** The previous page's cursor; omit for the first page. */
+  cursor?: Uint8Array | null;
+}
+
+/**
+ * A page of workflow definitions. A page may hold fewer than `limit` while
+ * `hasMore` is true: keep asking until it is false.
+ */
+export interface WorkflowListDefinitionsResult {
+  definitions: WorkflowDefinitionEntry[];
+  /** Whether another page follows. */
+  hasMore: boolean;
+  /** Pass as the next call's cursor; null on the last page. */
+  cursor: Uint8Array | null;
 }
 
 /**
@@ -1519,8 +1533,22 @@ export interface ProcessingStatusOptions {
  */
 export interface ProcessingListOptions {
   namespace?: string;
+  /** Most jobs on the page (default 100). */
   limit?: number;
-  cursor?: Uint8Array;
+  /** The previous page's cursor; omit for the first page. */
+  cursor?: Uint8Array | null;
+}
+
+/**
+ * A page of processing jobs. A page may hold fewer than `limit` while
+ * `hasMore` is true: keep asking until it is false.
+ */
+export interface ProcessingListResult {
+  jobs: ProcessingListEntry[];
+  /** Whether another page follows. */
+  hasMore: boolean;
+  /** Pass as the next call's cursor; null on the last page. */
+  cursor: Uint8Array | null;
 }
 
 /**

@@ -181,10 +181,14 @@ async function main() {
     // ============================================================
     console.log("=== 5. List Processing Jobs ===");
 
-    const jobs = await client.processing.list();
-    for (const job of jobs) {
-      console.log(`  ${job.name} (${job.job_id}) — ${job.status}`);
-    }
+    let jobsCursor: Uint8Array | null = null;
+    do {
+      const page = await client.processing.list({ cursor: jobsCursor });
+      for (const job of page.jobs) {
+        console.log(`  ${job.name} (${job.job_id}) — ${job.status}`);
+      }
+      jobsCursor = page.cursor;
+    } while (jobsCursor);
     console.log();
 
     // ============================================================

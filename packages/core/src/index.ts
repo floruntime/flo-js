@@ -123,6 +123,7 @@ export {
   type WorkflowEnableOptions,
   type WorkflowListDefinitionsOptions,
   type WorkflowDefinitionEntry,
+  type WorkflowListDefinitionsResult,
   type WorkflowSyncOptions,
   type WorkflowSyncResult,
   type WorkflowSyncDirFile,
@@ -135,6 +136,7 @@ export {
   type ProcessingCancelOptions,
   type ProcessingStatusResult,
   type ProcessingListEntry,
+  type ProcessingListResult,
   type ProcessingSyncOptions,
   type ProcessingSyncResult,
   type ProcessingSyncDirFile,
@@ -258,12 +260,14 @@ export {
 } from "./actions.js";
 export {
   WorkflowOperations,
+  decodeDefinitionsAnswer,
   extractWorkflowMeta,
   extractYAMLField,
   type RequestSender as WorkflowRequestSender,
 } from "./workflows.js";
 export {
   ProcessingOperations,
+  decodeProcessingListAnswer,
   extractProcessingMeta,
   type RequestSender as ProcessingRequestSender,
 } from "./processing.js";
