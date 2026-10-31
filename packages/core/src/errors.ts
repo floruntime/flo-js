@@ -232,8 +232,9 @@ export class StaleNotFoundError extends NotFoundError {
 }
 
 /**
- * Error thrown when the namespace a request names doesn't exist. Not a
- * NotFoundError: that means a missing key, and a get must not read a
+ * Error thrown when the namespace a request names doesn't exist: a read,
+ * list or scan in a namespace that was never created (a write creates it).
+ * Not a NotFoundError: that means a missing key, and a get must not read a
  * missing namespace as an absent key.
  */
 export class NoNamespaceError extends ServerError {

@@ -13,7 +13,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ConflictError, NotFoundError, ProcessKind, Ran, Reason, ServerError, StatusCode, TABLE_HASH, VERSION, WorkerStatus, WorkerType, type WorkerInfo } from "@floruntime/core";
+import { ConflictError, NoNamespaceError, NotFoundError, ProcessKind, Ran, Reason, ServerError, StatusCode, TABLE_HASH, VERSION, WorkerStatus, WorkerType, type WorkerInfo } from "@floruntime/core";
 import { ActionWorker, FloClient } from "@floruntime/node";
 
 const endpoint = process.env.FLO_ENDPOINT ?? "";
@@ -213,6 +213,87 @@ describe.skipIf(!endpoint)("live", () => {
     });
   });
 
+  it("answers stream.info of a stream that doesn't exist not found, not as an empty stream", async () => {
+    const { client } = await liveClient();
+    await client.stream.append("present", encoder.encode("x")); // creates the namespace
+    expect((await client.stream.info("present")).count).toBe(1n);
+    const err = await client.stream.info("absent").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NotFoundError);
+    expect(err).toMatchObject({ status: StatusCode.NotFound });
+  });
+
+  it("refuses a read in a namespace that was never created as no_namespace", async () => {
+    const { client } = await liveClient();
+    for (const read of [() => client.kv.get("k"), () => client.kv.scan(""), () => client.stream.read("s")]) {
+      const err = await read().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(NoNamespaceError);
+      expect(err).toMatchObject({ status: StatusCode.NoNamespace });
+    }
+    // A write creates it; the same read then finds nothing.
+    await client.kv.put("other", encoder.encode("x"));
+    expect(await client.kv.get("k")).toBeNull();
+  });
+
+  describe("workflow runs", () => {
+    const yaml = (name: string) =>
+      `kind: Workflow\nname: ${name}\nversion: "1.0.0"\n\nstart:\n  run: "@actions/validate"\n  transitions:\n    success: flo.Completed\n    failure: flo.Failed\n`;
+
+    it("listRuns pages through every run, each once, newest first", async () => {
+      const { client } = await liveClient();
+      const workflows = ["wf-a", "wf-b", "wf-c", "wf-d"];
+      for (const wf of workflows) await client.workflow.create(wf, yaml(wf));
+      const started: { runId: string; workflow: string }[] = [];
+      for (let i = 0; i < 5; i++) {
+        for (const wf of workflows) started.push({ runId: await client.workflow.start(wf, { i }), workflow: wf });
+      }
+
+      async function all(workflowName?: string): Promise<{ runId: string; workflow: string; createdAt: number }[]> {
+        const got: { runId: string; workflow: string; createdAt: number }[] = [];
+        let cursor: Uint8Array | undefined;
+        for (let pages = 0; ; pages++) {
+          expect(pages, `still paging after ${got.length} runs`).toBeLessThan(100);
+          const p = await client.workflow.listRuns({ workflowName, limit: 3, cursor });
+          expect(p.runs.length).toBeLessThanOrEqual(3);
+          got.push(...p.runs.map((r) => ({ runId: r.run_id, workflow: r.workflow, createdAt: r.created_at })));
+          if (!p.hasMore) return got;
+          cursor = p.cursor!;
+        }
+      }
+      const newestFirst = (runs: { runId: string; createdAt: number }[]) =>
+        [...runs].sort((a, b) => b.createdAt - a.createdAt || (a.runId < b.runId ? -1 : a.runId > b.runId ? 1 : 0));
+      const key = (r: { runId: string; workflow: string }) => `${r.workflow}/${r.runId}`;
+
+      const every = await all();
+      expect(every.map(key).sort()).toEqual(started.map(key).sort());
+      expect(every).toEqual(newestFirst(every));
+
+      const one = await all("wf-b");
+      expect(one.map(key).sort()).toEqual(started.filter((r) => r.workflow === "wf-b").map(key).sort());
+      expect(one).toEqual(newestFirst(one));
+    }, 30000);
+
+    it("finds a run started with a client-chosen id by that id, and refuses the id again", async () => {
+      const { client } = await liveClient();
+      // It waits for a signal it is never sent, so it is still running when
+      // signalled and cancelled.
+      await client.workflow.create("orders", `kind: Workflow\nname: orders\nversion: "1.0.0"\n\nstart:\n  wait_for_signal:\n    type: go\n  transitions:\n    success: flo.Completed\n`);
+      await client.workflow.create("other", yaml("other"));
+      for (const runId of ["order-123", "run-1", "6f1c2b9e-4d3a-4e8f-9a7b-2c5d1e0f3a4b"]) {
+        expect(await client.workflow.start("orders", { id: runId }, { runId })).toBe(runId);
+        const status = await client.workflow.status(runId);
+        expect(status).toMatchObject({ run_id: runId, workflow: "orders" });
+        expect((await client.workflow.history(runId)).length).toBeGreaterThan(0);
+        const listed = await client.workflow.listRuns({ workflowName: "orders", search: runId });
+        expect(listed.runs.map((r) => r.run_id)).toContain(runId);
+        await client.workflow.signal(runId, "nudge", encoder.encode("{}"));
+        await client.workflow.cancel(runId, "done");
+        expect((await client.workflow.status(runId)).status).toBe("cancelled");
+        const err = await client.workflow.start("other", {}, { runId }).catch((e: unknown) => e);
+        expect(err, `second start of ${runId}`).toBeInstanceOf(ConflictError);
+      }
+    }, 30000);
+  });
+
   it("deletes a stream: a non-empty one only with force, a missing one without complaint", async () => {
     const { client } = await liveClient();
     await client.stream.append("doomed", encoder.encode("x"));
@@ -332,6 +413,7 @@ describe.skipIf(!endpoint)("live", () => {
 
   it("answers worker.info for a missing worker not found", async () => {
     const { client } = await liveClient();
+    await client.worker.register("w-other", ["a"]); // creates the namespace
     const err = await client.worker.info("w-missing").catch((e: unknown) => e);
     expect(err).toBeInstanceOf(NotFoundError);
     expect(err).toMatchObject({ status: StatusCode.NotFound, reason: Reason.NotFound });
@@ -408,6 +490,9 @@ describe.skipIf(!expiryEndpoint)("live, on a server that removes silent workers"
   // worker between beats, and the next beat answers not found.
   it("a removed worker registers again with the same options, and still runs actions", async () => {
     const { client, namespace } = await liveClient(expiryEndpoint);
+    // Lists below may run before the worker registers, the write that would
+    // create the namespace; one never created answers no_namespace.
+    await client.kv.put("made", encoder.encode("1"));
     const warned: string[] = [];
     const logger = { debug: () => {}, warn: (m: string) => void warned.push(m), error: () => {} };
     const workerId = `exp-${randomBytes(4).toString("hex")}`;

@@ -7,7 +7,7 @@
  * operations that map to the workflow opcodes (0x80–0x93).
  */
 
-import { createServerError, IncompleteResponseError } from "./errors.js";
+import { createServerError, FloError, IncompleteResponseError } from "./errors.js";
 import { AnswerReader } from "./kv_body.js";
 import {
   OpCode,
@@ -23,6 +23,7 @@ import {
   type WorkflowHistoryEvent,
   type WorkflowListRunsOptions,
   type WorkflowListRunEntry,
+  type WorkflowListRunsResult,
   type WorkflowGetDefinitionOptions,
   type WorkflowDisableOptions,
   type WorkflowEnableOptions,
@@ -362,35 +363,24 @@ export class WorkflowOperations {
   }
 
   /**
-   * List workflow runs, optionally filtered by workflow name and status.
+   * One page of workflow runs, newest first: one workflow's, or every
+   * workflow's when `workflowName` is omitted. Pass the page's `cursor` to
+   * get the next; stop when `hasMore` is false, not on a short page.
    *
-   * @param opts - Options (namespace, workflowName, statusFilter, limit)
+   * @param opts - Options (namespace, workflowName, status, cursor, search, limit)
    */
   async listRuns(
     opts?: WorkflowListRunsOptions
-  ): Promise<WorkflowListRunEntry[]> {
+  ): Promise<WorkflowListRunsResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
     const key = opts?.workflowName
       ? textEncoder.encode(opts.workflowName)
       : new Uint8Array(0);
-
-    // Value: [limit:u32][status_len:u16][status]?
-    const limit = opts?.limit ?? 100;
-    const statusBytes = opts?.statusFilter
-      ? textEncoder.encode(opts.statusFilter)
-      : new Uint8Array(0);
-
-    const value = new Uint8Array(4 + 2 + statusBytes.length);
-    const view = new DataView(value.buffer);
-    view.setUint32(0, limit, true);
-    view.setUint16(4, statusBytes.length, true);
-    value.set(statusBytes, 6);
-
     const resp = await this.sender.sendRequest(
       OpCode.WorkflowListRuns,
       namespace,
       key,
-      value,
+      serializeListRunsValue(opts),
       new Uint8Array(0)
     );
 
@@ -398,11 +388,7 @@ export class WorkflowOperations {
       throw createServerError(resp.status, resp.data);
     }
 
-    // Server returns binary wire format:
-    // [count:u32]([run_id_len:u16][run_id][workflow_len:u16][workflow]
-    //  [status_len:u16][status][created_at:i64])*
-    // [has_more:u8][cursor_len:u16]
-    return parseWireListRuns(resp.data);
+    return decodeListRunsAnswer(resp.data);
   }
 
   /**
@@ -774,41 +760,58 @@ function parseWireHistory(data: Uint8Array): WorkflowHistoryEvent[] {
 }
 
 /**
- * Parse binary wire format for workflow run listing.
- *
- * Wire format: [count:u32]([run_id_len:u16][run_id][workflow_len:u16][workflow]
- *              [status_len:u16][status][created_at:i64])*
- *              [has_more:u8][cursor_len:u16]
+ * workflow.listRuns' value: [limit:u32][status_len:u16][status]
+ * [cursor_len:u16][cursor][search_len:u16][search]. The server reads every
+ * field, so each is sent, empty as a zero length.
  */
-function parseWireListRuns(data: Uint8Array): WorkflowListRunEntry[] {
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  const count = view.getUint32(0, true);
-  const results: WorkflowListRunEntry[] = [];
-  let pos = 4;
-
-  for (let i = 0; i < count; i++) {
-    const runIdLen = view.getUint16(pos, true);
-    pos += 2;
-    const run_id = textDecoder.decode(data.subarray(pos, pos + runIdLen));
-    pos += runIdLen;
-
-    const workflowLen = view.getUint16(pos, true);
-    pos += 2;
-    const workflow = textDecoder.decode(data.subarray(pos, pos + workflowLen));
-    pos += workflowLen;
-
-    const statusLen = view.getUint16(pos, true);
-    pos += 2;
-    const status = textDecoder.decode(data.subarray(pos, pos + statusLen));
-    pos += statusLen;
-
-    const created_at = Number(view.getBigInt64(pos, true));
-    pos += 8;
-
-    results.push({ run_id, workflow, status, created_at });
+export function serializeListRunsValue(opts?: Pick<WorkflowListRunsOptions, "limit" | "status" | "cursor" | "search">): Uint8Array {
+  const limit = opts?.limit ?? 0;
+  if (!(Number.isInteger(limit) && limit >= 0 && limit < 2 ** 32)) {
+    throw new FloError(`flo: limit must be a whole number from 0 to ${2 ** 32 - 1}, got ${limit}`);
   }
+  const fields = [
+    ["status", textEncoder.encode(opts?.status ?? "")],
+    ["cursor", opts?.cursor ?? new Uint8Array(0)],
+    ["search", textEncoder.encode(opts?.search ?? "")],
+  ] as const;
+  let size = 4;
+  for (const [name, f] of fields) {
+    if (f.length > 0xffff) throw new FloError(`flo: ${name} is ${f.length} bytes, more than a u16 length holds`);
+    size += 2 + f.length;
+  }
+  const buf = new Uint8Array(size);
+  const view = new DataView(buf.buffer);
+  view.setUint32(0, limit, true);
+  let pos = 4;
+  for (const [, f] of fields) {
+    view.setUint16(pos, f.length, true);
+    buf.set(f, pos + 2);
+    pos += 2 + f.length;
+  }
+  return buf;
+}
 
-  return results;
+/**
+ * workflow.listRuns' answer: [count:u32]([run_id_len:u16][run_id]
+ * [workflow_len:u16][workflow][status_len:u16][status][created_at:i64])*
+ * [has_more:u8][cursor_len:u16][cursor].
+ */
+export function decodeListRunsAnswer(data: Uint8Array): WorkflowListRunsResult {
+  const r = new AnswerReader(data);
+  const runs: WorkflowListRunEntry[] = [];
+  for (let n = r.u32(); n > 0; n--) {
+    const run_id = r.string16();
+    const workflow = r.string16();
+    const status = r.string16();
+    runs.push({ run_id, workflow, status, created_at: Number(r.i64()) });
+  }
+  const hasMore = r.bool();
+  const cursor = r.bytes16();
+  r.end();
+  if (hasMore !== cursor.length > 0) {
+    throw new IncompleteResponseError(`workflow runs answer: has_more ${hasMore} with a cursor of ${cursor.length} bytes`);
+  }
+  return { runs, hasMore, cursor: hasMore ? cursor : null };
 }
 
 /**

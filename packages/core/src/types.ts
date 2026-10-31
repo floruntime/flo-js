@@ -14,7 +14,7 @@ export const VERSION = 0x03;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0xa8de7758afa69427n;
+export const TABLE_HASH = 0xc751512225a42d04n;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -1397,11 +1397,15 @@ export interface WorkflowHistoryEvent {
  */
 export interface WorkflowListRunsOptions {
   namespace?: string;
-  /** Filter by workflow name (optional) */
+  /** Only this workflow's runs; omit for every workflow's. */
   workflowName?: string;
-  /** Filter by status: "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "timed_out" */
-  statusFilter?: string;
-  /** Maximum number of runs to return (default: 100) */
+  /** Only runs in this status: "pending" | "running" | "waiting" | "completed" | "failed" | "cancelled" | "timed_out". */
+  status?: string;
+  /** The previous page's cursor; omit for the first page. */
+  cursor?: Uint8Array | null;
+  /** Only runs whose id, workflow, current step, input or search tags hold this, ignoring case. */
+  search?: string;
+  /** Most runs on the page: 0 or omitted asks for 100, and the server caps it at 1024. */
   limit?: number;
 }
 
@@ -1412,7 +1416,20 @@ export interface WorkflowListRunEntry {
   run_id: string;
   workflow: string;
   status: string;
+  /** When the run started, in ms since the epoch. */
   created_at: number;
+}
+
+/**
+ * A page of workflow runs, newest first. A page may hold fewer than `limit`
+ * while `hasMore` is true: keep asking until it is false.
+ */
+export interface WorkflowListRunsResult {
+  runs: WorkflowListRunEntry[];
+  /** Whether another page follows. */
+  hasMore: boolean;
+  /** Pass as the next call's cursor; null on the last page. */
+  cursor: Uint8Array | null;
 }
 
 /**

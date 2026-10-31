@@ -410,7 +410,7 @@ async function main() {
     // ============================================================
     console.log("\n=== List Runs ===");
 
-    const runs = await client.workflow.listRuns({
+    const { runs } = await client.workflow.listRuns({
       workflowName: "process-order",
       limit: 5,
     });
@@ -532,7 +532,7 @@ async function main() {
     console.log("  Waiting 5s for scheduler to auto-trigger runs...");
     await delay(5000);
 
-    const scheduledRuns = await client.workflow.listRuns({
+    const { runs: scheduledRuns } = await client.workflow.listRuns({
       workflowName: "health-monitor",
       limit: 10,
     });
@@ -556,7 +556,7 @@ async function main() {
 
     const countBefore = (
       await client.workflow.listRuns({ workflowName: "health-monitor", limit: 50 })
-    ).length;
+    ).runs.length;
     console.log(`  Runs before pause: ${countBefore}`);
 
     // Wait a full interval — no new runs should appear
@@ -565,7 +565,7 @@ async function main() {
 
     const countAfter = (
       await client.workflow.listRuns({ workflowName: "health-monitor", limit: 50 })
-    ).length;
+    ).runs.length;
     console.log(`  Runs after pause:  ${countAfter}`);
     if (countAfter === countBefore) {
       console.log("  ✓ Schedule paused — no new runs while disabled");
@@ -585,7 +585,7 @@ async function main() {
 
     const countResumed = (
       await client.workflow.listRuns({ workflowName: "health-monitor", limit: 50 })
-    ).length;
+    ).runs.length;
     console.log(`  Runs after resume: ${countResumed}`);
     if (countResumed > countAfter) {
       console.log("  ✓ Schedule resumed — new runs created after enable");
