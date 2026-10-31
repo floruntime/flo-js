@@ -18,6 +18,7 @@ import {
   type ProcessingStatusResult,
   type ProcessingListOptions,
   type ProcessingListEntry,
+  type ProcessingListResult,
   type ProcessingStopOptions,
   type ProcessingCancelOptions,
   type ProcessingSyncOptions,
@@ -116,11 +117,12 @@ export class ProcessingOperations {
   }
 
   /**
-   * List processing jobs.
+   * List one page of processing jobs. Pass the returned `cursor` to get the
+   * next; stop when `hasMore` is false, not on a short page.
    *
-   * @param opts - Options (namespace, limit)
+   * @param opts - Options (namespace, limit, cursor)
    */
-  async list(opts?: ProcessingListOptions): Promise<ProcessingListEntry[]> {
+  async list(opts?: ProcessingListOptions): Promise<ProcessingListResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
     const value = serializeListValue(opts?.limit ?? 100, opts?.cursor);
@@ -137,11 +139,7 @@ export class ProcessingOperations {
       throw createServerError(resp.status, resp.data);
     }
 
-    // Binary wire format:
-    // [count:u32]([name_len:u16][name][job_id_len:u16][job_id]
-    //  [status_len:u16][status][created_at:i64])*
-    // [has_more:u8][cursor_len:u16]
-    return parseWireList(resp.data);
+    return decodeProcessingListAnswer(resp.data);
   }
 
   /**
@@ -350,39 +348,23 @@ function parseWireStatus(data: Uint8Array): ProcessingStatusResult {
 }
 
 /**
- * Parse binary wire format for processing job list.
- *
- * Wire format: [count:u32]([name_len:u16][name][job_id_len:u16][job_id]
- *              [status_len:u16][status][created_at:i64])*
- *              [has_more:u8][cursor_len:u16]
+ * processing.list's answer: [count:u32]([name_len:u16][name][job_id_len:u16][job_id]
+ * [status_len:u16][status][created_at:i64])*[has_more:u8][cursor_len:u16][cursor].
  */
-function parseWireList(data: Uint8Array): ProcessingListEntry[] {
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  const count = view.getUint32(0, true);
-  const results: ProcessingListEntry[] = [];
-  let pos = 4;
-
-  for (let i = 0; i < count; i++) {
-    const nameLen = view.getUint16(pos, true);
-    pos += 2;
-    const name = textDecoder.decode(data.subarray(pos, pos + nameLen));
-    pos += nameLen;
-
-    const jobIdLen = view.getUint16(pos, true);
-    pos += 2;
-    const job_id = textDecoder.decode(data.subarray(pos, pos + jobIdLen));
-    pos += jobIdLen;
-
-    const statusLen = view.getUint16(pos, true);
-    pos += 2;
-    const status = textDecoder.decode(data.subarray(pos, pos + statusLen));
-    pos += statusLen;
-
-    const created_at = Number(view.getBigInt64(pos, true));
-    pos += 8;
-
-    results.push({ name, job_id, status, created_at });
+export function decodeProcessingListAnswer(data: Uint8Array): ProcessingListResult {
+  const r = new AnswerReader(data);
+  const jobs: ProcessingListEntry[] = [];
+  for (let n = r.u32(); n > 0; n--) {
+    const name = r.string16();
+    const job_id = r.string16();
+    const status = r.string16();
+    jobs.push({ name, job_id, status, created_at: Number(r.i64()) });
   }
-
-  return results;
+  const hasMore = r.bool();
+  const cursor = r.bytes16();
+  r.end();
+  if (hasMore !== cursor.length > 0) {
+    throw new IncompleteResponseError(`processing list answer: has_more ${hasMore} with a cursor of ${cursor.length} bytes`);
+  }
+  return { jobs, hasMore, cursor: hasMore ? cursor : null };
 }

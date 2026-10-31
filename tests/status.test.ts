@@ -8,6 +8,8 @@ import {
   HEADER_SIZE,
   InternalError,
   MAGIC,
+  NoNamespaceError,
+  NotFoundError,
   OpCode,
   OverloadedError,
   Ran,
@@ -20,7 +22,10 @@ import {
   computeCRC32C,
   createServerError,
   isInternal,
+  isNoNamespace,
+  isNotFound,
   isUnavailable,
+  reasonName,
   parseRawResponse,
   serializeRequest,
 } from "@floruntime/core";
@@ -81,6 +86,23 @@ describe("createServerError", () => {
     expect(err.status).toBe(200);
     expect(err.message).toContain("200");
     expect(err.message).toContain("from the future");
+  });
+
+  it("maps status 14 to NoNamespaceError, apart from a missing key's NotFoundError", () => {
+    const err = createServerError(14 as StatusCode, refusal("namespace not found", Reason.NotFound));
+    expect(err).toBeInstanceOf(NoNamespaceError);
+    expect(err).not.toBeInstanceOf(NotFoundError);
+    expect(err.status).toBe(StatusCode.NoNamespace);
+    expect(isNoNamespace(err)).toBe(true);
+    expect(isNotFound(err)).toBe(false);
+    expect(err.message).toContain("Namespace not found/not_found");
+    expect(isNoNamespace(createServerError(StatusCode.NotFound, refusal("no key", Reason.NotFound)))).toBe(false);
+  });
+
+  it("knows reason 30, admin_only", () => {
+    expect(Reason.AdminOnly).toBe(30);
+    expect(reasonName(Reason.AdminOnly)).toBe("admin_only");
+    expect((createServerError(StatusCode.BadRequest, refusal("admin socket only", Reason.AdminOnly)) as ServerError).reason).toBe(Reason.AdminOnly);
   });
 
   it("keeps internal_error apart from the retryable statuses", () => {

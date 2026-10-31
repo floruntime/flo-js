@@ -46,8 +46,8 @@ export const MAX_TTL_MS = 18_446_744_073_709n;
 export const MAX_JSON_PATH = 1024;
 /** The longest JSON document kv.json_set takes. */
 export const MAX_JSON_DOCUMENT = 252_819;
-/** The longest scan cursor; its length prefix is a u8. */
-const MAX_SCAN_CURSOR = 64;
+/** The longest scan cursor: the shard (u16), then the longest key. */
+const MAX_SCAN_CURSOR = 2 + 4096;
 /** The most workers one worker.list page holds. */
 export const MAX_WORKER_LIST_LIMIT = 1024;
 /** The longest worker id, and so the longest worker.list cursor. */
@@ -276,8 +276,7 @@ export function encodeScanBody(limit: number, cursor: Uint8Array | undefined): U
   const w = new BodyWriter();
   w.u8(1);
   w.u32(limit);
-  w.u8(c.length);
-  w.bytes(c);
+  w.bytes16(c);
   return w.build();
 }
 
@@ -424,7 +423,7 @@ export function decodeScanAnswer(data: Uint8Array, stale = false): ScanResult {
   const r = new AnswerReader(data);
   const keys: string[] = [];
   for (let n = r.u16(); n > 0; n--) keys.push(r.string16());
-  const cursor = r.present() ? r.bytes8() : null;
+  const cursor = r.present() ? r.bytes16() : null;
   r.end();
   return { keys, cursor, stale };
 }

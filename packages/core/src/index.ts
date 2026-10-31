@@ -56,6 +56,7 @@ export {
   type StreamGroupOptions,
   type StreamAckOptions,
   type StreamNackOptions,
+  type StreamDeleteOptions,
   // KV Option types
   type GetOptions,
   type PutOptions,
@@ -77,7 +78,6 @@ export {
   type PeekOptions,
   // Action types
   ActionType,
-  type ActionInfo,
   type ActionRunStatus,
   type ActionInvokeResult,
   type ActionListResult,
@@ -123,6 +123,7 @@ export {
   type WorkflowEnableOptions,
   type WorkflowListDefinitionsOptions,
   type WorkflowDefinitionEntry,
+  type WorkflowListDefinitionsResult,
   type WorkflowSyncOptions,
   type WorkflowSyncResult,
   type WorkflowSyncDirFile,
@@ -135,6 +136,7 @@ export {
   type ProcessingCancelOptions,
   type ProcessingStatusResult,
   type ProcessingListEntry,
+  type ProcessingListResult,
   type ProcessingSyncOptions,
   type ProcessingSyncResult,
   type ProcessingSyncDirFile,
@@ -169,6 +171,7 @@ export {
   ServerError,
   NotFoundError,
   StaleNotFoundError,
+  NoNamespaceError,
   AnswerTooLargeError,
   BadRequestError,
   ConflictError,
@@ -180,6 +183,7 @@ export {
   createServerError,
   // Error type guards
   isNotFound,
+  isNoNamespace,
   isConflict,
   isBadRequest,
   isUnauthorized,
@@ -252,15 +256,18 @@ export {
   WorkerOperations,
   type RequestSender as ActionRequestSender,
   parseActionInvokeAnswer,
+  decodeActionListAnswer,
 } from "./actions.js";
 export {
   WorkflowOperations,
+  decodeDefinitionsAnswer,
   extractWorkflowMeta,
   extractYAMLField,
   type RequestSender as WorkflowRequestSender,
 } from "./workflows.js";
 export {
   ProcessingOperations,
+  decodeProcessingListAnswer,
   extractProcessingMeta,
   type RequestSender as ProcessingRequestSender,
 } from "./processing.js";

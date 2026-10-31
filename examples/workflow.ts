@@ -236,10 +236,14 @@ async function main() {
     // ============================================================
     console.log("\n=== List Definitions ===");
 
-    const defs = await client.workflow.listDefinitions();
-    for (const def of defs) {
-      console.log(`  ${def.name} v${def.version} (created: ${def.created_at})`);
-    }
+    let defsCursor: Uint8Array | null = null;
+    do {
+      const page = await client.workflow.listDefinitions({ cursor: defsCursor });
+      for (const def of page.definitions) {
+        console.log(`  ${def.name} v${def.version} (created: ${def.created_at})`);
+      }
+      defsCursor = page.cursor;
+    } while (defsCursor);
 
     // ============================================================
     // 3. Get definition YAML

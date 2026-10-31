@@ -14,7 +14,7 @@ export const VERSION = 0x03;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0x05fe53f432e943c4n;
+export const TABLE_HASH = 0xa8de7758afa69427n;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -68,6 +68,8 @@ export enum Reason {
   WorkerDraining = 28,
   /** The shard halted at an entry every replica fails the same way; it takes no writes until an operator repairs it. */
   ShardHalted = 29,
+  /** The op is served only on a node's admin socket. */
+  AdminOnly = 30,
 }
 
 /** Whether a refused request took effect: retry logic reads this, not the message. */
@@ -109,6 +111,7 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.WorkerUnhealthy]: "worker_unhealthy",
   [Reason.WorkerDraining]: "worker_draining",
   [Reason.ShardHalted]: "shard_halted",
+  [Reason.AdminOnly]: "admin_only",
 };
 
 /** The server's name for a reason, as it appears in messages. */
@@ -162,17 +165,16 @@ export const OpCode = {
   NamespaceDelete: 0x011,
   NamespaceList: 0x012,
   NamespaceInfo: 0x013,
-  NamespaceConfigSet: 0x014,
-  NamespaceConfigGet: 0x015,
+  /** Shard to shard only; the SDK never sends it. */
+  NamespaceEnsure: 0x016,
 
   // ── Cluster (0x030 – 0x04F) ──
   ClusterStatus: 0x030,
   ClusterMembers: 0x031,
-  ClusterJoin: 0x032,
-  ClusterLeave: 0x033,
-  ClusterTransferLeader: 0x034,
-  ClusterAddNode: 0x035,
-  ClusterRemoveNode: 0x036,
+  ClusterPromote: 0x032,
+  ClusterRemove: 0x033,
+  /** Served only on a node's admin socket. */
+  ClusterRepairSkip: 0x034,
 
   // ── KV + Transactions + Snapshots (0x100 – 0x12F) ──
   KVPut: 0x100,
@@ -202,6 +204,7 @@ export const OpCode = {
   StreamList: 0x13b,
   StreamCreate: 0x13d,
   StreamAlter: 0x13f,
+  StreamDelete: 0x140,
 
   // ── Stream Consumer Groups (0x150 – 0x16F) ──
   StreamGroupCreate: 0x150,
@@ -300,6 +303,7 @@ export const StatusCode = {
   RateLimited: 11, // Request rate limit exceeded (WebSocket)
   Unavailable: 12, // No leader, or the shard isn't taking writes; retryable
   OutcomePending: 13, // Committed but not applied: its shard halted; never resent
+  NoNamespace: 14, // The namespace the request names doesn't exist; NotFound is a missing key
 } as const;
 
 export type StatusCode = (typeof StatusCode)[keyof typeof StatusCode];
@@ -337,6 +341,8 @@ export function statusCodeToString(status: StatusCode): string {
       return "Unavailable: no leader or the shard isn't taking writes; retry";
     case StatusCode.OutcomePending:
       return "Outcome pending: committed, but its shard halted before applying it";
+    case StatusCode.NoNamespace:
+      return "Namespace not found";
     default:
       // A newer server can send a status this SDK predates.
       return `Unknown status ${status as number}`;
@@ -363,6 +369,7 @@ export const OptionTag = {
   PartitionKey: 0x25, // string: Key for partition routing
   MaxAgeSeconds: 0x26, // u64: Maximum age in seconds for retention
   DryRun: 0x28, // void: Flag to preview what would be deleted without deleting
+  Force: 0x2c, // void: Allow a destructive op, e.g. deleting a non-empty stream
 
   // Consumer Group Options (0x30 - 0x3F)
   AckTimeoutMS: 0x30, // u32: Time before unacked message auto-redelivers (overrides default)
@@ -675,6 +682,15 @@ export interface StreamAckOptions {
   group: string;
   /** Consumer ID. Sent, but the server doesn't check it: any consumer can ack an entry. */
   consumer: string;
+}
+
+/**
+ * Options for deleting a stream.
+ */
+export interface StreamDeleteOptions {
+  namespace?: string;
+  /** Delete the stream even if it has records; without it a non-empty stream is refused. */
+  force?: boolean;
 }
 
 /**
@@ -991,17 +1007,6 @@ export const ActionType = {
 export type ActionType = (typeof ActionType)[keyof typeof ActionType];
 
 /**
- * Information about a registered action.
- */
-export interface ActionInfo {
-  name: string;
-  actionType: ActionType;
-  timeoutMs: number;
-  maxRetries: number;
-  description?: string;
-}
-
-/**
  * Status of an action run.
  */
 export interface ActionRunStatus {
@@ -1035,11 +1040,14 @@ export interface ActionInvokeResult {
 }
 
 /**
- * Result of listing actions.
+ * A page of registered action names.
  */
 export interface ActionListResult {
-  actions: ActionInfo[];
-  cursor?: Uint8Array;
+  names: string[];
+  /** Whether another page follows. */
+  hasMore: boolean;
+  /** Pass as the next call's cursor; null on the last page. */
+  cursor: Uint8Array | null;
 }
 
 /**
@@ -1082,7 +1090,10 @@ export interface ActionStatusOptions {
  */
 export interface ActionListOptions {
   namespace?: string;
+  /** Most names on the page (default 100). */
   limit?: number;
+  /** The previous page's cursor; omit for the first page. */
+  cursor?: Uint8Array | null;
   prefix?: string;
 }
 
@@ -1437,8 +1448,22 @@ export interface WorkflowEnableOptions {
  */
 export interface WorkflowListDefinitionsOptions {
   namespace?: string;
+  /** Most definitions on the page (default 100). */
   limit?: number;
-  cursor?: Uint8Array;
+  /** The previous page's cursor; omit for the first page. */
+  cursor?: Uint8Array | null;
+}
+
+/**
+ * A page of workflow definitions. A page may hold fewer than `limit` while
+ * `hasMore` is true: keep asking until it is false.
+ */
+export interface WorkflowListDefinitionsResult {
+  definitions: WorkflowDefinitionEntry[];
+  /** Whether another page follows. */
+  hasMore: boolean;
+  /** Pass as the next call's cursor; null on the last page. */
+  cursor: Uint8Array | null;
 }
 
 /**
@@ -1506,8 +1531,22 @@ export interface ProcessingStatusOptions {
  */
 export interface ProcessingListOptions {
   namespace?: string;
+  /** Most jobs on the page (default 100). */
   limit?: number;
-  cursor?: Uint8Array;
+  /** The previous page's cursor; omit for the first page. */
+  cursor?: Uint8Array | null;
+}
+
+/**
+ * A page of processing jobs. A page may hold fewer than `limit` while
+ * `hasMore` is true: keep asking until it is false.
+ */
+export interface ProcessingListResult {
+  jobs: ProcessingListEntry[];
+  /** Whether another page follows. */
+  hasMore: boolean;
+  /** Pass as the next call's cursor; null on the last page. */
+  cursor: Uint8Array | null;
 }
 
 /**

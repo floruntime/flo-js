@@ -73,9 +73,13 @@ describe("processing answers", () => {
       str("b"), str("j2"), str("failed"), le(8, 8),
       [0], le(0, 2),
     );
-    expect(await new ProcessingOperations(replying(data)).list()).toEqual([
-      { name: "a", job_id: "j1", status: "running", created_at: 7 },
-      { name: "b", job_id: "j2", status: "failed", created_at: 8 },
-    ]);
+    expect(await new ProcessingOperations(replying(data)).list()).toEqual({
+      jobs: [
+        { name: "a", job_id: "j1", status: "running", created_at: 7 },
+        { name: "b", job_id: "j2", status: "failed", created_at: 8 },
+      ],
+      hasMore: false,
+      cursor: null,
+    });
   });
 });

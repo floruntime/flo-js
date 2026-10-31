@@ -232,6 +232,18 @@ export class StaleNotFoundError extends NotFoundError {
 }
 
 /**
+ * Error thrown when the namespace a request names doesn't exist. Not a
+ * NotFoundError: that means a missing key, and a get must not read a
+ * missing namespace as an absent key.
+ */
+export class NoNamespaceError extends ServerError {
+  constructor(message?: string) {
+    super(StatusCode.NoNamespace, message);
+    this.name = "NoNamespaceError";
+  }
+}
+
+/**
  * Error thrown when the request parameters are invalid.
  */
 export class BadRequestError extends ServerError {
@@ -341,6 +353,8 @@ function serverErrorFor(status: StatusCode, message: string): ServerError {
   switch (status) {
     case StatusCode.NotFound:
       return new NotFoundError(message);
+    case StatusCode.NoNamespace:
+      return new NoNamespaceError(message);
     case StatusCode.BadRequest:
       return new BadRequestError(message);
     case StatusCode.Conflict:
@@ -365,6 +379,13 @@ function serverErrorFor(status: StatusCode, message: string): ServerError {
  */
 export function isNotFound(err: unknown): err is NotFoundError {
   return err instanceof ServerError && err.status === StatusCode.NotFound;
+}
+
+/**
+ * Check if an error is a NoNamespaceError.
+ */
+export function isNoNamespace(err: unknown): err is NoNamespaceError {
+  return err instanceof ServerError && err.status === StatusCode.NoNamespace;
 }
 
 /**

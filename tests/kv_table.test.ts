@@ -26,6 +26,8 @@ import {
   StaleNotFoundError,
   StatusCode,
   isNotFound,
+  isNoNamespace,
+  NoNamespaceError,
   KVReadOnlyOperations,
   Transaction,
   WaitFor,
@@ -109,6 +111,14 @@ describe("kv.get", () => {
     expect((err as ServerError).reason).toBe(Reason.NoSuchTransaction);
   });
 
+  it("throws on a missing namespace rather than reading it as an absent key", async () => {
+    // The server gives no_namespace reason not_found, the reason a missing key has.
+    const err = await new KVOperations(sender(refusal(StatusCode.NoNamespace, Reason.NotFound)).s).get("k").catch((e) => e);
+    expect(err).toBeInstanceOf(NoNamespaceError);
+    expect(isNoNamespace(err)).toBe(true);
+    expect(isNotFound(err)).toBe(false);
+  });
+
   it("refuses a wait past the cap before a round trip, and the read deadline covers a wait", () => {
     const { s } = sender(getAnswer(1n, ""));
     expect(new KVOperations(s).get("k", { waitMs: MAX_WAIT_MS + 1 })).rejects.toBeInstanceOf(BlockTooLongError);
@@ -187,7 +197,7 @@ function seq(...answers: RawResponse[]) {
 describe("request bodies match the server's vectors", () => {
   const cases: [string, OpCode, string, string, (kv: KVOperations) => Promise<unknown>, string, unknown][] = [
     ["delete", OpCode.KVDelete, "k", "010700000000000000010200726b00", (kv) => kv.delete("k", { casVersion: 7n, routingKey: "rk" }), "0101", true],
-    ["scan", OpCode.KVScan, "p", "0102000000026331", (kv) => kv.scan("p", { limit: 2, cursor: enc.encode("c1") }), "02000100610200626201026332", { keys: ["a", "bb"], cursor: enc.encode("c2"), stale: false }],
+    ["scan", OpCode.KVScan, "p", "010200000002006331", (kv) => kv.scan("p", { limit: 2, cursor: enc.encode("c1") }), "0200010061020062620102006332", { keys: ["a", "bb"], cursor: enc.encode("c2"), stale: false }],
     ["history", OpCode.KVHistory, "k", "01020000000000", (kv) => kv.history("k", { limit: 2 }), "020300000000000000e80300000000000000020000007633" + "0200000000000000f4010000000000000100000000" + "01", { versions: [{ version: 3n, atMs: 1000n, deleted: false, value: enc.encode("v3") }, { version: 2n, atMs: 500n, deleted: true, value: new Uint8Array(0) }], more: true, stale: false }],
     ["history before a version", OpCode.KVHistory, "k", "010200000001070000000000000000", (kv) => kv.history("k", { limit: 2, beforeVersion: 7n }), "0000", { versions: [], more: false, stale: false }],
     ["incr", OpCode.KVIncr, "k", "01fbffffffffffffff0000", (kv) => kv.incr("k", { delta: -5n }), "010400000000000000012a00000000000000", { version: 4n, value: 42n }],
@@ -223,6 +233,15 @@ describe("request bodies match the server's vectors", () => {
     await new KVOperations(s).jsonDel("k");
     expect(sent[0]!.value).toEqual(hex("0101002400"));
     expect(sent[1]!.value).toEqual(hex("0101002400"));
+  });
+
+  it("scan passes a cursor longer than 255 bytes both ways, u16-prefixed", async () => {
+    // A cursor is the shard (u16) then the last key, which can be 4096 bytes.
+    const long = new Uint8Array(2 + 4096).map((_, i) => i & 0xff);
+    const answer = new Uint8Array([1, 0, 1, 0, 0x61, 1, 0x02, 0x10, ...long]);
+    const { s, sent } = seq({ status: StatusCode.OK, data: answer, requestId: 0n });
+    expect(await new KVOperations(s).scan("p", { limit: 1, cursor: long })).toEqual({ keys: ["a"], cursor: long, stale: false });
+    expect(sent[0]!.value).toEqual(new Uint8Array([1, 1, 0, 0, 0, 0x02, 0x10, ...long]));
   });
 
   it("scan's last page has no cursor", async () => {
@@ -370,7 +389,7 @@ describe("bounds are refused before a round trip", () => {
     ["an mget routing key over 4096 bytes", (kv) => kv.mget(["a"], { routingKey: "r".repeat(4097) })],
     ["scan limit 0", (kv) => kv.scan("", { limit: 0 })],
     ["scan limit 1025", (kv) => kv.scan("", { limit: MAX_SCAN_LIMIT + 1 })],
-    ["scan cursor of 65 bytes", (kv) => kv.scan("", { cursor: new Uint8Array(65) })],
+    ["scan cursor of 4099 bytes", (kv) => kv.scan("", { cursor: new Uint8Array(4099) })],
     ["history limit 0", (kv) => kv.history("k", { limit: 0 })],
     ["history limit 66", (kv) => kv.history("k", { limit: MAX_HISTORY_LIMIT + 1 })],
     ["expire past MAX_TTL_MS", (kv) => kv.expire("k", MAX_TTL_MS + 1n)],

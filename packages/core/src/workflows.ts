@@ -7,7 +7,8 @@
  * operations that map to the workflow opcodes (0x80–0x93).
  */
 
-import { createServerError } from "./errors.js";
+import { createServerError, IncompleteResponseError } from "./errors.js";
+import { AnswerReader } from "./kv_body.js";
 import {
   OpCode,
   type RawResponse,
@@ -27,6 +28,7 @@ import {
   type WorkflowEnableOptions,
   type WorkflowListDefinitionsOptions,
   type WorkflowDefinitionEntry,
+  type WorkflowListDefinitionsResult,
   type WorkflowSyncOptions,
   type WorkflowSyncResult,
   type WorkflowSyncDirFn,
@@ -524,13 +526,14 @@ export class WorkflowOperations {
   }
 
   /**
-   * List all workflow definitions.
+   * List one page of workflow definitions. Pass the returned `cursor` to get
+   * the next; stop when `hasMore` is false, not on a short page.
    *
-   * @param opts - Options (namespace)
+   * @param opts - Options (namespace, limit, cursor)
    */
   async listDefinitions(
     opts?: WorkflowListDefinitionsOptions
-  ): Promise<WorkflowDefinitionEntry[]> {
+  ): Promise<WorkflowListDefinitionsResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
     const value = serializeListValue(opts?.limit ?? 100, opts?.cursor);
@@ -547,10 +550,7 @@ export class WorkflowOperations {
       throw createServerError(resp.status, resp.data);
     }
 
-    // Server returns binary wire format:
-    // [count:u32]([name_len:u16][name][version_len:u16][version][created_at:i64])*
-    // [has_more:u8][cursor_len:u16]
-    return parseWireDefinitions(resp.data);
+    return decodeDefinitionsAnswer(resp.data);
   }
 
   // ===========================================================================
@@ -721,35 +721,24 @@ export function extractYAMLField(
 }
 
 /**
- * Parse binary wire format for workflow definitions.
- *
- * Wire format: [count:u32]([name_len:u16][name][version_len:u16][version][created_at:i64])*
- *              [has_more:u8][cursor_len:u16]
+ * workflow.listDefinitions' answer: [count:u32]([name_len:u16][name]
+ * [version_len:u16][version][created_at:i64])*[has_more:u8][cursor_len:u16][cursor].
  */
-function parseWireDefinitions(data: Uint8Array): WorkflowDefinitionEntry[] {
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  const count = view.getUint32(0, true);
-  const results: WorkflowDefinitionEntry[] = [];
-  let pos = 4;
-
-  for (let i = 0; i < count; i++) {
-    const nameLen = view.getUint16(pos, true);
-    pos += 2;
-    const name = textDecoder.decode(data.subarray(pos, pos + nameLen));
-    pos += nameLen;
-
-    const versionLen = view.getUint16(pos, true);
-    pos += 2;
-    const version = textDecoder.decode(data.subarray(pos, pos + versionLen));
-    pos += versionLen;
-
-    const createdAt = Number(view.getBigInt64(pos, true));
-    pos += 8;
-
-    results.push({ name, version, created_at: createdAt });
+export function decodeDefinitionsAnswer(data: Uint8Array): WorkflowListDefinitionsResult {
+  const r = new AnswerReader(data);
+  const definitions: WorkflowDefinitionEntry[] = [];
+  for (let n = r.u32(); n > 0; n--) {
+    const name = r.string16();
+    const version = r.string16();
+    definitions.push({ name, version, created_at: Number(r.i64()) });
   }
-
-  return results;
+  const hasMore = r.bool();
+  const cursor = r.bytes16();
+  r.end();
+  if (hasMore !== cursor.length > 0) {
+    throw new IncompleteResponseError(`workflow definitions answer: has_more ${hasMore} with a cursor of ${cursor.length} bytes`);
+  }
+  return { definitions, hasMore, cursor: hasMore ? cursor : null };
 }
 
 /**

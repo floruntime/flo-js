@@ -13,7 +13,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { NotFoundError, ProcessKind, Ran, Reason, ServerError, StatusCode, TABLE_HASH, VERSION, WorkerStatus, WorkerType, type WorkerInfo } from "@floruntime/core";
+import { ConflictError, NotFoundError, ProcessKind, Ran, Reason, ServerError, StatusCode, TABLE_HASH, VERSION, WorkerStatus, WorkerType, type WorkerInfo } from "@floruntime/core";
 import { ActionWorker, FloClient } from "@floruntime/node";
 
 const endpoint = process.env.FLO_ENDPOINT ?? "";
@@ -120,6 +120,106 @@ describe.skipIf(!endpoint)("live", () => {
     for (const p of ["one", "two", "three"]) await client.stream.append("events", encoder.encode(p));
     const res = await client.stream.read("events");
     expect(res.records.map((r) => decoder.decode(r.payload))).toEqual(["one", "two", "three"]);
+  });
+
+  // The server merges a list from at most 8 shards a page and says whether
+  // more follow, so a page can be short while items remain: page with a small
+  // limit until the server says it's done, and every name must come back once.
+  describe("pages every list through to the end, each name once", () => {
+    const names = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix}-${String(i).padStart(2, "0")}`);
+
+    /** Calls `page` with each cursor it hands back until `done`, collecting every name. */
+    async function pageAll<P>(page: (cursor?: Uint8Array) => Promise<P>, read: (p: P) => { names: string[]; done: boolean; cursor: Uint8Array | null }): Promise<string[]> {
+      const got: string[] = [];
+      let cursor: Uint8Array | undefined;
+      for (let pages = 0; ; pages++) {
+        expect(pages, `still paging after ${got.length} names`).toBeLessThan(200);
+        const r = read(await page(cursor));
+        expect(r.names.length).toBeLessThanOrEqual(3);
+        got.push(...r.names);
+        if (r.done) return got;
+        expect(r.cursor, "more to come but no cursor").not.toBeNull();
+        cursor = r.cursor!;
+      }
+    }
+
+    const expectEachOnce = (got: string[], want: string[]) => expect([...got].sort()).toEqual([...want].sort());
+
+    it("kv.scan", async () => {
+      const { client } = await liveClient();
+      const want = names("k", 40);
+      for (const k of want) await client.kv.put(k, encoder.encode("x"));
+      const got = await pageAll(
+        (cursor) => client.kv.scan("", { limit: 3, cursor }),
+        (p) => ({ names: p.keys, done: p.cursor === null, cursor: p.cursor })
+      );
+      expectEachOnce(got, want);
+    });
+
+    it("action.list", async () => {
+      const { client } = await liveClient();
+      const want = names("a", 30);
+      for (const a of want) await client.action.register(a);
+      const got = await pageAll(
+        (cursor) => client.action.list({ limit: 3, cursor }),
+        (p) => ({ names: p.names, done: !p.hasMore, cursor: p.cursor })
+      );
+      expectEachOnce(got, want);
+    });
+
+    it("workflow.listDefinitions", async () => {
+      const { client } = await liveClient();
+      const want = names("wf", 30);
+      for (const name of want) {
+        const yaml = `kind: Workflow\nname: ${name}\nversion: "1.0.0"\n\nstart:\n  run: "@actions/validate"\n  transitions:\n    success: flo.Completed\n    failure: flo.Failed\n`;
+        await client.workflow.create(name, yaml);
+      }
+      const got = await pageAll(
+        (cursor) => client.workflow.listDefinitions({ limit: 3, cursor }),
+        (p) => ({ names: p.definitions.map((d) => d.name), done: !p.hasMore, cursor: p.cursor })
+      );
+      expectEachOnce(got, want);
+    });
+
+    it("processing.list", async () => {
+      const { client } = await liveClient();
+      const want = names("job", 20);
+      const ids: string[] = [];
+      // A KV sink: outside the default namespace the server refuses a stream
+      // sink on another shard than the job's.
+      for (const name of want) {
+        const yaml = `kind: Processing\nname: ${name}\n\nsources:\n  - name: in\n    stream:\n      name: ${name}-in\n\nsinks:\n  - name: out\n    kv:\n      key_prefix: ${name}\n`;
+        ids.push(await client.processing.submit(yaml));
+      }
+      cleanups.push(async () => {
+        for (const id of ids) await client.processing.cancel(id).catch(() => {});
+      });
+      const jobs: { name: string; id: string }[] = [];
+      await pageAll(
+        (cursor) => client.processing.list({ limit: 3, cursor }),
+        (p) => {
+          jobs.push(...p.jobs.map((j) => ({ name: j.name, id: j.job_id })));
+          return { names: p.jobs.map((j) => j.name), done: !p.hasMore, cursor: p.cursor };
+        }
+      );
+      expectEachOnce(
+        jobs.map((j) => j.name),
+        want
+      );
+      expectEachOnce(
+        jobs.map((j) => j.id),
+        ids
+      );
+    });
+  });
+
+  it("deletes a stream: a non-empty one only with force, a missing one without complaint", async () => {
+    const { client } = await liveClient();
+    await client.stream.append("doomed", encoder.encode("x"));
+    await expect(client.stream.delete("doomed")).rejects.toBeInstanceOf(ConflictError);
+    await client.stream.delete("doomed", { force: true });
+    expect((await client.stream.read("doomed")).records).toHaveLength(0);
+    await client.stream.delete("doomed");
   });
 
   it("enqueues, dequeues and acks a message", async () => {

@@ -85,15 +85,17 @@ describe("list requests", () => {
     });
   }
 
-  it("action.list sends [limit] in the value", async () => {
+  it("action.list sends [limit][cursor] in the value", async () => {
     const { sender, sent } = capture();
     await expect(new ActionOperations(sender).list({ limit: 5 })).rejects.toThrow("captured");
+    await expect(new ActionOperations(sender).list({ limit: 5, cursor })).rejects.toThrow("captured");
     expect(sent[0]!.op).toBe(OpCode.ActionList);
     expect(Array.from(sent[0]!.value)).toEqual([5, 0, 0, 0]);
+    expect(Array.from(sent[1]!.value)).toEqual([5, 0, 0, 0, ...cursor]);
     expect(sent[0]!.options.length).toBe(0);
   });
 
-  it("kv.scan and the web kv.scan send limit (present) then a u8-prefixed cursor, and no options", async () => {
+  it("kv.scan and the web kv.scan send limit (present) then a u16-prefixed cursor, and no options", async () => {
     for (const call of [
       (s: never) => new KVOperations(s).scan("p", { limit: 5, cursor }),
       (s: never) => new KVReadOnlyOperations(s).scan("p", { limit: 5, cursor }),
@@ -101,7 +103,7 @@ describe("list requests", () => {
       const { sender, sent } = capture();
       await expect(call(sender)).rejects.toThrow("captured");
       expect(sent[0]!.op).toBe(OpCode.KVScan);
-      expect(Array.from(sent[0]!.value)).toEqual([1, 5, 0, 0, 0, 4, ...cursor]);
+      expect(Array.from(sent[0]!.value)).toEqual([1, 5, 0, 0, 0, 4, 0, ...cursor]);
       expect(sent[0]!.options.length).toBe(0);
     }
   });
@@ -109,7 +111,7 @@ describe("list requests", () => {
   it("kv.scan asks for 1024 names (the server's default) from the first page by default", async () => {
     const { sender, sent } = capture();
     await expect(new KVOperations(sender).scan("p")).rejects.toThrow("captured");
-    expect(Array.from(sent[0]!.value)).toEqual([1, 0, 4, 0, 0, 0]);
+    expect(Array.from(sent[0]!.value)).toEqual([1, 0, 4, 0, 0, 0, 0]);
   });
 });
 
@@ -159,6 +161,37 @@ function answering(data: Uint8Array): { sender: never; sent: Sent[] } {
   };
   return { sender: sender as never, sent };
 }
+
+/** An action.list answer: [count:u32]([name_len:u16][name][value_len:u32])*[has_more:u8][cursor_len:u16][cursor]. */
+function actionPage(names: string[], next?: Uint8Array): Uint8Array {
+  const out = [names.length, 0, 0, 0];
+  for (const n of names) {
+    const b = new TextEncoder().encode(n);
+    out.push(b.length & 0xff, b.length >> 8, ...b, 0, 0, 0, 0);
+  }
+  const c = next ?? new Uint8Array(0);
+  out.push(next ? 1 : 0, c.length & 0xff, c.length >> 8, ...c);
+  return new Uint8Array(out);
+}
+
+describe("action.list", () => {
+  it("returns a page of names and the cursor that asks for the next", async () => {
+    const first = answering(actionPage(["a", "b"], cursor));
+    expect(await new ActionOperations(first.sender).list({ limit: 2 })).toEqual({ names: ["a", "b"], hasMore: true, cursor });
+    const last = answering(actionPage(["c"]));
+    expect(await new ActionOperations(last.sender).list({ limit: 2, cursor })).toEqual({ names: ["c"], hasMore: false, cursor: null });
+    expect(Array.from(last.sent[0]!.value)).toEqual([2, 0, 0, 0, ...cursor]);
+  });
+
+  it("refuses an answer cut short, with bytes left over, or with has_more and no cursor", async () => {
+    const whole = actionPage(["a"], cursor);
+    for (let n = 0; n < whole.length; n++) {
+      await expect(new ActionOperations(answering(whole.subarray(0, n)).sender).list()).rejects.toBeInstanceOf(IncompleteResponseError);
+    }
+    await expect(new ActionOperations(answering(new Uint8Array([...whole, 0])).sender).list()).rejects.toBeInstanceOf(IncompleteResponseError);
+    await expect(new ActionOperations(answering(new Uint8Array([0, 0, 0, 0, 1, 0, 0])).sender).list()).rejects.toBeInstanceOf(IncompleteResponseError);
+  });
+});
 
 describe("worker.list", () => {
   it("is a table op: its body is limit (present), then a u16-prefixed cursor and action", async () => {
@@ -301,4 +334,117 @@ describe("worker.info", () => {
     }
     await expect(new WorkerOperations(answeringInfo(new Uint8Array([...whole, 0])).sender).info("w1")).rejects.toBeInstanceOf(IncompleteResponseError);
   });
+});
+
+/** Little-endian bytes of `v` in `n` bytes. */
+function le(v: bigint, n: number): number[] {
+  const out: number[] = [];
+  for (let i = 0n; i < BigInt(n); i++) out.push(Number((BigInt.asUintN(64, v) >> (8n * i)) & 0xffn));
+  return out;
+}
+
+const str16 = (s: string) => {
+  const b = new TextEncoder().encode(s);
+  return [...le(BigInt(b.length), 2), ...b];
+};
+
+/** A walked list answer: [count:u32](row)*[has_more:u8][cursor_len:u16][cursor]. */
+function walkPage(rows: number[][], next?: Uint8Array): Uint8Array {
+  const c = next ?? new Uint8Array(0);
+  return new Uint8Array([...le(BigInt(rows.length), 4), ...rows.flat(), next ? 1 : 0, ...le(BigInt(c.length), 2), ...c]);
+}
+
+/** A sender that answers OK with each of `pages` in turn and records the requests. */
+function answeringPages(pages: Uint8Array[]): { sender: never; sent: Sent[] } {
+  const sent: Sent[] = [];
+  const sender = {
+    getNamespace: (ns?: string) => ns ?? "default",
+    sendRequest: async (op: number, _ns: string, key: Uint8Array, value: Uint8Array, options: Uint8Array) => {
+      sent.push({ op, value, options });
+      expect(key.length).toBe(0);
+      return { status: 0, data: pages[sent.length - 1]!, requestId: 0n };
+    },
+  };
+  return { sender: sender as never, sent };
+}
+
+const defRow = (name: string, version: string, createdAt: bigint) => [...str16(name), ...str16(version), ...le(createdAt, 8)];
+const jobRow = (name: string, jobId: string, status: string, createdAt: bigint) => [
+  ...str16(name),
+  ...str16(jobId),
+  ...str16(status),
+  ...le(createdAt, 8),
+];
+
+interface Paged {
+  hasMore: boolean;
+  cursor: Uint8Array | null;
+}
+
+describe("walked lists page through every shard", () => {
+  const cases: {
+    name: string;
+    op: number;
+    rows: [number[], number[]];
+    items: [unknown, unknown];
+    list: (s: never, o: { limit: number; cursor?: Uint8Array | null }) => Promise<Paged & Record<string, unknown>>;
+    field: string;
+  }[] = [
+    {
+      name: "workflow.listDefinitions",
+      op: OpCode.WorkflowListDefinitions,
+      rows: [defRow("orders", "1.0.0", 1700000000000n), defRow("refunds", "2", -1n)],
+      items: [
+        { name: "orders", version: "1.0.0", created_at: 1700000000000 },
+        { name: "refunds", version: "2", created_at: -1 },
+      ],
+      list: (s, o) => new WorkflowOperations(s).listDefinitions(o) as never,
+      field: "definitions",
+    },
+    {
+      name: "processing.list",
+      op: OpCode.ProcessingList,
+      rows: [jobRow("enrich", "job-1", "running", 1700000000000n), jobRow("rollup", "job-2", "stopped", 5n)],
+      items: [
+        { name: "enrich", job_id: "job-1", status: "running", created_at: 1700000000000 },
+        { name: "rollup", job_id: "job-2", status: "stopped", created_at: 5 },
+      ],
+      list: (s, o) => new ProcessingOperations(s).list(o) as never,
+      field: "jobs",
+    },
+  ];
+
+  for (const c of cases) {
+    it(`${c.name} decodes one page exactly`, async () => {
+      const { sender } = answeringPages([walkPage(c.rows, cursor)]);
+      expect(await c.list(sender, { limit: 10 })).toEqual({ [c.field]: c.items, hasMore: true, cursor });
+    });
+
+    it(`${c.name} keeps going past a short page that has more, sending its cursor`, async () => {
+      const { sender, sent } = answeringPages([walkPage([c.rows[0]], cursor), walkPage([c.rows[1]])]);
+      const seen: unknown[] = [];
+      let next: Uint8Array | null = null;
+      let pages = 0;
+      do {
+        const page = await c.list(sender, { limit: 10, cursor: next });
+        seen.push(...(page[c.field] as unknown[]));
+        next = page.cursor;
+        pages++;
+        if (pages === 1) expect(page.hasMore).toBe(true);
+      } while (next);
+      expect(seen).toEqual(c.items);
+      expect(sent.map((s) => s.op)).toEqual([c.op, c.op]);
+      expect(Array.from(sent[0]!.value)).toEqual([10, 0, 0, 0]);
+      expect(Array.from(sent[1]!.value)).toEqual([10, 0, 0, 0, ...cursor]);
+    });
+
+    it(`${c.name} refuses an answer cut short, with bytes left over, or with has_more and no cursor`, async () => {
+      const whole = walkPage([c.rows[0]], cursor);
+      for (let n = 0; n < whole.length; n++) {
+        await expect(c.list(answeringPages([whole.subarray(0, n)]).sender, { limit: 1 })).rejects.toBeInstanceOf(IncompleteResponseError);
+      }
+      await expect(c.list(answeringPages([new Uint8Array([...whole, 0])]).sender, { limit: 1 })).rejects.toBeInstanceOf(IncompleteResponseError);
+      await expect(c.list(answeringPages([new Uint8Array([0, 0, 0, 0, 1, 0, 0])]).sender, { limit: 1 })).rejects.toBeInstanceOf(IncompleteResponseError);
+    });
+  }
 });
