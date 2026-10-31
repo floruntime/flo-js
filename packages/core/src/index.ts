@@ -117,6 +117,7 @@ export {
   type WorkflowHistoryEvent,
   type WorkflowListRunsOptions,
   type WorkflowListRunEntry,
+  type WorkflowListRunsResult,
   type WorkflowSignalOptions,
   type WorkflowCancelOptions,
   type WorkflowDisableOptions,
@@ -261,6 +262,8 @@ export {
 export {
   WorkflowOperations,
   decodeDefinitionsAnswer,
+  decodeListRunsAnswer,
+  serializeListRunsValue,
   extractWorkflowMeta,
   extractYAMLField,
   type RequestSender as WorkflowRequestSender,
