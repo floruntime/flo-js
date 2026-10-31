@@ -22,6 +22,7 @@ import {
   type StreamGroupOptions,
   type StreamAckOptions,
   type StreamNackOptions,
+  type StreamDeleteOptions,
 } from "./types.js";
 import { kvGet, kvScan } from "./kv.js";
 import { OptionsBuilder, serializeStreamAppendValue } from "./wire.js";
@@ -321,7 +322,7 @@ export class StreamOperations {
    * @param stream - Stream name
    * @param opts - Optional namespace override; `force` to delete a non-empty stream
    */
-  async delete(stream: string, opts?: { namespace?: string; force?: boolean }): Promise<void> {
+  async delete(stream: string, opts?: StreamDeleteOptions): Promise<void> {
     const namespace = this.sender.getNamespace(opts?.namespace);
 
     const builder = new OptionsBuilder();

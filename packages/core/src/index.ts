@@ -56,6 +56,7 @@ export {
   type StreamGroupOptions,
   type StreamAckOptions,
   type StreamNackOptions,
+  type StreamDeleteOptions,
   // KV Option types
   type GetOptions,
   type PutOptions,
@@ -77,7 +78,6 @@ export {
   type PeekOptions,
   // Action types
   ActionType,
-  type ActionInfo,
   type ActionRunStatus,
   type ActionInvokeResult,
   type ActionListResult,

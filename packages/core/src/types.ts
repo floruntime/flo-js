@@ -685,6 +685,15 @@ export interface StreamAckOptions {
 }
 
 /**
+ * Options for deleting a stream.
+ */
+export interface StreamDeleteOptions {
+  namespace?: string;
+  /** Delete the stream even if it has records; without it a non-empty stream is refused. */
+  force?: boolean;
+}
+
+/**
  * Options for negatively acknowledging stream records in a consumer group.
  */
 export interface StreamNackOptions {
@@ -996,17 +1005,6 @@ export const ActionType = {
 } as const;
 
 export type ActionType = (typeof ActionType)[keyof typeof ActionType];
-
-/**
- * Information about a registered action.
- */
-export interface ActionInfo {
-  name: string;
-  actionType: ActionType;
-  timeoutMs: number;
-  maxRetries: number;
-  description?: string;
-}
 
 /**
  * Status of an action run.

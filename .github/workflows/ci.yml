@@ -93,7 +93,7 @@ jobs:
           echo "FLO_BINARY=$RUNNER_TEMP/flo-bin/flo" >> "$GITHUB_ENV"
           mkdir -p flo-data flo-expiry-data
           printf '[workers]\nheartbeat_timeout_ms = 1000\nremove_after_ms = 1000\n' > flo-expiry.toml
-          ./flo-bin/flo server start --port 4453 --data-dir "$RUNNER_TEMP/flo-data" > flo-server.log 2>&1 &
+          ./flo-bin/flo server start --port 4453 --shards 12 --data-dir "$RUNNER_TEMP/flo-data" > flo-server.log 2>&1 &
           ./flo-bin/flo server start --port 4463 --data-dir "$RUNNER_TEMP/flo-expiry-data" --config "$RUNNER_TEMP/flo-expiry.toml" > flo-expiry-server.log 2>&1 &
           for port in 4453 4463; do
             up=0
