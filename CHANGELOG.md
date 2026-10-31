@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking:** the table hash moves to `0xc751512225a42d04` with the server (flo `0484c0c`); a server built from an older table refuses this SDK's requests.
+- **Breaking:** the table hash moves to `0xc751512225a42d04` with the server (flo `3614d95`); a server built from an older table refuses this SDK's requests.
 - **Breaking:** `workflow.listRuns({ workflowName?, status?, cursor?, search?, limit? })` returns one page, `{ runs, hasMore, cursor }`, newest first; each run is `{ runId, workflow, status, createdAt }`. Pass the page's `cursor` to get the next, and stop when `hasMore` is false: a page can be short while more follow. `status` replaces `statusFilter`; `search` matches a run's id, workflow, current step, input or search tags, ignoring case; `limit` 0 or omitted asks for 100, and the server caps it at 1024. It used to send only the limit and status, which the server refuses, and return a bare array. An answer whose `has_more` and cursor disagree, or with bytes left over, throws `IncompleteResponseError`.
 - **Breaking:** `stream.info` of a stream that doesn't exist throws `NotFoundError`; it used to return zeros.
 - **Breaking:** a read, list or scan in a namespace that was never created throws `NoNamespaceError`; it used to answer as an empty namespace (`kv.get` returned null; `kv.scan`, `stream.read`, `action.list` and the like returned nothing). Writes still create the namespace.
