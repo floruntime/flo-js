@@ -14,7 +14,7 @@ export const VERSION = 0x03;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0x05fe53f432e943c4n;
+export const TABLE_HASH = 0xa8de7758afa69427n;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
