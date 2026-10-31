@@ -800,10 +800,10 @@ export function decodeListRunsAnswer(data: Uint8Array): WorkflowListRunsResult {
   const r = new AnswerReader(data);
   const runs: WorkflowListRunEntry[] = [];
   for (let n = r.u32(); n > 0; n--) {
-    const runId = r.string16();
+    const run_id = r.string16();
     const workflow = r.string16();
     const status = r.string16();
-    runs.push({ runId, workflow, status, createdAt: Number(r.i64()) });
+    runs.push({ run_id, workflow, status, created_at: Number(r.i64()) });
   }
   const hasMore = r.bool();
   const cursor = r.bytes16();

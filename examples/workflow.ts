@@ -416,7 +416,7 @@ async function main() {
     });
     for (const run of runs) {
       console.log(
-        `  ${run.runId} — ${run.workflow} — ${run.status} (${run.createdAt})`
+        `  ${run.run_id} — ${run.workflow} — ${run.status} (${run.created_at})`
       );
     }
 
@@ -539,7 +539,7 @@ async function main() {
     console.log(`  Auto-triggered runs: ${scheduledRuns.length}`);
     for (const run of scheduledRuns) {
       console.log(
-        `    ${run.runId} — ${run.status} (${run.createdAt})`
+        `    ${run.run_id} — ${run.status} (${run.created_at})`
       );
     }
     if (scheduledRuns.length > 0) {

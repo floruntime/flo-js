@@ -254,7 +254,7 @@ describe.skipIf(!endpoint)("live", () => {
           expect(pages, `still paging after ${got.length} runs`).toBeLessThan(100);
           const p = await client.workflow.listRuns({ workflowName, limit: 3, cursor });
           expect(p.runs.length).toBeLessThanOrEqual(3);
-          got.push(...p.runs.map((r) => ({ runId: r.runId, workflow: r.workflow, createdAt: r.createdAt })));
+          got.push(...p.runs.map((r) => ({ runId: r.run_id, workflow: r.workflow, createdAt: r.created_at })));
           if (!p.hasMore) return got;
           cursor = p.cursor!;
         }
@@ -284,7 +284,7 @@ describe.skipIf(!endpoint)("live", () => {
         expect(status).toMatchObject({ run_id: runId, workflow: "orders" });
         expect((await client.workflow.history(runId)).length).toBeGreaterThan(0);
         const listed = await client.workflow.listRuns({ workflowName: "orders", search: runId });
-        expect(listed.runs.map((r) => r.runId)).toContain(runId);
+        expect(listed.runs.map((r) => r.run_id)).toContain(runId);
         await client.workflow.signal(runId, "nudge", encoder.encode("{}"));
         await client.workflow.cancel(runId, "done");
         expect((await client.workflow.status(runId)).status).toBe("cancelled");
@@ -490,6 +490,9 @@ describe.skipIf(!expiryEndpoint)("live, on a server that removes silent workers"
   // worker between beats, and the next beat answers not found.
   it("a removed worker registers again with the same options, and still runs actions", async () => {
     const { client, namespace } = await liveClient(expiryEndpoint);
+    // Lists below may run before the worker registers, the write that would
+    // create the namespace; one never created answers no_namespace.
+    await client.kv.put("made", encoder.encode("1"));
     const warned: string[] = [];
     const logger = { debug: () => {}, warn: (m: string) => void warned.push(m), error: () => {} };
     const workerId = `exp-${randomBytes(4).toString("hex")}`;

@@ -86,8 +86,8 @@ describe("workflow.listRuns", () => {
     const { workflow } = fakeWorkflow(page([["r-2", "b", "running", 20n], ["r-1", "a", "completed", 10n]], true, cursor));
     expect(await workflow.listRuns({ limit: 2 })).toEqual({
       runs: [
-        { runId: "r-2", workflow: "b", status: "running", createdAt: 20 },
-        { runId: "r-1", workflow: "a", status: "completed", createdAt: 10 },
+        { run_id: "r-2", workflow: "b", status: "running", created_at: 20 },
+        { run_id: "r-1", workflow: "a", status: "completed", created_at: 10 },
       ],
       hasMore: true,
       cursor,

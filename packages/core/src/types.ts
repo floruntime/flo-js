@@ -1413,11 +1413,11 @@ export interface WorkflowListRunsOptions {
  * A single entry in the workflow runs list.
  */
 export interface WorkflowListRunEntry {
-  runId: string;
+  run_id: string;
   workflow: string;
   status: string;
   /** When the run started, in ms since the epoch. */
-  createdAt: number;
+  created_at: number;
 }
 
 /**
