@@ -707,7 +707,7 @@ export class ActionWorker {
         what = "fail";
         if (err instanceof TimeoutError) {
           this.log(`Action timed out: ${action}`);
-          report = () => client.worker.fail(workerId, task, "Action timed out", { retry: false });
+          report = () => client.worker.fail(workerId, task, "Action timed out", { retry: true });
         } else if (err instanceof NonRetryableError) {
           this.log(`Action failed (non-retryable): ${action} - ${err}`);
           report = () => client.worker.fail(workerId, task, String(err), { retry: false });
@@ -928,7 +928,7 @@ function newRequestKey(): string {
 
 /**
  * Error thrown when an action handler runs past `actionTimeoutMs`. It fails
- * the task without retry. Not core's `TimeoutError`, which the transport
+ * the task with retry, as any error does. Not core's `TimeoutError`, which the transport
  * throws when a request goes unanswered; a worker treats that as a lost
  * connection.
  */

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `formatTaskId` and `parseTaskId`: a task's id as the CLI prints it, `run:deliveries:term:index:action`.
 - `WorkerAwaitOptions.requestKey`: an await sent again with the same key gets the task the first one took. `ActionWorker` sends each await with a key and, after a lost or refused one, sends the next with the same key, so a task taken by an await whose answer was lost comes back to it instead of staying held until its lease runs out.
 - `WorkerFailOptions.abandoned` (hand a task back untried, counting no failure) and `delayMs`. A fail's error past 65535 bytes is cut at a UTF-8 character boundary rather than refused, so the fail still goes out; a refused one left the run held until its lease ran out, on every attempt.
+- A handler that runs past `actionTimeoutMs` fails its run with retry, like any error; it used to fail it for good. Only `NonRetryableError` fails a run at once.
 - `OpCode.TSInfo` (0x1a7) is known; the client has no time-series calls yet.
 - The widened list entries: `action.list` entries carry each action's version, owner, lease, attempts and creation time; `processing.list` entries their `batch_size` and `records_processed`; `workflow.listDefinitions` entries `enabled`. `processing.status` carries this node's runtime of the job (`running`, `records_in`, `records_out`, `watermark_ms`, `tick_avg_us`, `tick_max_us`, `uptime_ms`) and the submitted `yaml`.
 

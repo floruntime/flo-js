@@ -19,7 +19,7 @@ import {
   encodeTouchBody,
   type Logger,
 } from "@floruntime/core";
-import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
+import { ActionWorker, FloClient, NonRetryableError, StreamWorker } from "@floruntime/node";
 import { okAnswer, taskAnswer, type FakeTask } from "./fake_worker_server.js";
 
 /** The task the fakes hand out, as a report names it; its id is t1:1:1:10:a. */
@@ -320,6 +320,17 @@ describe("ActionWorker results", () => {
     expect(srv.of(OpCode.ActionFail)).toHaveLength(0);
   });
 
+  it("fails a task whose handler throws NonRetryableError at once, without retry", async () => {
+    const srv = await serve(oneTaskThen(() => undefined));
+    const { logger } = recordingLogger();
+    actionWorker(srv.endpoint, logger, async () => {
+      throw new NonRetryableError("bad input");
+    });
+    await until(() => srv.of(OpCode.ActionFail).length >= 1, 3000);
+    expect(srv.of(OpCode.ActionFail)).toHaveLength(1);
+    expect(failRetryByte(srv.of(OpCode.ActionFail)[0]!.bytes)).toBe(0);
+  });
+
   it("fails a task whose handler throws, with retry", async () => {
     const srv = await serve(oneTaskThen(() => undefined));
     const { logger } = recordingLogger();
@@ -333,7 +344,7 @@ describe("ActionWorker results", () => {
     expect(srv.of(OpCode.ActionComplete)).toHaveLength(0);
   });
 
-  it("fails a task whose handler runs past actionTimeoutMs, without retry, and sends no complete", async () => {
+  it("fails a task whose handler runs past actionTimeoutMs, with retry, and sends no complete", async () => {
     const srv = await serve(oneTaskThen(() => undefined));
     const { logger } = recordingLogger();
     actionWorker(srv.endpoint, logger, () => new Promise<Uint8Array>(() => {}), 100);
@@ -341,7 +352,7 @@ describe("ActionWorker results", () => {
     await sleep(100);
     const fails = srv.of(OpCode.ActionFail);
     expect(fails).toHaveLength(1);
-    expect(failRetryByte(fails[0]!.bytes)).toBe(0);
+    expect(failRetryByte(fails[0]!.bytes)).toBe(1);
     expect(srv.of(OpCode.ActionComplete)).toHaveLength(0);
   });
 

@@ -323,7 +323,7 @@ The worker registers each action when it starts, with exactly the options given 
 
 A run whose handler goes past its lease (the action's `timeoutMs`) without touching it is taken back and run again, by this worker or another. `autoTouch: true` touches each run every sixth of its lease, counted from when the task arrived, while the handler runs; it's off by default. Without it, call `await ctx.touch()` from long handlers. However often it is touched, a delivery is held at most 12 h from when it was delivered; past that it is taken back. The worker also stops any handler after its own `actionTimeoutMs` (300 s by default) whatever the action's timeout, so raise it for actions that run longer.
 
-A handler that throws fails the run with retry: it runs again while attempts are left. Throw `NonRetryableError` to fail it for good; a handler past `actionTimeoutMs` also fails without retry.
+A handler that throws fails the run with retry: it runs again while attempts are left. A handler past `actionTimeoutMs` fails the same way, with retry. Only `NonRetryableError` fails the run for good, at once.
 
 `stop()` ends polling once the outstanding await returns (within `blockMs`). Handlers already running finish, and their completes or fails are sent, before `start()` returns; then the worker deregisters and closes its connection. A result whose connection is lost after the stop is retried for up to 2 s, then dropped, and the server hands the run out again when its lease runs out.
 
