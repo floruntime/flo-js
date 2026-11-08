@@ -320,6 +320,19 @@ describe("ActionWorker results", () => {
     expect(srv.of(OpCode.ActionFail)).toHaveLength(0);
   });
 
+  it("fails a task whose handler throws, with retry", async () => {
+    const srv = await serve(oneTaskThen(() => undefined));
+    const { logger } = recordingLogger();
+    actionWorker(srv.endpoint, logger, async () => {
+      throw new Error("boom");
+    });
+    await until(() => srv.of(OpCode.ActionFail).length >= 1, 3000);
+    const fails = srv.of(OpCode.ActionFail);
+    expect(fails).toHaveLength(1);
+    expect(failRetryByte(fails[0]!.bytes)).toBe(1);
+    expect(srv.of(OpCode.ActionComplete)).toHaveLength(0);
+  });
+
   it("fails a task whose handler runs past actionTimeoutMs, without retry, and sends no complete", async () => {
     const srv = await serve(oneTaskThen(() => undefined));
     const { logger } = recordingLogger();
@@ -494,9 +507,9 @@ describe("ActionWorker registration and auto-touch", () => {
     expect(reg!.bytes.includes(Buffer.from("elsewhere"))).toBe(false);
   });
 
-  it("touches a running task every quarter of the lease the task came with, and stops with the handler", async () => {
-    // A 400 ms lease: a touch every 100 ms through a 450 ms handler.
-    const srv = await serve(oneTaskThen(() => undefined, { leaseMs: 400n }));
+  it("touches a running task every sixth of the lease the task came with, and stops with the handler", async () => {
+    // A 600 ms lease: a touch every 100 ms through a 450 ms handler.
+    const srv = await serve(oneTaskThen(() => undefined, { leaseMs: 600n }));
     worker(srv.endpoint, true, 600000, 450);
     await until(() => srv.of(OpCode.ActionComplete).length > 0, 5000);
     await sleep(300);

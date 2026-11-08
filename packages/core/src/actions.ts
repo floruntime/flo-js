@@ -98,7 +98,7 @@ export class ActionOperations {
 
     const value = serializeActionRegisterValue(
       actionType,
-      opts?.timeoutMs ?? 30000,
+      opts?.timeoutMs ?? 0,
       opts?.maxRetries ?? 3,
       opts?.owner
     );

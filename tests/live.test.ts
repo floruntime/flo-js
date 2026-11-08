@@ -186,7 +186,7 @@ describe.skipIf(!endpoint)("live", () => {
         }
       );
       expectEachOnce(got, want);
-      for (const e of entries) expect(e).toMatchObject({ owner: `team-${e.name}`, timeoutMs: 30000n, maxAttempts: 3, version: 1 });
+      for (const e of entries) expect(e).toMatchObject({ owner: `team-${e.name}`, timeoutMs: 300000n, maxAttempts: 3, version: 1 });
     });
 
     it("workflow.listDefinitions", async () => {
@@ -512,6 +512,8 @@ describe.skipIf(!endpoint)("live", () => {
     }
     await client.action.register("default-lease", ActionType.User, { timeoutMs: 0 });
     expect((await client.action.info("default-lease")).timeoutMs).toBe(300000n);
+    await client.action.register("unset-lease");
+    expect((await client.action.info("unset-lease")).timeoutMs).toBe(300000n);
   });
 
   it("lists registered workers a page at a time, in id order, with their options", async () => {

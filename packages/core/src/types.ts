@@ -246,6 +246,7 @@ export const OpCode = {
   TSList: 0x1a4,
   TSDelete: 0x1a5,
   TSRetention: 0x1a6,
+  TSInfo: 0x1a7,
 
   // ── Actions (0x300 – 0x31F) ──
   ActionRegister: 0x300,
@@ -1182,7 +1183,9 @@ export interface ActionRegisterOptions {
   /**
    * The action's lease: how long a worker holds a run without completing,
    * failing or touching it before the run is taken back. 5000 to 43200000
-   * ms; 0 means 300000 (default 30000).
+   * ms. Unset or 0 sends 0, and the server's default lease of 300000
+   * applies. However often it is touched, a worker holds one delivery at
+   * most 12 h.
    */
   timeoutMs?: number;
   /** Attempts in all, counting the first; the server keeps it within 1 to 1000 (default 3). */

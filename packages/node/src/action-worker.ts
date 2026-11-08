@@ -101,9 +101,10 @@ export interface ActionWorkerConfig {
   retry?: Partial<RetryPolicy>;
 
   /**
-   * Touch each run every quarter of its lease while the handler runs
+   * Touch each run every sixth of its lease while the handler runs
    * (default false). Without it, a handler that runs past the lease without
-   * calling `ctx.touch()` is taken back and run again.
+   * calling `ctx.touch()` is taken back and run again. Touches can't hold a
+   * delivery past 12 h from when it was delivered.
    */
   autoTouch?: boolean;
 
@@ -418,7 +419,8 @@ export class ActionWorker {
    * Register an action handler.
    *
    * The worker registers the action with the server when it starts, with
-   * exactly these options (when unset, a 30 s lease and 3 attempts).
+   * exactly these options (when unset, the server's 300 s lease and 3
+   * attempts).
    * Registering replaces the action's settings, so workers
    * registering one action with different options leave it with whichever
    * registered last. The options' namespace is ignored: the action goes in
@@ -634,7 +636,7 @@ export class ActionWorker {
 
         // Execute task in background
         this.activeTaskCount++;
-        const taskPromise = this.executeTask(result.task).finally(() => {
+        const taskPromise = this.executeTask(result.task, performance.now()).finally(() => {
           this.activeTaskCount--;
           this.pendingTasks.delete(taskPromise);
         });
@@ -673,7 +675,7 @@ export class ActionWorker {
     }
   }
 
-  private async executeTask(task: TaskAssignment): Promise<void> {
+  private async executeTask(task: TaskAssignment, arrivedAt: number): Promise<void> {
     const client = this.client!;
     const { workerId } = this.config;
     const { action, taskId } = task;
@@ -690,7 +692,7 @@ export class ActionWorker {
       report = () => client.worker.fail(workerId, task, `No handler for: ${action}`);
     } else {
       const ctx = new ActionContext(task, this);
-      const stopTouching = this.config.autoTouch ? this.keepTouching(task) : () => {};
+      const stopTouching = this.config.autoTouch ? this.keepTouching(task, arrivedAt) : () => {};
       try {
         const result = await this.withTimeout(handler(ctx), this.config.actionTimeoutMs).finally(stopTouching);
         // Plain object → JSON bytes, ActionResult → named outcome
@@ -730,20 +732,26 @@ export class ActionWorker {
   }
 
   /**
-   * Touch a run until the returned function is called, every quarter of
-   * its lease (at least 100 ms apart). The server extends the lease only
-   * once half of it or less is left, so a touch at a quarter changes
-   * nothing and the one at a half extends it, with a quarter left for one
-   * failed touch to be tried again. Conflict (a stale report: the run moved
-   * on), not found or bad request stops touching; any other refusal, an
-   * overloaded leader say, or a touch lost with its connection, is tried
-   * again next interval. A touch in flight when this stops is left to
-   * finish.
+   * Touch a run until the returned function is called, every sixth of its
+   * lease (at least 100 ms apart), counted from when the task arrived. The
+   * server extends a lease only with half of it or less left, so the touch
+   * at a half extends it and the two after it can fail before it runs out.
+   * Conflict (a stale report: the run moved on), not found or bad request
+   * stops touching; any other refusal, an overloaded leader say, or a touch
+   * lost with its connection, is tried again at the next tick. A touch in
+   * flight when this stops is left to finish.
    */
-  private keepTouching(task: TaskAssignment): () => void {
-    const intervalMs = Math.max(Number(task.leaseMs) / 4, MIN_TOUCH_INTERVAL_MS);
+  private keepTouching(task: TaskAssignment, arrivedAt: number): () => void {
+    const intervalMs = Math.max(Number(task.leaseMs) / 6, MIN_TOUCH_INTERVAL_MS);
     let stopped = false;
+    let ticks = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // The next tick on the schedule from arrival, skipping any a slow touch overran.
+    const schedule = () => {
+      const now = performance.now();
+      ticks = Math.max(ticks + 1, Math.floor((now - arrivedAt) / intervalMs) + 1);
+      timer = setTimeout(tick, Math.max(0, arrivedAt + ticks * intervalMs - now));
+    };
     const tick = async (): Promise<void> => {
       try {
         await this._touchTask(task);
@@ -754,9 +762,9 @@ export class ActionWorker {
         }
         this.logger.warn(`Touch for task ${task.taskId} failed: ${err}; trying again`);
       }
-      if (!stopped) timer = setTimeout(tick, intervalMs);
+      if (!stopped) schedule();
     };
-    timer = setTimeout(tick, intervalMs);
+    schedule();
     return () => {
       stopped = true;
       clearTimeout(timer);

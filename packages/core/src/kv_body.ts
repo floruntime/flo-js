@@ -98,6 +98,7 @@ const TABLE_OPS: ReadonlySet<OpCode> = new Set([
   OpCode.WorkerList,
   OpCode.WorkerInfo,
   OpCode.QueuePeek,
+  OpCode.TSInfo,
   OpCode.StreamGroupList,
   OpCode.StreamGroupMembers,
   OpCode.ProcessingRemove,
@@ -785,7 +786,20 @@ export function encodeCompleteBody(worker: string, t: TaskDelivery, result: Uint
   return w.build();
 }
 
-/** action.fail's request: the delivery, retry, abandoned, delay_ms, error. */
+/**
+ * `b` cut to at most `max` bytes, at a UTF-8 character boundary. An error
+ * message is cut rather than refused: a fail the client refused to send
+ * would leave the run held until its lease ran out, on every attempt.
+ */
+export function truncateUtf8(b: Uint8Array, max: number): Uint8Array {
+  if (b.length <= max) return b;
+  let end = max;
+  // Back off continuation bytes (10xxxxxx) to the start of a character.
+  while (end > 0 && (b[end]! & 0xc0) === 0x80) end--;
+  return b.subarray(0, end);
+}
+
+/** action.fail's request: the delivery, retry, abandoned, delay_ms, error (cut to 65535 bytes). */
 export function encodeFailBody(
   worker: string,
   t: TaskDelivery,
@@ -796,8 +810,7 @@ export function encodeFailBody(
   if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > MAX_DELAY_MS) {
     throw new FloError(`flo: delayMs must be a whole number of ms from 0 to ${MAX_DELAY_MS}, got ${delayMs}`);
   }
-  const e = textEncoder.encode(error);
-  checkLength("error", e, MAX_RESULT);
+  const e = truncateUtf8(textEncoder.encode(error), MAX_RESULT);
   const w = new BodyWriter();
   writeDelivery(w, worker, t);
   w.u8(1);

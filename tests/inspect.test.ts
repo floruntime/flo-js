@@ -204,3 +204,31 @@ describe("a stale report", () => {
     ]);
   });
 });
+
+describe("action reports' texts and register's defaults", () => {
+  const task = { runId: "r1", namespace: "ns", deliveries: 1, term: 1n, index: 1n, action: "a" };
+
+  it("cuts a fail's error past 65535 bytes at a character boundary, rather than refuse to send it", async () => {
+    const { encodeFailBody, truncateUtf8 } = await import("../packages/core/src/kv_body.js");
+    // 'é' is two bytes: 32768 of them are 65536 bytes, so the cut lands inside one.
+    const long = "é".repeat(32768);
+    const body = encodeFailBody("w1", task, long);
+    const head = encodeFailBody("w1", task, "").length - 2; // up to error's length prefix
+    const len = body[head]! | (body[head + 1]! << 8);
+    expect(len).toBe(65534);
+    expect(new TextDecoder("utf-8", { fatal: true }).decode(body.subarray(head + 2))).toBe("é".repeat(32767));
+    expect(Array.from(truncateUtf8(enc.encode("abc"), 2))).toEqual(text("ab"));
+    expect(truncateUtf8(enc.encode("abc"), 3).length).toBe(3);
+    // A fail with an error that long goes out, cut.
+    const { sender, sent } = answering([]);
+    await new WorkerOperations(sender).fail("w1", task, "x".repeat(70000));
+    expect(sent[0]!.value.length).toBe(head + 2 + 65535);
+  });
+
+  it("registers with timeout 0 when none is given, so the server's default lease applies", async () => {
+    const { sender, sent } = answering([]);
+    await new ActionOperations(sender).register("a");
+    // [action_type:u8][timeout_ms:u32][max_retries:u32][owner_len:u16]
+    expect(Array.from(sent[0]!.value)).toEqual([0, ...le(0n, 4), ...le(3n, 4), 0, 0]);
+  });
+});

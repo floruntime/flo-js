@@ -216,8 +216,9 @@ Actions are registered tasks that can be invoked and executed by workers.
 | `delete` | `delete(name, opts?) → Promise<void>` | Delete an action |
 
 An action's `timeoutMs` is its lease: how long a worker holds a run without
-completing, failing or touching it. It is 5000 to 43200000 ms, and 0 means
-300000.
+completing, failing or touching it. It is 5000 to 43200000 ms; unset or 0 sends 0,
+and the server's default of 300000 applies. Touches extend a lease, but a
+worker holds one delivery at most 12 h from when it was delivered.
 
 #### Action Example
 
@@ -318,9 +319,13 @@ worker.action("process-image", async (ctx) => ({ done: true }), { timeoutMs: 600
 await worker.start();
 ```
 
-The worker registers each action when it starts, with exactly the options given (when unset, a 30 s lease and 3 attempts). Registering replaces the action's settings, so workers that register one action with different options leave it with whichever registered last.
+The worker registers each action when it starts, with exactly the options given (when unset, the server's 300 s lease and 3 attempts). Registering replaces the action's settings, so workers that register one action with different options leave it with whichever registered last.
 
-A run whose handler goes past its lease (the action's `timeoutMs`) without touching it is taken back and run again, by this worker or another. `autoTouch: true` touches each run every quarter of its lease while the handler runs; it's off by default. Without it, call `await ctx.touch()` from long handlers. The worker also stops any handler after its own `actionTimeoutMs` (300 s by default) whatever the action's timeout, so raise it for actions that run longer.
+A run whose handler goes past its lease (the action's `timeoutMs`) without touching it is taken back and run again, by this worker or another. `autoTouch: true` touches each run every sixth of its lease, counted from when the task arrived, while the handler runs; it's off by default. Without it, call `await ctx.touch()` from long handlers. However often it is touched, a delivery is held at most 12 h from when it was delivered; past that it is taken back. The worker also stops any handler after its own `actionTimeoutMs` (300 s by default) whatever the action's timeout, so raise it for actions that run longer.
+
+A handler that throws fails the run with retry: it runs again while attempts are left. Throw `NonRetryableError` to fail it for good; a handler past `actionTimeoutMs` also fails without retry.
+
+`stop()` ends polling once the outstanding await returns (within `blockMs`). Handlers already running finish, and their completes or fails are sent, before `start()` returns; then the worker deregisters and closes its connection. A result whose connection is lost after the stop is retried for up to 2 s, then dropped, and the server hands the run out again when its lease runs out.
 
 ### Stream Operations
 
