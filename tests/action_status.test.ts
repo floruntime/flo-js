@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { IncompleteResponseError, decodeActionStatusAnswer } from "@floruntime/core";
 
 /** action.status's answer as the server encodes it. */
-function answer(status: number, opts: { started?: bigint; completed?: bigint; attempt?: number; output?: string; error?: string; worker?: string } = {}): Uint8Array {
+function answer(status: number, opts: { started?: bigint; completed?: bigint; attempt?: number; output?: string; error?: string; worker?: string; outcome?: string } = {}): Uint8Array {
   const parts: number[] = [status];
   const i64 = (v: bigint) => {
     const b = new DataView(new ArrayBuffer(8));
@@ -20,7 +20,7 @@ function answer(status: number, opts: { started?: bigint; completed?: bigint; at
   }
   const a = opts.attempt ?? 0;
   parts.push(a & 0xff, (a >> 8) & 0xff, (a >> 16) & 0xff, a >>> 24);
-  for (const s of [opts.output, opts.error, opts.worker]) {
+  for (const s of [opts.output, opts.error, opts.worker, opts.outcome]) {
     if (s === undefined) parts.push(0);
     else {
       const b = new TextEncoder().encode(s);
@@ -45,7 +45,13 @@ describe("action.status", () => {
       output: new TextEncoder().encode('{"ok":true}'),
       errorMessage: undefined,
       workerId: undefined,
+      outcome: undefined,
     });
+  });
+
+  it("decodes the outcome a completed run's worker named, last; none is success", () => {
+    const s = decodeActionStatusAnswer("r", answer(2, { completed: 1200n, attempt: 1, worker: "w", outcome: "approved" }));
+    expect([s.workerId, s.outcome]).toEqual(["w", "approved"]);
   });
 
   it("decodes the worker that holds the run, last", () => {
@@ -60,7 +66,7 @@ describe("action.status", () => {
   });
 
   it("refuses a cut answer and a status this client doesn't know", () => {
-    const whole = answer(2, { attempt: 1, output: "x", worker: "w" });
+    const whole = answer(2, { attempt: 1, output: "x", worker: "w", outcome: "o" });
     for (let n = 0; n < whole.length; n++) {
       expect(() => decodeActionStatusAnswer("r", whole.subarray(0, n))).toThrow(IncompleteResponseError);
     }

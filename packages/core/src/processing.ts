@@ -3,12 +3,12 @@
  *
  * Stream processing jobs are continuous data pipelines (Flink-inspired)
  * submitted as YAML definitions. This module provides submit/status/list/
- * stop/cancel operations that map to the
- * processing opcodes (0x360–0x364).
+ * stop/cancel/remove operations that map to the
+ * processing opcodes (0x360–0x365).
  */
 
 import { createServerError, IncompleteResponseError } from "./errors.js";
-import { AnswerReader } from "./kv_body.js";
+import { AnswerReader, decodeEmptyAnswer } from "./kv_body.js";
 import {
   OpCode,
   type RawResponse,
@@ -21,6 +21,7 @@ import {
   type ProcessingListResult,
   type ProcessingStopOptions,
   type ProcessingCancelOptions,
+  type ProcessingRemoveOptions,
   type ProcessingSyncOptions,
   type ProcessingSyncResult,
   type ProcessingSyncDirFn,
@@ -109,10 +110,6 @@ export class ProcessingOperations {
       throw createServerError(resp.status, resp.data);
     }
 
-    // Binary wire format:
-    // [job_id_len:u16][job_id][name_len:u16][name][status:u8]
-    // [batch_size:u32][records_processed:u64][created_at:i64]
-    // [reason_len:u16][reason]
     return parseWireStatus(resp.data);
   }
 
@@ -184,6 +181,23 @@ export class ProcessingOperations {
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
+  }
+
+  /**
+   * Remove a stopped, cancelled or failed job, freeing its slot. A running
+   * job is refused (a ConflictError with reason JobRunning): stop or cancel
+   * it first.
+   *
+   * @param jobId - Job ID
+   * @param opts - Options (namespace)
+   */
+  async remove(jobId: string, opts?: ProcessingRemoveOptions): Promise<void> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+    const resp = await this.sender.sendRequest(OpCode.ProcessingRemove, namespace, textEncoder.encode(jobId), new Uint8Array(0), new Uint8Array(0));
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+    decodeEmptyAnswer(resp.data);
   }
 
   // ===========================================================================
@@ -320,7 +334,10 @@ const statusNames = [
  *
  * Wire format: [job_id_len:u16][job_id][name_len:u16][name][status:u8]
  *              [batch_size:u32][records_processed:u64][created_at:i64]
- *              [reason_len:u16][reason]  (reason empty unless failed)
+ *              [reason_len:u16][reason]
+ *              [running:u8][records_in:u64][records_out:u64][watermark_ms:i64]
+ *              [tick_avg_us:u64][tick_max_us:u64][uptime_ms:u64]
+ *              [yaml_len:u32][yaml]
  */
 function parseWireStatus(data: Uint8Array): ProcessingStatusResult {
   const r = new AnswerReader(data);
@@ -335,6 +352,14 @@ function parseWireStatus(data: Uint8Array): ProcessingStatusResult {
   const records_processed = Number(r.u64());
   const created_at = Number(r.i64());
   const reason = r.string16();
+  const running = r.bool();
+  const records_in = Number(r.u64());
+  const records_out = Number(r.u64());
+  const watermark_ms = Number(r.i64());
+  const tick_avg_us = Number(r.u64());
+  const tick_max_us = Number(r.u64());
+  const uptime_ms = Number(r.u64());
+  const yaml = textDecoder.decode(r.bytes32());
   r.end();
   return {
     job_id,
@@ -344,12 +369,21 @@ function parseWireStatus(data: Uint8Array): ProcessingStatusResult {
     records_processed,
     created_at,
     failure_reason: reason.length > 0 ? reason : null,
+    running,
+    records_in,
+    records_out,
+    watermark_ms,
+    tick_avg_us,
+    tick_max_us,
+    uptime_ms,
+    yaml,
   };
 }
 
 /**
  * processing.list's answer: [count:u32]([name_len:u16][name][job_id_len:u16][job_id]
- * [status_len:u16][status][created_at:i64])*[has_more:u8][cursor_len:u16][cursor].
+ * [status_len:u16][status][created_at:i64][batch_size:u32][records_processed:u64])*
+ * [has_more:u8][cursor_len:u16][cursor].
  */
 export function decodeProcessingListAnswer(data: Uint8Array): ProcessingListResult {
   const r = new AnswerReader(data);
@@ -358,7 +392,10 @@ export function decodeProcessingListAnswer(data: Uint8Array): ProcessingListResu
     const name = r.string16();
     const job_id = r.string16();
     const status = r.string16();
-    jobs.push({ name, job_id, status, created_at: Number(r.i64()) });
+    const created_at = Number(r.i64());
+    const batch_size = r.u32();
+    const records_processed = Number(r.u64());
+    jobs.push({ name, job_id, status, created_at, batch_size, records_processed });
   }
   const hasMore = r.bool();
   const cursor = r.bytes16();

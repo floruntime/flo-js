@@ -3,11 +3,29 @@
  */
 
 import { createServerError, IncompleteResponseError } from "./errors.js";
-import { AnswerReader, decodeActionStatusAnswer, decodeWorkerInfoAnswer, decodeWorkerListAnswer, encodeWorkerListBody, MAX_WORKER_LIST_LIMIT } from "./kv_body.js";
+import {
+  AnswerReader,
+  decodeActionInfoAnswer,
+  decodeActionStatusAnswer,
+  decodeAwaitAnswer,
+  decodeEmptyAnswer,
+  decodeTouchAnswer,
+  decodeWorkerInfoAnswer,
+  decodeWorkerListAnswer,
+  encodeAwaitBody,
+  encodeCompleteBody,
+  encodeFailBody,
+  encodeTouchBody,
+  encodeWorkerListBody,
+  MAX_WORKER_LIST_LIMIT,
+} from "./kv_body.js";
 import {
   type ActionDeleteOptions,
+  type ActionInfo,
+  type ActionInfoOptions,
   type ActionInvokeOptions,
   type ActionInvokeResult,
+  type ActionListEntry,
   type ActionListOptions,
   type ActionListResult,
   type ActionRegisterOptions,
@@ -15,9 +33,9 @@ import {
   type ActionStatusOptions,
   ActionType,
   OpCode,
-  OptionTag,
   type RawResponse,
   StatusCode,
+  type TaskDelivery,
   type WorkerAwaitOptions,
   type WorkerAwaitResult,
   type WorkerCompleteOptions,
@@ -31,20 +49,13 @@ import {
   type WorkerListResult,
   type WorkerRegisterOptions,
   type WorkerStatus,
-  type WorkerTouchOptions,
 } from "./types.js";
 import {
-  OptionsBuilder,
-  parseTaskAssignment,
   serializeActionInvokeValue,
   serializeListValue,
   serializeActionRegisterValue,
-  serializeWorkerAwaitValue,
-  serializeWorkerCompleteValue,
-  serializeWorkerFailValue,
   serializeWorkerHeartbeatValue,
   serializeWorkerRegisterValue,
-  serializeWorkerTouchValue,
 } from "./wire.js";
 
 /**
@@ -163,8 +174,21 @@ export class ActionOperations {
   }
 
   /**
-   * List a page of registered action names. Pass the result's `cursor` to
-   * get the next page.
+   * An action's definition, its runs by status and how long completed runs
+   * took. An action that isn't registered throws NotFoundError.
+   */
+  async info(name: string, opts?: ActionInfoOptions): Promise<ActionInfo> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+    const resp = await this.sender.sendRequest(OpCode.ActionInfo, namespace, textEncoder.encode(name), new Uint8Array(0), new Uint8Array(0));
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+    return decodeActionInfoAnswer(resp.data);
+  }
+
+  /**
+   * List a page of registered actions, with their settings. Pass the
+   * result's `cursor` to get the next page.
    *
    * @param opts - List options
    */
@@ -343,143 +367,74 @@ export class WorkerOperations {
   }
 
   /**
-   * Wait for a task assignment.
+   * Wait for a task of one of `actions` (tried in order) and take it: the
+   * worker holds it for the task's `leaseMs`, unless it touches it. Null if
+   * no run was ready within `blockMs`.
+   *
+   * The await is a write. If its answer is lost, send it again with the
+   * same `requestKey` to get the task the first one took, rather than leave
+   * that one held until its lease runs out.
    *
    * @param workerId - Worker identifier
-   * @param taskTypes - Task types to listen for
-   * @param opts - Await options (blockMs)
-   * @returns WorkerAwaitResult with task if available
+   * @param actions - The actions to take a task of, 1 to 64
+   * @param opts - Await options (blockMs, requestKey)
    */
   async awaitTask(
     workerId: string,
-    taskTypes: string[],
+    actions: string[],
     opts?: WorkerAwaitOptions
   ): Promise<WorkerAwaitResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const value = serializeWorkerAwaitValue(taskTypes);
-
-    const optionsBuilder = new OptionsBuilder();
-    if (opts?.blockMs !== undefined) {
-      optionsBuilder.addU32(OptionTag.BlockMS, opts.blockMs);
-    }
-
-    const resp = await this.sender.sendRequest(
-      OpCode.ActionAwait,
-      namespace,
-      textEncoder.encode(workerId),
-      value,
-      optionsBuilder.build()
-    );
-
+    const body = encodeAwaitBody(actions, opts?.blockMs ?? 30000, opts?.requestKey);
+    const resp = await this.sender.sendRequest(OpCode.ActionAwait, namespace, textEncoder.encode(workerId), body, new Uint8Array(0));
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
-
-    // Parse task assignment response - if empty, no task available
-    if (resp.data.length === 0) {
-      return { task: null };
-    }
-
-    const task = parseTaskAssignment(resp.data);
-    return { task };
+    return { task: decodeAwaitAnswer(resp.data) };
   }
 
   /**
-   * Extend task lease (heartbeat).
-   *
-   * @param workerId - Worker identifier
-   * @param actionName - Action name
-   * @param taskId - Task identifier to extend
-   * @param opts - Touch options (extendMs)
+   * Keep a task: with half its lease or less left, the lease runs a full
+   * lease from now (up to 12 h from its delivery); with more left, nothing
+   * changes. Touch at least every half lease. Returns when the lease runs
+   * out without another touch, in ms since the Unix epoch. A delivery the
+   * run has moved on from throws StaleReportError.
    */
-  async touch(
-    workerId: string,
-    actionName: string,
-    taskId: string,
-    opts?: WorkerTouchOptions
-  ): Promise<void> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const value = serializeWorkerTouchValue(actionName, taskId, opts?.extendMs ?? 30000);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.ActionTouch,
-      namespace,
-      textEncoder.encode(workerId),
-      value,
-      new Uint8Array(0)
-    );
-
+  async touch(workerId: string, task: TaskDelivery): Promise<bigint> {
+    const resp = await this.sender.sendRequest(OpCode.ActionTouch, task.namespace, textEncoder.encode(task.runId), encodeTouchBody(workerId, task), new Uint8Array(0));
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
+    return decodeTouchAnswer(resp.data);
   }
 
   /**
-   * Complete a task successfully.
-   *
-   * @param workerId - Worker identifier
-   * @param actionName - Action name
-   * @param taskId - Task identifier to complete
-   * @param result - Result data from the task
-   * @param opts - Complete options
+   * Complete a task: its run is done, with `result`. Sending it again after
+   * it applied answers ok; a delivery the run has moved on from, or a
+   * second complete with another result, throws StaleReportError.
    */
-  async complete(
-    workerId: string,
-    actionName: string,
-    taskId: string,
-    result: Uint8Array,
-    opts?: WorkerCompleteOptions
-  ): Promise<void> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const value = serializeWorkerCompleteValue(actionName, taskId, result, opts?.outcome ?? "success");
-
-    const resp = await this.sender.sendRequest(
-      OpCode.ActionComplete,
-      namespace,
-      textEncoder.encode(workerId),
-      value,
-      new Uint8Array(0)
-    );
-
+  async complete(workerId: string, task: TaskDelivery, result: Uint8Array, opts?: WorkerCompleteOptions): Promise<void> {
+    const body = encodeCompleteBody(workerId, task, result, opts?.outcome ?? "");
+    const resp = await this.sender.sendRequest(OpCode.ActionComplete, task.namespace, textEncoder.encode(task.runId), body, new Uint8Array(0));
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
+    decodeEmptyAnswer(resp.data);
   }
 
   /**
-   * Fail a task.
-   *
-   * @param workerId - Worker identifier
-   * @param actionName - Action name
-   * @param taskId - Task identifier that failed
-   * @param errorMessage - Error message describing the failure
-   * @param opts - Fail options (retry flag)
+   * Fail a task: its run is ready again (after `delayMs`) while attempts
+   * are left, unless `retry` is false. `abandoned` hands it back untried,
+   * counting no failure. Sending it again after it applied answers ok; a
+   * delivery the run has moved on from throws StaleReportError.
    */
-  async fail(
-    workerId: string,
-    actionName: string,
-    taskId: string,
-    errorMessage: string,
-    opts?: WorkerFailOptions
-  ): Promise<void> {
-    const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const value = serializeWorkerFailValue(actionName, taskId, errorMessage, opts?.retry ?? true);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.ActionFail,
-      namespace,
-      textEncoder.encode(workerId),
-      value,
-      new Uint8Array(0)
-    );
-
+  async fail(workerId: string, task: TaskDelivery, errorMessage: string, opts?: WorkerFailOptions): Promise<void> {
+    const body = encodeFailBody(workerId, task, errorMessage, opts);
+    const resp = await this.sender.sendRequest(OpCode.ActionFail, task.namespace, textEncoder.encode(task.runId), body, new Uint8Array(0));
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
+    decodeEmptyAnswer(resp.data);
   }
 
   /**
@@ -524,14 +479,17 @@ export function parseActionInvokeAnswer(data: Uint8Array): string {
 
 /**
  * action.list's answer: [count:u32]([name_len:u16][name][value_len:u32][value])*
- * [has_more:u8][cursor_len:u16][cursor]. The server sends each value empty.
+ * [has_more:u8][cursor_len:u16][cursor], each value
+ * [version:u32][owner_len:u16][owner][timeout_ms:u64][max_attempts:u32][created_at_ms:i64].
  */
 export function decodeActionListAnswer(data: Uint8Array): ActionListResult {
   const r = new AnswerReader(data);
-  const names: string[] = [];
+  const actions: ActionListEntry[] = [];
   for (let n = r.u32(); n > 0; n--) {
-    names.push(r.string16());
-    r.bytes32();
+    const name = r.string16();
+    const v = new AnswerReader(r.bytes32());
+    actions.push({ name, version: v.u32(), owner: v.string16(), timeoutMs: v.u64(), maxAttempts: v.u32(), createdAtMs: v.i64() });
+    v.end();
   }
   const hasMore = r.bool();
   const cursor = r.bytes16();
@@ -539,5 +497,5 @@ export function decodeActionListAnswer(data: Uint8Array): ActionListResult {
   if (hasMore !== cursor.length > 0) {
     throw new IncompleteResponseError(`action list answer: has_more ${hasMore} with a cursor of ${cursor.length} bytes`);
   }
-  return { names, hasMore, cursor: hasMore ? cursor : null };
+  return { actions, hasMore, cursor: hasMore ? cursor : null };
 }

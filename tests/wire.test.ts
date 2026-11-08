@@ -25,7 +25,13 @@ import {
   parseEnqueueResponse,
   serializeSeqs,
   IncompleteResponseError,
-  parseTaskAssignment,
+  decodeAwaitAnswer,
+  encodeAwaitBody,
+  encodeCompleteBody,
+  encodeFailBody,
+  encodeTouchBody,
+  formatTaskId,
+  parseTaskId,
   serializeActionInvokeValue,
   serializeStreamAppendValue,
   FloError,
@@ -133,7 +139,7 @@ describe("Wire Protocol", () => {
 
       // Version, then the pinned table hash at 24-31
       expect(request[22]).toBe(VERSION);
-      expect(view.getBigUint64(24, true)).toBe(0xc751512225a42d04n);
+      expect(view.getBigUint64(24, true)).toBe(0x7eb599c24442118bn);
     });
 
     it("should include namespace in payload", () => {
@@ -390,27 +396,93 @@ describe("serializeStreamAppendValue", () => {
   });
 });
 
-describe("parseTaskAssignment", () => {
-  // [task_id_len]["t1"][task_type_len]["a"][created_at][attempt]
-  const head = [2, 0, 0x74, 0x31, 1, 0, 0x61, 7, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0];
-  const text = (s: string) => Array.from(new TextEncoder().encode(s));
+describe("action.await's answer", () => {
+  const text = (str: string) => Array.from(new TextEncoder().encode(str));
+  const le = (v: bigint, n: number) => Array.from({ length: n }, (_, i) => Number((v >> BigInt(8 * i)) & 0xffn));
+  // [1][run:u16]["r1"][namespace:u8]["ns"][deliveries:u32][term:u64][index:u64][action:u16]["a:b"]
+  // [created_at_ms:i64][attempt:u32][lease_ms:u64]
+  const head = [1, 2, 0, ...text("r1"), 2, ...text("ns"), ...le(3n, 4), ...le(4n, 8), ...le(50n, 8), 3, 0, ...text("a:b"), ...le(7n, 8), ...le(2n, 4), ...le(30000n, 8)];
 
-  it("reads a task no workflow invoked: the payload starts after has_caller", () => {
-    const task = parseTaskAssignment(new Uint8Array([...head, 0, ...text("hi")]));
-    expect(new TextDecoder().decode(task.payload)).toBe("hi");
-    expect(task.callerRunId).toBeUndefined();
-    expect(task.attempt).toBe(2);
+  it("reads a task no workflow invoked, with its delivery and the task id the CLI prints", () => {
+    const task = decodeAwaitAnswer(new Uint8Array([...head, 0, 0, ...le(2n, 4), ...text("hi")]))!;
+    expect(task).toEqual({
+      runId: "r1",
+      namespace: "ns",
+      deliveries: 3,
+      term: 4n,
+      index: 50n,
+      action: "a:b",
+      taskId: "r1:3:4:50:a:b",
+      createdAtMs: 7n,
+      attempt: 2,
+      leaseMs: 30000n,
+      callerRunId: undefined,
+      callerWorkflowName: undefined,
+      input: new TextEncoder().encode("hi"),
+    });
   });
 
-  it("reads a workflow's caller block, and the payload after it", () => {
-    const task = parseTaskAssignment(new Uint8Array([...head, 1, 2, 0, ...text("r1"), 3, 0, ...text("buy"), ...text("hi")]));
-    expect(task.callerRunId).toBe("r1");
-    expect(task.callerWorkflowName).toBe("buy");
-    expect(new TextDecoder().decode(task.payload)).toBe("hi");
+  it("reads a workflow's caller, then the input", () => {
+    const task = decodeAwaitAnswer(new Uint8Array([...head, 1, 2, 0, ...text("w1"), 1, 3, 0, ...text("buy"), ...le(0n, 4)]))!;
+    expect([task.callerRunId, task.callerWorkflowName, task.input.length]).toEqual(["w1", "buy", 0]);
   });
 
-  it("refuses a has_caller byte that isn't 0 or 1, and a cut caller block", () => {
-    expect(() => parseTaskAssignment(new Uint8Array([...head, 2]))).toThrow(IncompleteResponseError);
-    expect(() => parseTaskAssignment(new Uint8Array([...head, 1, 5, 0, 0x72]))).toThrow(IncompleteResponseError);
+  it("reads no task as null, and refuses a cut answer or bytes after it", () => {
+    expect(decodeAwaitAnswer(new Uint8Array([0]))).toBeNull();
+    expect(() => decodeAwaitAnswer(new Uint8Array([0, 0]))).toThrow(IncompleteResponseError);
+    const whole = new Uint8Array([...head, 0, 0, ...le(1n, 4), 0x78]);
+    for (let n = 0; n < whole.length; n++) expect(() => decodeAwaitAnswer(whole.subarray(0, n))).toThrow(IncompleteResponseError);
+    expect(() => decodeAwaitAnswer(new Uint8Array([...whole, 0]))).toThrow(IncompleteResponseError);
+  });
+});
+
+describe("task ids", () => {
+  const t = { runId: "act-1", namespace: "ns", deliveries: 2, term: 3n, index: 40n, action: "send:mail" };
+
+  it("format as run:deliveries:term:index:action and parse back, the action keeping its colons", () => {
+    expect(formatTaskId(t)).toBe("act-1:2:3:40:send:mail");
+    expect(parseTaskId("act-1:2:3:40:send:mail")).toEqual({ runId: "act-1", deliveries: 2, term: 3n, index: 40n, action: "send:mail" });
+  });
+
+  it("don't parse when cut or malformed", () => {
+    for (const cut of ["", "act-1", "act-1:2:3:40", "act-1:2:3:40:", ":2:3:40:a", "act-1:x:3:40:a", "act-1:4294967296:3:40:a"]) {
+      expect(parseTaskId(cut), cut).toBeNull();
+    }
+  });
+});
+
+describe("action report and await bodies", () => {
+  const text = (str: string) => Array.from(new TextEncoder().encode(str));
+  const le = (v: bigint, n: number) => Array.from({ length: n }, (_, i) => Number((v >> BigInt(8 * i)) & 0xffn));
+  const t = { runId: "r1", namespace: "ns", deliveries: 3, term: 4n, index: 50n, action: "a" };
+  // [action:u16]["a"][worker:u16]["w1"][deliveries:u32][term:u64][index:u64]
+  const delivery = [1, 0, ...text("a"), 2, 0, ...text("w1"), ...le(3n, 4), ...le(4n, 8), ...le(50n, 8)];
+
+  it("await: the actions (u8 count, u16 names), block_ms sent present, the request key (u8 length)", () => {
+    expect(Array.from(encodeAwaitBody(["a", "bc"], 5000, "rk-1"))).toEqual([2, 1, 0, ...text("a"), 2, 0, ...text("bc"), 1, ...le(5000n, 8), 1, 4, ...text("rk-1")]);
+    expect(Array.from(encodeAwaitBody(["a"], 0))).toEqual([1, 1, 0, ...text("a"), 1, ...le(0n, 8), 0]);
+  });
+
+  it("await refuses no actions, more than 64, a name past 256 bytes, a key past 64 and a wait past 300000", () => {
+    expect(() => encodeAwaitBody([], 0)).toThrow(FloError);
+    expect(() => encodeAwaitBody(Array.from({ length: 65 }, (_, i) => `a${i}`), 0)).toThrow(FloError);
+    expect(() => encodeAwaitBody(["a".repeat(257)], 0)).toThrow(FloError);
+    expect(() => encodeAwaitBody(["a"], 0, "k".repeat(65))).toThrow(FloError);
+    expect(() => encodeAwaitBody(["a"], 300001)).toThrow(FloError);
+  });
+
+  it("complete: the delivery, outcome and result, each sent present", () => {
+    expect(Array.from(encodeCompleteBody("w1", t, new TextEncoder().encode("pong")))).toEqual([...delivery, 1, 0, 0, 1, 4, 0, ...text("pong")]);
+    expect(Array.from(encodeCompleteBody("w1", t, new Uint8Array(0), "ok"))).toEqual([...delivery, 1, 2, 0, ...text("ok"), 1, 0, 0]);
+  });
+
+  it("fail: the delivery, retry, abandoned, delay_ms and error, each sent present", () => {
+    expect(Array.from(encodeFailBody("w1", t, "boom"))).toEqual([...delivery, 1, 1, 1, 0, 1, ...le(0n, 8), 1, 4, 0, ...text("boom")]);
+    expect(Array.from(encodeFailBody("w1", t, "", { retry: false, abandoned: true, delayMs: 250 }))).toEqual([...delivery, 1, 0, 1, 1, 1, ...le(250n, 8), 1, 0, 0]);
+    expect(() => encodeFailBody("w1", t, "", { delayMs: 86_400_001 })).toThrow(FloError);
+  });
+
+  it("touch: the delivery alone, with no extend length", () => {
+    expect(Array.from(encodeTouchBody("w1", t))).toEqual(delivery);
   });
 });

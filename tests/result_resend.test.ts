@@ -16,9 +16,14 @@ import {
   TABLE_HASH,
   VERSION,
   computeCRC32C,
+  encodeTouchBody,
   type Logger,
 } from "@floruntime/core";
 import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
+import { okAnswer, taskAnswer, type FakeTask } from "./fake_worker_server.js";
+
+/** The task the fakes hand out, as a report names it; its id is t1:1:1:10:a. */
+const TASK = { runId: "t1", namespace: "default", deliveries: 1, term: 1n, index: 10n, action: "a" };
 
 function frame(id: bigint, status: number, data: Uint8Array = new Uint8Array(0)): Uint8Array {
   const buf = new Uint8Array(HEADER_SIZE + data.length);
@@ -31,19 +36,6 @@ function frame(id: bigint, status: number, data: Uint8Array = new Uint8Array(0))
   view.setBigUint64(24, TABLE_HASH, true);
   buf.set(data, HEADER_SIZE);
   view.setUint32(16, computeCRC32C(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
-  return buf;
-}
-
-/** A task assignment for action "a", task id "t1", invoked by no workflow. */
-function oneTask(): Uint8Array {
-  const buf = new Uint8Array(2 + 2 + 2 + 1 + 8 + 4 + 1);
-  const view = new DataView(buf.buffer);
-  view.setUint16(0, 2, true);
-  buf.set([0x74, 0x31], 2); // "t1"
-  view.setUint16(4, 1, true);
-  buf[6] = 0x61; // "a"
-  view.setUint32(15, 1, true); // attempt
-  buf[19] = 0; // has_caller
   return buf;
 }
 
@@ -84,7 +76,7 @@ type Seen = { op: number; conn: number; bytes: Buffer };
 
 /**
  * A server that answers per `script(op, conn)`, conn counting accepted
- * connections from 0: undefined is an empty OK, "drop" destroys the
+ * connections from 0: undefined is an OK as okAnswer has it, "drop" destroys the
  * connection, "park" never answers; the named constants above say the rest.
  */
 async function fakeServer(script: (op: number, conn: number) => Action) {
@@ -130,7 +122,7 @@ async function fakeServer(script: (op: number, conn: number) => Action) {
           sock.write(f);
           continue;
         }
-        sock.write(frame(id, StatusCode.OK, a));
+        sock.write(frame(id, StatusCode.OK, a ?? okAnswer(op)));
       }
     });
   });
@@ -182,13 +174,13 @@ async function serve(script: (op: number, conn: number) => Action) {
 }
 
 /** A server that hands out one task, on the first await only. */
-function oneTaskThen(rest: (op: number, conn: number) => Action) {
+function oneTaskThen(rest: (op: number, conn: number) => Action, task: FakeTask = {}) {
   let served = false;
   return (op: number, conn: number): Action => {
     if (op === OpCode.ActionAwait) {
       if (served) return "park";
       served = true;
-      return oneTask();
+      return taskAnswer(task);
     }
     return rest(op, conn);
   };
@@ -211,11 +203,11 @@ function oneRecordThen(rest: (op: number, conn: number) => Action) {
 function failRetryByte(b: Buffer): number {
   let o = HEADER_SIZE;
   o += 2 + b.readUInt16LE(o); // namespace
-  o += 2 + b.readUInt16LE(o); // key (worker id)
-  o += 4; // value length
+  o += 2 + b.readUInt16LE(o); // key (run id)
   o += 2 + b.readUInt16LE(o); // action name
-  o += 2 + b.readUInt16LE(o); // task id
-  return b[o]!;
+  o += 2 + b.readUInt16LE(o); // worker id
+  o += 4 + 8 + 8; // deliveries, term, index
+  return b[o + 1]!; // after retry's present byte
 }
 
 /** A handler that runs until release() is called. */
@@ -292,18 +284,18 @@ describe("ActionWorker results", () => {
     await sleep(300);
     expect(srv.of(OpCode.ActionComplete)).toHaveLength(1);
     expect(srv.of(OpCode.ActionFail)).toHaveLength(0);
-    expect(errors.some((m) => m.includes("complete for task t1"))).toBe(true);
+    expect(errors.some((m) => m.includes("complete for task t1:1:1:10:a"))).toBe(true);
   });
 
   it("sends a complete at most 3 times, then drops it with an error naming the task", async () => {
     const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionComplete ? "drop" : undefined)));
     const { logger, errors } = recordingLogger();
     actionWorker(srv.endpoint, logger);
-    await until(() => errors.some((m) => m.includes("task t1")), 5000);
+    await until(() => errors.some((m) => m.includes("task t1:1:1:10:a")), 5000);
     await sleep(300);
     expect(srv.of(OpCode.ActionComplete)).toHaveLength(3);
     expect(srv.of(OpCode.ActionFail)).toHaveLength(0);
-    expect(errors.some((m) => m.includes("complete for task t1") && m.includes("after 3 sends"))).toBe(true);
+    expect(errors.some((m) => m.includes("complete for task t1:1:1:10:a") && m.includes("after 3 sends"))).toBe(true);
   });
 
   it("sends the complete of a handler still running at stop()", async () => {
@@ -392,7 +384,7 @@ describe("ActionWorker results", () => {
     const took = Date.now() - stopped;
     expect(took).toBeGreaterThanOrEqual(1900);
     expect(took).toBeLessThan(3500);
-    expect(errors.some((m) => m.includes("complete for task t1"))).toBe(true);
+    expect(errors.some((m) => m.includes("complete for task t1:1:1:10:a"))).toBe(true);
   });
 });
 
@@ -468,6 +460,7 @@ describe("ActionWorker registration and auto-touch", () => {
   function worker(endpoint: string, autoTouch: boolean, timeoutMs: number, handlerMs: number) {
     const w = new ActionWorker({
       endpoint,
+      workerId: "w1",
       blockMs: 30000,
       logger: recordingLogger().logger,
       autoTouch,
@@ -501,9 +494,10 @@ describe("ActionWorker registration and auto-touch", () => {
     expect(reg!.bytes.includes(Buffer.from("elsewhere"))).toBe(false);
   });
 
-  it("touches a running task every third of its timeout, and stops with the handler", async () => {
-    const srv = await serve(oneTaskThen(() => undefined));
-    worker(srv.endpoint, true, 300, 450);
+  it("touches a running task every quarter of the lease the task came with, and stops with the handler", async () => {
+    // A 400 ms lease: a touch every 100 ms through a 450 ms handler.
+    const srv = await serve(oneTaskThen(() => undefined, { leaseMs: 400n }));
+    worker(srv.endpoint, true, 600000, 450);
     await until(() => srv.of(OpCode.ActionComplete).length > 0, 5000);
     await sleep(300);
     const touches = srv.of(OpCode.ActionTouch);
@@ -511,22 +505,21 @@ describe("ActionWorker registration and auto-touch", () => {
     expect(touches.length).toBeLessThanOrEqual(5);
     const completeAt = srv.seen.indexOf(srv.of(OpCode.ActionComplete)[0]!);
     for (const t of touches) expect(srv.seen.indexOf(t)).toBeLessThan(completeAt);
-    // Each asks for this worker's timeout: "t1" then u32 300.
-    const extend = Buffer.alloc(4);
-    extend.writeUInt32LE(300);
-    for (const t of touches) expect(t.bytes.includes(Buffer.concat([Buffer.from("t1"), extend]))).toBe(true);
+    // Each names the delivery, and nothing more: a touch asks for no length.
+    const body = Buffer.from(encodeTouchBody("w1", TASK));
+    for (const t of touches) expect(t.bytes.subarray(t.bytes.length - body.length).equals(body)).toBe(true);
   });
 
   it("keeps touching after a refusal that isn't final, such as overloaded", async () => {
-    const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionTouch ? OVERLOADED : undefined)));
-    worker(srv.endpoint, true, 300, 450);
+    const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionTouch ? OVERLOADED : undefined), { leaseMs: 400n }));
+    worker(srv.endpoint, true, 600000, 450);
     await until(() => srv.of(OpCode.ActionComplete).length > 0, 5000);
     expect(srv.of(OpCode.ActionTouch).length).toBeGreaterThanOrEqual(2);
   });
 
   it("sends the complete while a touch is still in flight, on the same connection", async () => {
-    const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionTouch ? "park" : undefined)));
-    worker(srv.endpoint, true, 300, 150);
+    const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionTouch ? "park" : undefined), { leaseMs: 400n }));
+    worker(srv.endpoint, true, 600000, 150);
     await until(() => srv.of(OpCode.ActionComplete).length > 0, 5000);
     expect(srv.of(OpCode.ActionTouch)).toHaveLength(1);
     expect(srv.connections()).toBe(1);
@@ -539,20 +532,17 @@ describe("ActionWorker registration and auto-touch", () => {
     expect(() => w.action("c", async () => new Uint8Array(0), { timeoutMs: 1.5 })).toThrow(RangeError);
   });
 
-  it("touches nothing without autoTouch, or when the action never times out", async () => {
-    const off = await serve(oneTaskThen(() => undefined));
-    worker(off.endpoint, false, 300, 450);
-    const never = await serve(oneTaskThen(() => undefined));
-    worker(never.endpoint, true, 0, 300);
-    await until(() => off.of(OpCode.ActionComplete).length > 0 && never.of(OpCode.ActionComplete).length > 0, 5000);
+  it("touches nothing without autoTouch", async () => {
+    const srv = await serve(oneTaskThen(() => undefined, { leaseMs: 400n }));
+    worker(srv.endpoint, false, 600000, 450);
+    await until(() => srv.of(OpCode.ActionComplete).length > 0, 5000);
     await sleep(200);
-    expect(off.of(OpCode.ActionTouch)).toHaveLength(0);
-    expect(never.of(OpCode.ActionTouch)).toHaveLength(0);
+    expect(srv.of(OpCode.ActionTouch)).toHaveLength(0);
   });
 
   it("stops touching once a touch is refused as a conflict", async () => {
-    const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionTouch ? REFUSE : undefined)));
-    worker(srv.endpoint, true, 300, 450);
+    const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionTouch ? REFUSE : undefined), { leaseMs: 400n }));
+    worker(srv.endpoint, true, 600000, 450);
     await until(() => srv.of(OpCode.ActionComplete).length > 0, 5000);
     await sleep(200);
     expect(srv.of(OpCode.ActionTouch)).toHaveLength(1);

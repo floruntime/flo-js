@@ -83,8 +83,8 @@ export function workerBlockMs(blockMs: number | undefined): number {
 
 /**
  * How long the server may hold a serialized request before answering: a
- * kv.get's wait_ms, or its BlockMS option; else 30000 for an
- * action await, which the server holds that long by default; else 0.
+ * kv.get's wait_ms, an action await's block_ms, or its BlockMS option;
+ * else 0.
  * Transports add this to their timeout so a long poll is not cut off
  * client-side while the server is still waiting.
  *
@@ -99,8 +99,20 @@ export function requestBlockMs(request: Uint8Array): number {
   off += 2 + view.getUint16(off, true); // key
   const op = view.getUint16(20, true) as OpCode;
   if (isTableOp(op)) {
-    // Of the table ops only kv.get waits; its body opens with wait_ms: [present:u8][u64].
-    if (op !== OpCode.KVGet || request.length < off + 9 || request[off] !== 1) return 0;
+    if (op === OpCode.ActionAwait) {
+      // [count:u8]([len:u16][action])*, then block_ms: [present:u8][u64], 30000 when absent.
+      if (request.length < off + 1) return 0;
+      for (let n = request[off++]!; n > 0; n--) {
+        if (request.length < off + 2) return 0;
+        off += 2 + view.getUint16(off, true);
+      }
+    } else if (op !== OpCode.KVGet) {
+      return 0;
+    }
+    // kv.get's body opens with wait_ms: [present:u8][u64].
+    if (request.length < off + 1) return 0;
+    if (request[off] !== 1) return op === OpCode.ActionAwait ? 30000 : 0;
+    if (request.length < off + 9) return 0;
     return Number(view.getBigUint64(off + 1, true));
   }
   if (request.length < off + 4) return 0;
@@ -119,8 +131,7 @@ export function requestBlockMs(request: Uint8Array): number {
     }
     off += len;
   }
-  if (blockMs !== undefined) return blockMs;
-  return view.getUint16(20, true) === OpCode.ActionAwait ? 30000 : 0;
+  return blockMs ?? 0;
 }
 
 /**
@@ -456,7 +467,6 @@ export function serializeSeqs(seqs: bigint[]): Uint8Array {
 // ============================================================================
 
 const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
 
 /**
  * Serialize action register value.
@@ -656,245 +666,6 @@ export function serializeWorkerRegisterValue(
   }
 
   return buf.subarray(0, offset);
-}
-
-/**
- * Serialize worker await value.
- * Format: [count:u32][task_type_len:u16][task_type]...
- */
-export function serializeWorkerAwaitValue(taskTypes: string[]): Uint8Array {
-  // Calculate size
-  let size = 4; // count
-  for (const tt of taskTypes) {
-    size += 2 + textEncoder.encode(tt).length;
-  }
-
-  const buf = new Uint8Array(size);
-  const view = new DataView(buf.buffer);
-  let offset = 0;
-
-  // count
-  view.setUint32(offset, taskTypes.length, true);
-  offset += 4;
-
-  // task types
-  for (const tt of taskTypes) {
-    const ttBytes = textEncoder.encode(tt);
-    view.setUint16(offset, ttBytes.length, true);
-    offset += 2;
-    buf.set(ttBytes, offset);
-    offset += ttBytes.length;
-  }
-
-  return buf.subarray(0, offset);
-}
-
-/**
- * Serialize worker touch value.
- * Format: [action_name_len:u16][action_name][task_id_len:u16][task_id][extend_ms:u32]
- */
-export function serializeWorkerTouchValue(
-  actionName: string,
-  taskId: string,
-  extendMs: number = 30000
-): Uint8Array {
-  const actionNameBytes = textEncoder.encode(actionName);
-  const taskIdBytes = textEncoder.encode(taskId);
-  const buf = new Uint8Array(2 + actionNameBytes.length + 2 + taskIdBytes.length + 4);
-  const view = new DataView(buf.buffer);
-  let offset = 0;
-
-  // action_name
-  view.setUint16(offset, actionNameBytes.length, true);
-  offset += 2;
-  buf.set(actionNameBytes, offset);
-  offset += actionNameBytes.length;
-
-  // task_id
-  view.setUint16(offset, taskIdBytes.length, true);
-  offset += 2;
-  buf.set(taskIdBytes, offset);
-  offset += taskIdBytes.length;
-
-  // extend_ms
-  view.setUint32(offset, extendMs, true);
-
-  return buf;
-}
-
-/**
- * Serialize worker complete value.
- * Format: [action_name_len:u16][action_name][task_id_len:u16][task_id][outcome_len:u16][outcome][result_len:u16][result]
- */
-export function serializeWorkerCompleteValue(
-  actionName: string,
-  taskId: string,
-  result: Uint8Array,
-  outcome: string = "success"
-): Uint8Array {
-  const actionNameBytes = textEncoder.encode(actionName);
-  const taskIdBytes = textEncoder.encode(taskId);
-  const outcomeBytes = textEncoder.encode(outcome);
-  const buf = new Uint8Array(
-    2 + actionNameBytes.length +
-    2 + taskIdBytes.length +
-    2 + outcomeBytes.length +
-    2 + result.length
-  );
-  const view = new DataView(buf.buffer);
-  let offset = 0;
-
-  // action_name
-  view.setUint16(offset, actionNameBytes.length, true);
-  offset += 2;
-  buf.set(actionNameBytes, offset);
-  offset += actionNameBytes.length;
-
-  // task_id
-  view.setUint16(offset, taskIdBytes.length, true);
-  offset += 2;
-  buf.set(taskIdBytes, offset);
-  offset += taskIdBytes.length;
-
-  // outcome
-  view.setUint16(offset, outcomeBytes.length, true);
-  offset += 2;
-  buf.set(outcomeBytes, offset);
-  offset += outcomeBytes.length;
-
-  // result
-  view.setUint16(offset, result.length, true);
-  offset += 2;
-  buf.set(result, offset);
-
-  return buf;
-}
-
-/**
- * Serialize worker fail value.
- * Format: [action_name_len:u16][action_name][task_id_len:u16][task_id][retry:u8][error_message...]
- */
-export function serializeWorkerFailValue(
-  actionName: string,
-  taskId: string,
-  errorMessage: string,
-  retry: boolean = true
-): Uint8Array {
-  const actionNameBytes = textEncoder.encode(actionName);
-  const taskIdBytes = textEncoder.encode(taskId);
-  const errorBytes = textEncoder.encode(errorMessage);
-  const buf = new Uint8Array(2 + actionNameBytes.length + 2 + taskIdBytes.length + 1 + errorBytes.length);
-  const view = new DataView(buf.buffer);
-  let offset = 0;
-
-  // action_name
-  view.setUint16(offset, actionNameBytes.length, true);
-  offset += 2;
-  buf.set(actionNameBytes, offset);
-  offset += actionNameBytes.length;
-
-  // task_id
-  view.setUint16(offset, taskIdBytes.length, true);
-  offset += 2;
-  buf.set(taskIdBytes, offset);
-  offset += taskIdBytes.length;
-
-  // retry
-  buf[offset++] = retry ? 1 : 0;
-
-  // error_message
-  buf.set(errorBytes, offset);
-
-  return buf;
-}
-
-/**
- * Parse task assignment from server response.
- * Format: [task_id_len:u16][task_id][task_type_len:u16][task_type]
- *         [created_at:i64][attempt:u32][payload...]
- */
-export function parseTaskAssignment(data: Uint8Array): import("./types.js").TaskAssignment {
-  if (data.length < 10) {
-    throw new IncompleteResponseError("task assignment too short");
-  }
-
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  let offset = 0;
-
-  // task_id
-  const taskIdLen = view.getUint16(offset, true);
-  offset += 2;
-  if (data.length < offset + taskIdLen) {
-    throw new IncompleteResponseError("task assignment: missing task_id");
-  }
-  const taskId = textDecoder.decode(data.subarray(offset, offset + taskIdLen));
-  offset += taskIdLen;
-
-  // task_type
-  if (data.length < offset + 2) {
-    throw new IncompleteResponseError("task assignment: missing task_type length");
-  }
-  const taskTypeLen = view.getUint16(offset, true);
-  offset += 2;
-  if (data.length < offset + taskTypeLen) {
-    throw new IncompleteResponseError("task assignment: missing task_type");
-  }
-  const taskType = textDecoder.decode(data.subarray(offset, offset + taskTypeLen));
-  offset += taskTypeLen;
-
-  // created_at
-  if (data.length < offset + 8) {
-    throw new IncompleteResponseError("task assignment: missing created_at");
-  }
-  const createdAt = view.getBigInt64(offset, true);
-  offset += 8;
-
-  // attempt
-  if (data.length < offset + 4) {
-    throw new IncompleteResponseError("task assignment: missing attempt");
-  }
-  const attempt = view.getUint32(offset, true);
-  offset += 4;
-
-  // caller: [has_caller:u8]([run_id_len:u16][run_id][workflow_len:u16][workflow])?
-  // The workflow run that invoked the action, when one did.
-  if (data.length < offset + 1) {
-    throw new IncompleteResponseError("task assignment: missing has_caller");
-  }
-  const hasCaller = data[offset++];
-  let callerRunId: string | undefined;
-  let callerWorkflowName: string | undefined;
-  if (hasCaller === 1) {
-    for (const field of ["run id", "workflow name"] as const) {
-      if (data.length < offset + 2) {
-        throw new IncompleteResponseError(`task assignment: missing caller ${field} length`);
-      }
-      const len = view.getUint16(offset, true);
-      offset += 2;
-      if (data.length < offset + len) {
-        throw new IncompleteResponseError(`task assignment: missing caller ${field}`);
-      }
-      const text = textDecoder.decode(data.subarray(offset, offset + len));
-      offset += len;
-      if (field === "run id") callerRunId = text;
-      else callerWorkflowName = text;
-    }
-  } else if (hasCaller !== 0) {
-    throw new IncompleteResponseError(`task assignment: has_caller is ${hasCaller}, not 0 or 1`);
-  }
-
-  // payload (rest of data)
-  const payload = data.subarray(offset);
-
-  return {
-    taskId,
-    taskType,
-    payload,
-    createdAt,
-    attempt,
-    callerRunId,
-    callerWorkflowName,
-  };
 }
 
 /**

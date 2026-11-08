@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { HEADER_SIZE, MAGIC, OpCode, TABLE_HASH, VERSION, computeCRC32C, type Logger } from "@floruntime/core";
 import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
 import { reconnect } from "../packages/node/src/reconnect.js";
+import { okAnswer, oneTask } from "./fake_worker_server.js";
 
 function reply(id: bigint, data: Uint8Array = new Uint8Array(0)): Uint8Array {
   const buf = new Uint8Array(HEADER_SIZE + data.length);
@@ -20,19 +21,6 @@ function reply(id: bigint, data: Uint8Array = new Uint8Array(0)): Uint8Array {
   view.setBigUint64(24, TABLE_HASH, true);
   buf.set(data, HEADER_SIZE);
   view.setUint32(16, computeCRC32C(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
-  return buf;
-}
-
-/** A task assignment for action "a", invoked by no workflow. */
-function oneTask(): Uint8Array {
-  const buf = new Uint8Array(2 + 2 + 2 + 1 + 8 + 4 + 1);
-  const view = new DataView(buf.buffer);
-  view.setUint16(0, 2, true);
-  buf.set([0x74, 0x31], 2); // "t1"
-  view.setUint16(4, 1, true);
-  buf[6] = 0x61; // "a"
-  view.setUint32(15, 1, true); // attempt
-  buf[19] = 0; // has_caller
   return buf;
 }
 
@@ -51,7 +39,7 @@ type Action = "drop" | "park" | Uint8Array | undefined;
 
 /**
  * A server that answers per `script(op, conn)`, where conn counts accepted
- * connections from 0: undefined is an empty OK, "drop" destroys the
+ * connections from 0: undefined is an OK as okAnswer has it, "drop" destroys the
  * connection, "park" never answers.
  */
 async function fakeServer(script: (op: number, conn: number) => Action) {
@@ -74,7 +62,7 @@ async function fakeServer(script: (op: number, conn: number) => Action) {
         const a = script(op, conn);
         if (a === "drop") return void sock.destroy();
         if (a === "park") continue;
-        sock.write(reply(id, a));
+        sock.write(reply(id, a ?? okAnswer(op)));
       }
     });
   });

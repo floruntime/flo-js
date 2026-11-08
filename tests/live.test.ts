@@ -13,7 +13,24 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ConflictError, NoNamespaceError, NotFoundError, ProcessKind, Ran, Reason, ServerError, StatusCode, TABLE_HASH, VERSION, WorkerStatus, WorkerType, type WorkerInfo } from "@floruntime/core";
+import {
+  ActionType,
+  ConflictError,
+  NoNamespaceError,
+  NotFoundError,
+  ProcessKind,
+  Ran,
+  Reason,
+  ServerError,
+  StaleReportError,
+  StatusCode,
+  TABLE_HASH,
+  VERSION,
+  WorkerStatus,
+  WorkerType,
+  type TaskAssignment,
+  type WorkerInfo,
+} from "@floruntime/core";
 import { ActionWorker, FloClient } from "@floruntime/node";
 
 const endpoint = process.env.FLO_ENDPOINT ?? "";
@@ -159,12 +176,17 @@ describe.skipIf(!endpoint)("live", () => {
     it("action.list", async () => {
       const { client } = await liveClient();
       const want = names("a", 30);
-      for (const a of want) await client.action.register(a);
+      for (const a of want) await client.action.register(a, ActionType.User, { owner: `team-${a}` });
+      const entries: { name: string; owner: string; timeoutMs: bigint; maxAttempts: number; version: number }[] = [];
       const got = await pageAll(
         (cursor) => client.action.list({ limit: 3, cursor }),
-        (p) => ({ names: p.names, done: !p.hasMore, cursor: p.cursor })
+        (p) => {
+          entries.push(...p.actions);
+          return { names: p.actions.map((a) => a.name), done: !p.hasMore, cursor: p.cursor };
+        }
       );
       expectEachOnce(got, want);
+      for (const e of entries) expect(e).toMatchObject({ owner: `team-${e.name}`, timeoutMs: 30000n, maxAttempts: 3, version: 1 });
     });
 
     it("workflow.listDefinitions", async () => {
@@ -179,6 +201,17 @@ describe.skipIf(!endpoint)("live", () => {
         (p) => ({ names: p.definitions.map((d) => d.name), done: !p.hasMore, cursor: p.cursor })
       );
       expectEachOnce(got, want);
+      await client.workflow.disable(want[0]!);
+      const enabled = new Map<string, boolean>();
+      await pageAll(
+        (cursor) => client.workflow.listDefinitions({ limit: 3, cursor }),
+        (p) => {
+          for (const d of p.definitions) enabled.set(d.name, d.enabled);
+          return { names: [], done: !p.hasMore, cursor: p.cursor };
+        }
+      );
+      expect(enabled.get(want[0]!)).toBe(false);
+      expect(want.slice(1).every((n) => enabled.get(n) === true)).toBe(true);
     });
 
     it("processing.list", async () => {
@@ -198,6 +231,7 @@ describe.skipIf(!endpoint)("live", () => {
       await pageAll(
         (cursor) => client.processing.list({ limit: 3, cursor }),
         (p) => {
+          for (const j of p.jobs) expect(j.batch_size, j.name).toBeGreaterThan(0);
           jobs.push(...p.jobs.map((j) => ({ name: j.name, id: j.job_id })));
           return { names: p.jobs.map((j) => j.name), done: !p.hasMore, cursor: p.cursor };
         }
@@ -211,6 +245,22 @@ describe.skipIf(!endpoint)("live", () => {
         ids
       );
     });
+  });
+
+  it("shows a job's status with its runtime and definition, and removes it only once it no longer runs", async () => {
+    const { client } = await liveClient();
+    const yaml = `kind: Processing\nname: tidy\n\nsources:\n  - name: in\n    stream:\n      name: tidy-in\n\nsinks:\n  - name: out\n    kv:\n      key_prefix: tidy\n`;
+    const id = await client.processing.submit(yaml);
+    cleanups.push(async () => void (await client.processing.cancel(id).catch(() => {})));
+    const status = await client.processing.status(id);
+    expect(status).toMatchObject({ job_id: id, name: "tidy", status: "running", yaml });
+    expect(typeof status.running).toBe("boolean");
+    const running = await client.processing.remove(id).catch((e: unknown) => e);
+    expect(running).toBeInstanceOf(ConflictError);
+    expect(running).toMatchObject({ reason: Reason.JobRunning, ran: Ran.No });
+    await client.processing.stop(id);
+    await client.processing.remove(id);
+    await expect(client.processing.status(id)).rejects.toBeInstanceOf(NotFoundError);
   });
 
   it("answers stream.info of a stream that doesn't exist not found, not as an empty stream", async () => {
@@ -312,6 +362,45 @@ describe.skipIf(!endpoint)("live", () => {
     expect((await client.queue.peek("jobs", 10)).messages).toHaveLength(0);
   });
 
+  it("peeks a queue's next messages in dequeue order without taking them, and pages its dead letters", async () => {
+    const { client } = await liveClient();
+    const seqs: bigint[] = [];
+    for (const [p, priority] of [["low", 5], ["high", 1], ["mid", 3]] as const) seqs.push(await client.queue.enqueue("jobs", encoder.encode(p), { priority }));
+    const peeked = await client.queue.peek("jobs", 2);
+    expect(peeked.messages.map((m) => [decoder.decode(m.payload), m.priority, m.attempts, m.size])).toEqual([
+      ["high", 1, 0, 4],
+      ["mid", 3, 0, 3],
+    ]);
+    expect(peeked.more).toBe(true);
+    expect((await client.queue.peek("jobs")).messages).toHaveLength(3);
+    const taken = await client.queue.dequeue("jobs", 1);
+    expect(decoder.decode(taken.messages[0]!.payload)).toBe("high");
+    // Nothing has died: an empty first page, and one after a seq.
+    expect(await client.queue.dlqList("jobs")).toEqual({ messages: [], total: 0n, hasMore: false, lastSeq: 0n });
+    expect(await client.queue.dlqList("jobs", { limit: 1, after: seqs[0]! })).toEqual({ messages: [], total: 0n, hasMore: false, lastSeq: 0n });
+  });
+
+  it("lists a stream's consumer groups and a group's members, and refuses an unknown group not found", async () => {
+    const { client } = await liveClient();
+    await client.stream.append("events", encoder.encode("x"));
+    await client.stream.groupJoin("events", "g1", "c1");
+    await client.stream.groupJoin("events", "g1", "c2");
+    const read = await client.stream.groupRead("events", { group: "g1", consumer: "c1", limit: 10 });
+    expect(read.records).toHaveLength(1);
+    const { groups, more } = await client.stream.groupList("events");
+    expect(more).toBe(false);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ name: "g1", members: 2, pending: 1n });
+    expect(groups[0]!.lastDeliveredMs).toBeGreaterThan(0n);
+    const members = await client.stream.groupMembers("events", "g1");
+    expect(members.more).toBe(false);
+    const byId = Object.fromEntries(members.members.map((m) => [m.id, m]));
+    expect(byId.c1).toMatchObject({ state: "active", pending: 1 });
+    expect(byId.c1!.lastActiveMs).toBeDefined();
+    expect(byId.c2).toMatchObject({ state: "active", pending: 0 });
+    await expect(client.stream.groupMembers("events", "nope")).rejects.toBeInstanceOf(NotFoundError);
+  });
+
   it("runs an invoked action on a worker, and the run's status then carries its output", async () => {
     const { client, namespace } = await liveClient();
     const logged: string[] = [];
@@ -341,6 +430,88 @@ describe.skipIf(!endpoint)("live", () => {
     expect(status.attempt).toBe(1);
     expect(status.completedAtMs).toBeDefined();
     expect(status.workerId).toBe("live-echo");
+  });
+
+  // The spec every SDK's live suite runs: a delivery's identity echoed in
+  // every report, a retried await, stale and resent reports, and the fail path.
+  it("live: action round trip", async () => {
+    const { client, namespace } = await liveClient();
+    await client.action.register("echo", ActionType.User, { timeoutMs: 5000, maxRetries: 3 });
+    const { runId } = await client.action.invoke("echo", encoder.encode("ping"));
+
+    const take = async (requestKey: string): Promise<TaskAssignment> => {
+      const { task } = await client.worker.awaitTask("w1", ["echo"], { blockMs: 5000, requestKey });
+      expect(task, `await ${requestKey}`).not.toBeNull();
+      return task!;
+    };
+    const delivery = (t: TaskAssignment) => ({ runId: t.runId, deliveries: t.deliveries, term: t.term, index: t.index });
+
+    const task = await take("rk-1");
+    expect(task).toMatchObject({ runId, namespace, deliveries: 1, action: "echo", attempt: 1, leaseMs: 5000n });
+    expect(decoder.decode(task.input)).toBe("ping");
+    expect(task.createdAtMs).toBeGreaterThan(0n);
+    expect(task.taskId).toBe(`${runId}:1:${task.term}:${task.index}:echo`);
+
+    // The same request key gets the same delivery, not a second one.
+    expect(delivery(await take("rk-1"))).toEqual(delivery(task));
+
+    // More than half the lease left: the current expiry, unchanged.
+    const expiry = await client.worker.touch("w1", task);
+    expect(expiry).toBeGreaterThan(BigInt(Date.now()));
+    expect(await client.worker.touch("w1", task)).toBe(expiry);
+
+    const stale = await client.worker.complete("w1", { ...task, deliveries: 2 }, encoder.encode("pong")).catch((e: unknown) => e);
+    expect(stale).toBeInstanceOf(StaleReportError);
+    expect(stale).toMatchObject({ status: StatusCode.Conflict, reason: Reason.StaleReport, ran: Ran.No });
+    expect((stale as StaleReportError).serverMessage.startsWith("stale report:")).toBe(true);
+
+    await client.worker.complete("w1", task, encoder.encode("pong"));
+    // A resend of a report that already applied is not an error.
+    await client.worker.complete("w1", task, encoder.encode("pong"));
+    const other = await client.worker.complete("w1", task, encoder.encode("other")).catch((e: unknown) => e);
+    expect(other).toBeInstanceOf(StaleReportError);
+    expect(other).toMatchObject({ reason: Reason.StaleReport, serverMessage: "stale report: the run was completed with another result" });
+
+    const status = await client.action.status(runId);
+    expect(status.status).toBe("completed");
+    expect(decoder.decode(status.output!)).toBe("pong");
+    expect(status.outcome).toBeUndefined();
+
+    // The fail path: a retried failure counts an attempt; an abandoned one doesn't.
+    const second = await client.action.invoke("echo", encoder.encode("ping 2"));
+    const t1 = await take("rk-2");
+    expect(t1).toMatchObject({ runId: second.runId, deliveries: 1, attempt: 1 });
+    await client.worker.fail("w1", t1, "boom", { retry: true, delayMs: 0 });
+    const t2 = await take("rk-3");
+    expect(t2).toMatchObject({ runId: second.runId, deliveries: 2, attempt: 2 });
+    await client.worker.fail("w1", t2, "", { abandoned: true });
+    const t3 = await take("rk-4");
+    expect(t3).toMatchObject({ runId: second.runId, deliveries: 3, attempt: 2 });
+    await client.worker.complete("w1", t3, encoder.encode("done"));
+    expect((await client.action.status(second.runId)).status).toBe("completed");
+  }, 30000);
+
+  it("shows an action's definition, its runs by status and the latency of completed ones", async () => {
+    const { client } = await liveClient();
+    await client.action.register("tally", ActionType.User, { timeoutMs: 60000, maxRetries: 4, owner: "team-a" });
+    for (let i = 0; i < 3; i++) await client.action.invoke("tally", encoder.encode(`${i}`));
+    const { task } = await client.worker.awaitTask("w1", ["tally"], { blockMs: 5000 });
+    await client.worker.complete("w1", task!, new Uint8Array(0), { outcome: "counted" });
+    const info = await client.action.info("tally");
+    expect(info).toMatchObject({ owner: "team-a", version: 1, timeoutMs: 60000n, maxAttempts: 4, ready: 2n, readyCapped: false, tooManyRuns: false, completed: 1n, latencyCount: 1n });
+    expect(info.createdAtMs).toBeGreaterThan(0n);
+    expect((await client.action.status(task!.runId)).outcome).toBe("counted");
+    await expect(client.action.info("missing")).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it("refuses a lease outside 5 s to 12 h, as the server says", async () => {
+    const { client } = await liveClient();
+    for (const timeoutMs of [4999, 43_200_001]) {
+      const err = await client.action.register("bad", ActionType.User, { timeoutMs }).catch((e: unknown) => e);
+      expect(err, `${timeoutMs}`).toMatchObject({ status: StatusCode.BadRequest });
+    }
+    await client.action.register("default-lease", ActionType.User, { timeoutMs: 0 });
+    expect((await client.action.info("default-lease")).timeoutMs).toBe(300000n);
   });
 
   it("lists registered workers a page at a time, in id order, with their options", async () => {
@@ -419,8 +590,8 @@ describe.skipIf(!endpoint)("live", () => {
     expect(err).toMatchObject({ status: StatusCode.NotFound, reason: Reason.NotFound });
   });
 
-  // A handler past its action's 1 s timeout runs once when the worker touches
-  // it: without autoTouch the server would take the run back and hand it out
+  // A handler past its 5 s lease runs once when the worker touches it:
+  // without autoTouch the server would take the run back and hand it out
   // again.
   it("keeps a long handler from running twice with autoTouch", async () => {
     const { client, namespace } = await liveClient();
@@ -432,10 +603,10 @@ describe.skipIf(!endpoint)("live", () => {
       "slow",
       async () => {
         runs++;
-        await new Promise((r) => setTimeout(r, 2500));
+        await new Promise((r) => setTimeout(r, 8000));
         return encoder.encode("ok");
       },
-      { timeoutMs: 1000 }
+      { timeoutMs: 5000 }
     );
     const done = worker.start();
     cleanups.push(async () => {
@@ -451,7 +622,7 @@ describe.skipIf(!endpoint)("live", () => {
     }
     await new Promise((r) => setTimeout(r, 1500)); // a re-run would have started by now
     expect(runs).toBe(1);
-  }, 30000);
+  }, 40000);
 
   // A drain the server starts mid-run lets the running action complete once,
   // then ends start() and deregisters the worker.

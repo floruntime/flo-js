@@ -27,6 +27,7 @@ import {
   normalizeRetryPolicy,
 } from "@floruntime/core";
 import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
+import { taskAnswer } from "./fake_worker_server.js";
 
 const enc = new TextEncoder();
 
@@ -69,7 +70,7 @@ function getReply(id: bigint, value: string): Buffer {
 type Seen = { op: number; id: bigint; at: number };
 
 /** A server that answers the nth request of each op (from 0) with reply(op, n, id). */
-async function scripted(reply: (op: number, n: number, id: bigint) => Buffer) {
+async function scripted(reply: (op: number, n: number, id: bigint) => Buffer, onRequest?: (op: number, payload: Buffer) => void) {
   const seen: Seen[] = [];
   const counts = new Map<number, number>();
   const sockets: net.Socket[] = [];
@@ -83,10 +84,12 @@ async function scripted(reply: (op: number, n: number, id: bigint) => Buffer) {
         if (buf.length < total) return;
         const op = buf.readUInt16LE(20);
         const id = buf.readBigUInt64LE(8);
+        const payload = Buffer.from(buf.subarray(HEADER_SIZE, total));
         buf = buf.subarray(total);
         const n = counts.get(op) ?? 0;
         counts.set(op, n + 1);
         seen.push({ op, id, at: Date.now() });
+        onRequest?.(op, payload);
         sock.write(reply(op, n, id));
       }
     });
@@ -363,3 +366,71 @@ describe.each(failingWorkers)("%s after a failed poll", (_name, pollOp, start) =
     }
   });
 });
+
+// A new leader that hasn't applied what earlier leaders committed, or a node
+// whose leadership isn't settled, refuses unavailable / leader_unknown.
+describe("a refusal while the leader isn't ready (unavailable, leader_unknown)", () => {
+  const notReady = (id: bigint, ran: Ran) => refusal(id, StatusCode.Unavailable, ran, Reason.LeaderUnknown);
+  const delivery = { runId: "r1", namespace: "default", deliveries: 1, term: 2n, index: 3n, action: "a" };
+
+  it("is retried for a read when it ran nothing", async () => {
+    const srv = await serve((_op, n, id) => (n < 2 ? notReady(id, Ran.No) : getReply(id, "v")));
+    const c = await connect(srv.endpoint, fastRetry);
+    const got = await c.kv.get("k");
+    expect(new TextDecoder().decode(got?.value)).toBe("v");
+    expect(srv.of(OpCode.KVGet)).toHaveLength(3);
+  });
+
+  it("is retried for an action report when it ran nothing, so the report isn't surfaced as an error", async () => {
+    const srv = await serve((op, n, id) => (op === OpCode.ActionComplete && n === 0 ? notReady(id, Ran.No) : frame(id, StatusCode.OK)));
+    const c = await connect(srv.endpoint, fastRetry);
+    await c.worker.complete("w1", delivery, enc.encode("pong"));
+    expect(srv.of(OpCode.ActionComplete)).toHaveLength(2);
+  });
+
+  it("surfaces as UnavailableError once the retries run out", async () => {
+    const srv = await serve((_op, _n, id) => notReady(id, Ran.No));
+    const c = await connect(srv.endpoint, fastRetry);
+    const err = await c.worker.touch("w1", delivery).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(UnavailableError);
+    expect(err).toMatchObject({ reason: Reason.LeaderUnknown, ran: Ran.No });
+    expect(srv.of(OpCode.ActionTouch)).toHaveLength(fastRetry.maxAttempts);
+  });
+
+  it("isn't resent by the client when it may have run; the worker's next await carries the same request key", async () => {
+    const keys: string[] = [];
+    const srv = await scripted((op, n, id) => {
+      if (op !== OpCode.ActionAwait) return frame(id, StatusCode.OK);
+      if (n === 0) return notReady(id, Ran.Unknown);
+      if (n === 1) return frame(id, StatusCode.OK, taskAnswer());
+      return frame(id, StatusCode.OK, new Uint8Array([0]));
+    }, (op, payload) => {
+      if (op === OpCode.ActionAwait) keys.push(awaitRequestKey(payload));
+    });
+    cleanups.push(srv.close);
+    const w = new ActionWorker({ endpoint: srv.endpoint, blockMs: 30000, retry: fastRetry });
+    w.action("a", async () => new Uint8Array(0));
+    const done = w.start();
+    cleanups.push(async () => {
+      w.stop();
+      await done;
+    });
+    for (let i = 0; i < 300 && keys.length < 3; i++) await sleep(10);
+    expect(keys.length).toBeGreaterThanOrEqual(3);
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/);
+    expect(keys[1]).toBe(keys[0]);
+    expect(keys[2]).not.toBe(keys[1]);
+  });
+});
+
+/** An action.await request's request_key: after the namespace, key, actions and block_ms. */
+function awaitRequestKey(payload: Buffer): string {
+  let o = 0;
+  o += 2 + payload.readUInt16LE(o); // namespace
+  o += 2 + payload.readUInt16LE(o); // key (worker id)
+  for (let n = payload[o++]!; n > 0; n--) o += 2 + payload.readUInt16LE(o);
+  o += 1 + 8; // block_ms
+  expect(payload[o]).toBe(1);
+  const len = payload[o + 1]!;
+  return payload.subarray(o + 2, o + 2 + len).toString();
+}

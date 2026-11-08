@@ -101,9 +101,9 @@ export interface ActionWorkerConfig {
   retry?: Partial<RetryPolicy>;
 
   /**
-   * Touch each run every third of its action's timeout while the handler
-   * runs (default false). Without it, a handler that runs past the action's
-   * timeout without calling `ctx.touch()` is taken back and run again.
+   * Touch each run every quarter of its lease while the handler runs
+   * (default false). Without it, a handler that runs past the lease without
+   * calling `ctx.touch()` is taken back and run again.
    */
   autoTouch?: boolean;
 
@@ -116,11 +116,8 @@ export interface ActionWorkerConfig {
   logger?: boolean | Logger;
 }
 
-/** autoTouch never touches more often than this, whatever the timeout. */
+/** autoTouch never touches more often than this, whatever the lease. */
 const MIN_TOUCH_INTERVAL_MS = 100;
-
-/** The longest lease a touch may ask for; the server refuses more. */
-const MAX_TOUCH_EXTEND_MS = 3_600_000;
 
 /** Touch refusals that mean the run moved on: touching again can't help. */
 const TOUCH_FINAL: StatusCode[] = [StatusCode.Conflict, StatusCode.NotFound, StatusCode.BadRequest];
@@ -168,8 +165,11 @@ export class ActionResult {
  * parsing input and formatting output.
  */
 export class ActionContext {
-  /** Task ID */
+  /** Task ID, as the CLI prints it: `run:deliveries:term:index:action`. */
   readonly taskId: string;
+
+  /** The run this task is a delivery of. */
+  readonly runId: string;
 
   /** Action name being executed */
   readonly actionName: string;
@@ -177,11 +177,17 @@ export class ActionContext {
   /** Raw input payload */
   readonly payload: Uint8Array;
 
-  /** Attempt number (starts at 1) */
+  /** The run's failures so far, plus one. */
   readonly attempt: number;
 
-  /** Timestamp when task was created */
-  readonly createdAt: bigint;
+  /** The run's deliveries, this one included: more than `attempt` once a delivery was handed back or taken back. */
+  readonly deliveries: number;
+
+  /** When the run was invoked, in ms since the Unix epoch. */
+  readonly createdAtMs: bigint;
+
+  /** How long this worker holds the task without a touch. */
+  readonly leaseMs: bigint;
 
   /** Namespace */
   readonly namespace: string;
@@ -192,27 +198,23 @@ export class ActionContext {
   /** That run's workflow. */
   readonly callerWorkflowName?: string;
 
+  private readonly task: TaskAssignment;
   private readonly worker: ActionWorker;
   private _cancelled = false;
 
-  constructor(
-    taskId: string,
-    actionName: string,
-    payload: Uint8Array,
-    attempt: number,
-    createdAt: bigint,
-    namespace: string,
-    worker: ActionWorker,
-    caller?: { runId?: string; workflowName?: string }
-  ) {
-    this.callerRunId = caller?.runId;
-    this.callerWorkflowName = caller?.workflowName;
-    this.taskId = taskId;
-    this.actionName = actionName;
-    this.payload = payload;
-    this.attempt = attempt;
-    this.createdAt = createdAt;
-    this.namespace = namespace;
+  constructor(task: TaskAssignment, worker: ActionWorker) {
+    this.task = task;
+    this.taskId = task.taskId;
+    this.runId = task.runId;
+    this.actionName = task.action;
+    this.payload = task.input;
+    this.attempt = task.attempt;
+    this.deliveries = task.deliveries;
+    this.createdAtMs = task.createdAtMs;
+    this.leaseMs = task.leaseMs;
+    this.namespace = task.namespace;
+    this.callerRunId = task.callerRunId;
+    this.callerWorkflowName = task.callerWorkflowName;
     this.worker = worker;
   }
 
@@ -280,15 +282,13 @@ export class ActionContext {
   }
 
   /**
-   * Extend the lease on this task.
-   *
-   * Use this for long-running tasks to prevent timeout.
-   * Call periodically to keep the task alive.
-   *
-   * @param extendMs - How long to extend the lease in milliseconds (default: 30000)
+   * Keep this task: with half its lease or less left, the lease runs a full
+   * lease from now (up to 12 h from its delivery); with more left, nothing
+   * changes. Call it at least every half lease from long handlers. Returns
+   * when the lease now runs out, in ms since the Unix epoch.
    */
-  async touch(extendMs = 30000): Promise<void> {
-    await this.worker._touchTask(this.actionName, this.taskId, extendMs);
+  async touch(): Promise<bigint> {
+    return this.worker._touchTask(this.task);
   }
 
   /**
@@ -418,15 +418,15 @@ export class ActionWorker {
    * Register an action handler.
    *
    * The worker registers the action with the server when it starts, with
-   * exactly these options (the server's defaults when none: a 30 s timeout,
-   * 3 attempts). Registering replaces the action's settings, so workers
+   * exactly these options (when unset, a 30 s lease and 3 attempts).
+   * Registering replaces the action's settings, so workers
    * registering one action with different options leave it with whichever
    * registered last. The options' namespace is ignored: the action goes in
    * the worker's.
    *
    * @param name - The action name to register
    * @param handler - Async function that handles the action
-   * @param options - The action's timeout, attempts and owner
+   * @param options - The action's lease (timeoutMs), attempts and owner
    * @throws Error if action is already registered
    */
   action(name: string, handler: ActionHandler, options: ActionRegisterOptions = {}): void {
@@ -593,6 +593,11 @@ export class ActionWorker {
     const failed = newWorkerBackoff();
     const halted = new HaltBackoff(this.logger);
     let unproven = false;
+    // An await takes a task. Its answer can be lost with the connection, or
+    // refused when the node stopped leading after taking it; the next await
+    // goes with the same key, so it gets that task back instead of leaving
+    // it held until its lease runs out. A fresh key after each answer.
+    let requestKey = newRequestKey();
     while (!this.leaving()) {
       // The connection this iteration's poll goes on, to redial only it.
       const connection = this.client!.connection();
@@ -614,8 +619,9 @@ export class ActionWorker {
         const result = await this.client!.worker.awaitTask(
           this.config.workerId,
           actionNames,
-          { blockMs: this.config.blockMs }
+          { blockMs: this.config.blockMs, requestKey }
         );
+        requestKey = newRequestKey();
         failed.reset();
         halted.reset();
         unproven = false;
@@ -670,56 +676,48 @@ export class ActionWorker {
   private async executeTask(task: TaskAssignment): Promise<void> {
     const client = this.client!;
     const { workerId } = this.config;
-    const { taskType, taskId } = task;
-    this.log(`Executing action: ${taskType} (task=${taskId}, attempt=${task.attempt})`);
+    const { action, taskId } = task;
+    this.log(`Executing action: ${action} (task=${taskId}, attempt=${task.attempt})`);
 
     // The handler's outcome alone picks complete or fail; sending it is
     // separate, so a lost complete is resent, never turned into a fail.
     let what: string;
     let report: () => Promise<unknown>;
-    const handler = this.handlers.get(taskType);
+    const handler = this.handlers.get(action);
     if (!handler) {
-      this.log(`No handler registered for action: ${taskType}`);
+      this.log(`No handler registered for action: ${action}`);
       what = "fail";
-      report = () => client.worker.fail(workerId, taskType, taskId, `No handler for: ${taskType}`);
+      report = () => client.worker.fail(workerId, task, `No handler for: ${action}`);
     } else {
-      const ctx = new ActionContext(
-        taskId,
-        taskType,
-        task.payload,
-        task.attempt,
-        task.createdAt,
-        this.config.namespace,
-        this,
-        { runId: task.callerRunId, workflowName: task.callerWorkflowName }
-      );
-      const timeoutMs = this.actionOptions.get(taskType)?.timeoutMs ?? 30000;
-      const stopTouching = this.config.autoTouch && timeoutMs > 0 ? this.keepTouching(taskType, taskId, timeoutMs) : () => {};
+      const ctx = new ActionContext(task, this);
+      const stopTouching = this.config.autoTouch ? this.keepTouching(task) : () => {};
       try {
         const result = await this.withTimeout(handler(ctx), this.config.actionTimeoutMs).finally(stopTouching);
         // Plain object → JSON bytes, ActionResult → named outcome
         what = "complete";
         if (result instanceof ActionResult) {
-          report = () => client.worker.complete(workerId, taskType, taskId, result.data, { outcome: result.outcome });
+          report = () => client.worker.complete(workerId, task, result.data, { outcome: result.outcome });
         } else {
           const bytes = result instanceof Uint8Array ? result : textEncoder.encode(JSON.stringify(result));
-          report = () => client.worker.complete(workerId, taskType, taskId, bytes);
+          report = () => client.worker.complete(workerId, task, bytes);
         }
       } catch (err) {
         what = "fail";
         if (err instanceof TimeoutError) {
-          this.log(`Action timed out: ${taskType}`);
-          report = () => client.worker.fail(workerId, taskType, taskId, "Action timed out", { retry: false });
+          this.log(`Action timed out: ${action}`);
+          report = () => client.worker.fail(workerId, task, "Action timed out", { retry: false });
         } else if (err instanceof NonRetryableError) {
-          this.log(`Action failed (non-retryable): ${taskType} - ${err}`);
-          report = () => client.worker.fail(workerId, taskType, taskId, String(err), { retry: false });
+          this.log(`Action failed (non-retryable): ${action} - ${err}`);
+          report = () => client.worker.fail(workerId, task, String(err), { retry: false });
         } else {
-          this.log(`Action failed: ${taskType} - ${err}`);
-          report = () => client.worker.fail(workerId, taskType, taskId, String(err), { retry: true });
+          this.log(`Action failed: ${action} - ${err}`);
+          report = () => client.worker.fail(workerId, task, String(err), { retry: true });
         }
       }
     }
 
+    // A resend of a report that already applied answers ok, so a lost one
+    // is safe to send again.
     const sent = await sendResult(
       client,
       this.leave.signal,
@@ -728,34 +726,33 @@ export class ActionWorker {
       `${what} for task ${taskId}`,
       report
     );
-    if (sent) this.log(`Action ${what} sent: ${taskType} (task=${taskId})`);
+    if (sent) this.log(`Action ${what} sent: ${action} (task=${taskId})`);
   }
 
   /**
-   * Touch a run until the returned function is called. Each touch asks for
-   * this worker's timeout, at most an hour, so the lease covers it even if
-   * another worker's registration shortened the action's, and goes every
-   * third of that (at least 100 ms apart). Conflict, not found or bad
-   * request means the run moved on (finished, cancelled or taken back), so
-   * touching stops; any other refusal, an overloaded leader say, or a touch
-   * lost with its connection, is tried again next interval. A touch in
-   * flight when this stops is left to finish.
+   * Touch a run until the returned function is called, every quarter of
+   * its lease (at least 100 ms apart). The server extends the lease only
+   * once half of it or less is left, so a touch at a quarter changes
+   * nothing and the one at a half extends it, with a quarter left for one
+   * failed touch to be tried again. Conflict (a stale report: the run moved
+   * on), not found or bad request stops touching; any other refusal, an
+   * overloaded leader say, or a touch lost with its connection, is tried
+   * again next interval. A touch in flight when this stops is left to
+   * finish.
    */
-  private keepTouching(actionName: string, taskId: string, timeoutMs: number): () => void {
-    const extendMs = Math.min(timeoutMs, MAX_TOUCH_EXTEND_MS);
-    // A third of the lease each touch asks for, so two can fail in a row.
-    const intervalMs = Math.max(extendMs / 3, MIN_TOUCH_INTERVAL_MS);
+  private keepTouching(task: TaskAssignment): () => void {
+    const intervalMs = Math.max(Number(task.leaseMs) / 4, MIN_TOUCH_INTERVAL_MS);
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async (): Promise<void> => {
       try {
-        await this._touchTask(actionName, taskId, extendMs);
+        await this._touchTask(task);
       } catch (err) {
         if (err instanceof ServerError && TOUCH_FINAL.includes(err.status)) {
-          this.logger.warn(`Touch for task ${taskId} was refused, stopping: ${err}`);
+          this.logger.warn(`Touch for task ${task.taskId} was refused, stopping: ${err}`);
           return;
         }
-        this.logger.warn(`Touch for task ${taskId} failed: ${err}; trying again`);
+        this.logger.warn(`Touch for task ${task.taskId} failed: ${err}; trying again`);
       }
       if (!stopped) timer = setTimeout(tick, intervalMs);
     };
@@ -767,13 +764,13 @@ export class ActionWorker {
   }
 
   /**
-   * Extend lease on a task (internal method, called by ActionContext).
+   * Touch a task (internal method, called by ActionContext).
    */
-  async _touchTask(actionName: string, taskId: string, extendMs: number): Promise<void> {
+  async _touchTask(task: TaskAssignment): Promise<bigint> {
     if (!this.client) {
       throw new Error("Worker not connected");
     }
-    await this.client.worker.touch(this.config.workerId, actionName, taskId, { extendMs });
+    return this.client.worker.touch(this.config.workerId, task);
   }
 
   /**
@@ -914,6 +911,11 @@ export class ActionWorker {
       clearTimeout(timeoutId!);
     }
   }
+}
+
+/** A fresh await request key: 16 random bytes, in hex. */
+function newRequestKey(): string {
+  return crypto.randomBytes(16).toString("hex");
 }
 
 /**
