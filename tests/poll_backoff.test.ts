@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { HEADER_SIZE, MAGIC, OpCode, TABLE_HASH, VERSION, computeCRC32C } from "@floruntime/core";
 import { ActionWorker, StreamWorker } from "@floruntime/node";
 import { EmptyPollBackoff } from "../packages/node/src/poll-backoff.js";
+import { okAnswer } from "./fake_worker_server.js";
 
 function reply(id: bigint, data: Uint8Array = new Uint8Array(0)): Uint8Array {
   const buf = new Uint8Array(HEADER_SIZE + data.length);
@@ -38,8 +39,8 @@ type Answer = { delayMs: number; data?: Uint8Array } | null;
 type Script = (op: number, nth: number) => Answer | undefined;
 
 /**
- * A server that answers per `script(op, nth)`: undefined means an empty OK
- * at once, null means never.
+ * A server that answers per `script(op, nth)`: undefined means an OK with
+ * nothing (okAnswer) at once, null means never.
  */
 async function fakeServer(script: Script) {
   const polls: { op: number; at: number }[] = [];
@@ -65,7 +66,7 @@ async function fakeServer(script: Script) {
         const send = () => {
           if (sock.destroyed) return;
           answered.push({ op, at: Date.now(), empty: !a?.data });
-          sock.write(reply(id, a?.data));
+          sock.write(reply(id, a?.data ?? okAnswer(op)));
         };
         if (a === undefined) send();
         else setTimeout(send, a.delayMs);

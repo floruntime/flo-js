@@ -4,7 +4,7 @@
  */
 
 import * as net from "node:net";
-import { HEADER_SIZE, MAGIC, Ran, Reason, StatusCode, TABLE_HASH, VERSION, computeCRC32C } from "@floruntime/core";
+import { HEADER_SIZE, MAGIC, OpCode, Ran, Reason, StatusCode, TABLE_HASH, VERSION, computeCRC32C } from "@floruntime/core";
 
 export function frame(id: bigint, status: number, data: Uint8Array): Uint8Array {
   const buf = new Uint8Array(HEADER_SIZE + data.length);
@@ -28,17 +28,73 @@ export const notFound = () => refusal(StatusCode.NotFound, Reason.NotFound, "wor
 export const unhealthy = () => refusal(StatusCode.BadRequest, Reason.WorkerUnhealthy, "worker missed its heartbeats; send one, or register again");
 export const draining = () => refusal(StatusCode.BadRequest, Reason.WorkerDraining, "worker is draining");
 
-/** A task assignment for action "a", invoked by no workflow. */
-export function oneTask(): Uint8Array {
-  const buf = new Uint8Array(2 + 2 + 2 + 1 + 8 + 4 + 1);
-  const view = new DataView(buf.buffer);
-  view.setUint16(0, 2, true);
-  buf.set([0x74, 0x31], 2); // "t1"
-  view.setUint16(4, 1, true);
-  buf[6] = 0x61; // "a"
-  view.setUint32(15, 1, true); // attempt
-  return buf;
+export interface FakeTask {
+  run?: string;
+  namespace?: string;
+  deliveries?: number;
+  term?: bigint;
+  index?: bigint;
+  action?: string;
+  createdAtMs?: bigint;
+  attempt?: number;
+  leaseMs?: bigint;
+  callerRun?: string;
+  callerWorkflow?: string;
+  input?: Uint8Array;
 }
+
+/**
+ * action.await's answer holding one task: [present:u8=1][run:u16][namespace:u8]
+ * [deliveries:u32][term:u64][index:u64][action:u16][created_at_ms:i64][attempt:u32]
+ * [lease_ms:u64][caller_run?:u16][caller_workflow?:u16][input:u32].
+ */
+export function taskAnswer(t: FakeTask = {}): Uint8Array {
+  const enc = new TextEncoder();
+  const out: number[] = [1];
+  const u = (v: bigint, n: number) => {
+    for (let i = 0; i < n; i++) out.push(Number((BigInt.asUintN(64, v) >> BigInt(8 * i)) & 0xffn));
+  };
+  const str = (s: string, n: number) => {
+    const b = enc.encode(s);
+    u(BigInt(b.length), n);
+    out.push(...b);
+  };
+  const opt = (s: string | undefined) => {
+    if (s === undefined) return out.push(0);
+    out.push(1);
+    str(s, 2);
+  };
+  str(t.run ?? "t1", 2);
+  str(t.namespace ?? "default", 1);
+  u(BigInt(t.deliveries ?? 1), 4);
+  u(t.term ?? 1n, 8);
+  u(t.index ?? 10n, 8);
+  str(t.action ?? "a", 2);
+  u(t.createdAtMs ?? 0n, 8);
+  u(BigInt(t.attempt ?? 1), 4);
+  u(t.leaseMs ?? 30000n, 8);
+  opt(t.callerRun);
+  opt(t.callerWorkflow);
+  const input = t.input ?? new Uint8Array(0);
+  u(BigInt(input.length), 4);
+  out.push(...input);
+  return Uint8Array.from(out);
+}
+
+/** A task of action "a", invoked by no workflow. */
+export function oneTask(): Uint8Array {
+  return taskAnswer();
+}
+
+/** action.await's answer with no task. */
+export const noTask = () => new Uint8Array([0]);
+
+/** action.touch's answer: the lease's expiry. */
+export const touchAnswer = (expiresAtMs = 0n) => {
+  const b = new Uint8Array(8);
+  new DataView(b.buffer).setBigInt64(0, expiresAtMs, true);
+  return b;
+};
 
 export type Answer = { status?: number; data?: Uint8Array; delayMs?: number } | "park" | "drop" | undefined;
 
@@ -46,6 +102,8 @@ interface Seen {
   op: number;
   /** The request's payload after the header: namespace, key, value, options. */
   payload: Buffer;
+  /** When it arrived, performance.now(). */
+  at: number;
 }
 
 /** The current_load a heartbeat carries: its value's first u32. */
@@ -55,7 +113,14 @@ export function loadOf(payload: Buffer): number {
   return payload.readUInt32LE(off + 4);
 }
 
-/** A server that answers per `script(op, nth)`: undefined is an empty OK, "park" never answers, "drop" closes the connection. */
+/** The answer an OK with no data stands for: no task for an await, an expiry for a touch, else empty. */
+export function okAnswer(op: number): Uint8Array {
+  if (op === OpCode.ActionAwait) return noTask();
+  if (op === OpCode.ActionTouch) return touchAnswer();
+  return new Uint8Array(0);
+}
+
+/** A server that answers per `script(op, nth)`: undefined is an OK as okAnswer has it, "park" never answers, "drop" closes the connection. */
 export async function fakeServer(script: (op: number, nth: number) => Answer) {
   const seen: Seen[] = [];
   const counts = new Map<number, number>();
@@ -71,7 +136,7 @@ export async function fakeServer(script: (op: number, nth: number) => Answer) {
         if (buf.length < total) return;
         const op = buf.readUInt16LE(20);
         const id = buf.readBigUInt64LE(8);
-        seen.push({ op, payload: Buffer.from(buf.subarray(HEADER_SIZE, total)) });
+        seen.push({ op, payload: Buffer.from(buf.subarray(HEADER_SIZE, total)), at: performance.now() });
         buf = buf.subarray(total);
         const nth = counts.get(op) ?? 0;
         counts.set(op, nth + 1);
@@ -81,7 +146,8 @@ export async function fakeServer(script: (op: number, nth: number) => Answer) {
           sock.destroy();
           return;
         }
-        const out = frame(id, a?.status ?? StatusCode.OK, a?.data ?? new Uint8Array(0));
+        const status = a?.status ?? StatusCode.OK;
+        const out = frame(id, status, a?.data ?? (status === StatusCode.OK ? okAnswer(op) : new Uint8Array(0)));
         if (a?.delayMs) setTimeout(() => sock.destroyed || sock.write(out), a.delayMs);
         else sock.write(out);
       }

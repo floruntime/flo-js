@@ -162,12 +162,16 @@ function answering(data: Uint8Array): { sender: never; sent: Sent[] } {
   return { sender: sender as never, sent };
 }
 
-/** An action.list answer: [count:u32]([name_len:u16][name][value_len:u32])*[has_more:u8][cursor_len:u16][cursor]. */
+/**
+ * An action.list answer: [count:u32]([name_len:u16][name][value_len:u32][value])*[has_more:u8][cursor_len:u16][cursor],
+ * each value [version:u32][owner_len:u16][owner][timeout_ms:u64][max_attempts:u32][created_at_ms:i64].
+ */
 function actionPage(names: string[], next?: Uint8Array): Uint8Array {
   const out = [names.length, 0, 0, 0];
   for (const n of names) {
     const b = new TextEncoder().encode(n);
-    out.push(b.length & 0xff, b.length >> 8, ...b, 0, 0, 0, 0);
+    const value = [...le(2n, 4), ...str16(`team-${n}`), ...le(30000n, 8), ...le(3n, 4), ...le(1700000000000n, 8)];
+    out.push(b.length & 0xff, b.length >> 8, ...b, ...le(BigInt(value.length), 4), ...value);
   }
   const c = next ?? new Uint8Array(0);
   out.push(next ? 1 : 0, c.length & 0xff, c.length >> 8, ...c);
@@ -175,11 +179,13 @@ function actionPage(names: string[], next?: Uint8Array): Uint8Array {
 }
 
 describe("action.list", () => {
-  it("returns a page of names and the cursor that asks for the next", async () => {
+  const entry = (name: string) => ({ name, version: 2, owner: `team-${name}`, timeoutMs: 30000n, maxAttempts: 3, createdAtMs: 1700000000000n });
+
+  it("returns a page of actions, each with its settings, and the cursor that asks for the next", async () => {
     const first = answering(actionPage(["a", "b"], cursor));
-    expect(await new ActionOperations(first.sender).list({ limit: 2 })).toEqual({ names: ["a", "b"], hasMore: true, cursor });
+    expect(await new ActionOperations(first.sender).list({ limit: 2 })).toEqual({ actions: [entry("a"), entry("b")], hasMore: true, cursor });
     const last = answering(actionPage(["c"]));
-    expect(await new ActionOperations(last.sender).list({ limit: 2, cursor })).toEqual({ names: ["c"], hasMore: false, cursor: null });
+    expect(await new ActionOperations(last.sender).list({ limit: 2, cursor })).toEqual({ actions: [entry("c")], hasMore: false, cursor: null });
     expect(Array.from(last.sent[0]!.value)).toEqual([2, 0, 0, 0, ...cursor]);
   });
 
@@ -368,12 +374,14 @@ function answeringPages(pages: Uint8Array[]): { sender: never; sent: Sent[] } {
   return { sender: sender as never, sent };
 }
 
-const defRow = (name: string, version: string, createdAt: bigint) => [...str16(name), ...str16(version), ...le(createdAt, 8)];
-const jobRow = (name: string, jobId: string, status: string, createdAt: bigint) => [
+const defRow = (name: string, version: string, createdAt: bigint, enabled: boolean) => [...str16(name), ...str16(version), ...le(createdAt, 8), enabled ? 1 : 0];
+const jobRow = (name: string, jobId: string, status: string, createdAt: bigint, batchSize: number, processed: bigint) => [
   ...str16(name),
   ...str16(jobId),
   ...str16(status),
   ...le(createdAt, 8),
+  ...le(BigInt(batchSize), 4),
+  ...le(processed, 8),
 ];
 
 interface Paged {
@@ -393,10 +401,10 @@ describe("walked lists page through every shard", () => {
     {
       name: "workflow.listDefinitions",
       op: OpCode.WorkflowListDefinitions,
-      rows: [defRow("orders", "1.0.0", 1700000000000n), defRow("refunds", "2", -1n)],
+      rows: [defRow("orders", "1.0.0", 1700000000000n, true), defRow("refunds", "2", -1n, false)],
       items: [
-        { name: "orders", version: "1.0.0", created_at: 1700000000000 },
-        { name: "refunds", version: "2", created_at: -1 },
+        { name: "orders", version: "1.0.0", created_at: 1700000000000, enabled: true },
+        { name: "refunds", version: "2", created_at: -1, enabled: false },
       ],
       list: (s, o) => new WorkflowOperations(s).listDefinitions(o) as never,
       field: "definitions",
@@ -404,10 +412,10 @@ describe("walked lists page through every shard", () => {
     {
       name: "processing.list",
       op: OpCode.ProcessingList,
-      rows: [jobRow("enrich", "job-1", "running", 1700000000000n), jobRow("rollup", "job-2", "stopped", 5n)],
+      rows: [jobRow("enrich", "job-1", "RUNNING", 1700000000000n, 100, 42n), jobRow("rollup", "job-2", "STOPPED", 5n, 1, 0n)],
       items: [
-        { name: "enrich", job_id: "job-1", status: "running", created_at: 1700000000000 },
-        { name: "rollup", job_id: "job-2", status: "stopped", created_at: 5 },
+        { name: "enrich", job_id: "job-1", status: "RUNNING", created_at: 1700000000000, batch_size: 100, records_processed: 42 },
+        { name: "rollup", job_id: "job-2", status: "STOPPED", created_at: 5, batch_size: 1, records_processed: 0 },
       ],
       list: (s, o) => new ProcessingOperations(s).list(o) as never,
       field: "jobs",

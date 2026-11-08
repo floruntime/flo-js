@@ -265,6 +265,21 @@ export class ConflictError extends ServerError {
 }
 
 /**
+ * Error thrown for an action report (complete, fail or touch) that names a
+ * delivery the run has moved on from: its lease expired, it was delivered
+ * again, another worker holds it, it finished or was released, or it was
+ * completed with another result. The message, starting "stale report:",
+ * says which. Nothing ran; sending it again is refused the same way. A
+ * resent report that already applied is not stale: it answers ok.
+ */
+export class StaleReportError extends ConflictError {
+  constructor(message?: string) {
+    super(message);
+    this.name = "StaleReportError";
+  }
+}
+
+/**
  * Error thrown when authentication is required or failed.
  */
 export class UnauthorizedError extends ServerError {
@@ -340,7 +355,8 @@ export function createServerError(
   if (!(reason in Reason) || !(ran in Ran)) {
     return new IncompleteResponseError(`a refusal with reason ${reason} and ran ${ran}`);
   }
-  const err = serverErrorFor(status, new TextDecoder().decode(data.subarray(3)));
+  const message = new TextDecoder().decode(data.subarray(3));
+  const err = status === StatusCode.Conflict && reason === Reason.StaleReport ? new StaleReportError(message) : serverErrorFor(status, message);
   err.reason = reason as Reason;
   err.ran = ran as Ran;
   if (err.reason !== Reason.Unclassified) {
@@ -394,6 +410,13 @@ export function isNoNamespace(err: unknown): err is NoNamespaceError {
  */
 export function isConflict(err: unknown): err is ConflictError {
   return err instanceof ServerError && err.status === StatusCode.Conflict;
+}
+
+/**
+ * Check if an error is a StaleReportError.
+ */
+export function isStaleReport(err: unknown): err is StaleReportError {
+  return err instanceof ServerError && err.status === StatusCode.Conflict && err.reason === Reason.StaleReport;
 }
 
 /**

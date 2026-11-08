@@ -10,6 +10,7 @@ import {
   OpCode,
   OptionTag,
   OptionsBuilder,
+  encodeAwaitBody,
   TimeoutError,
   BadRequestError,
   FloError,
@@ -65,9 +66,10 @@ function response(id: bigint, data: Uint8Array = new Uint8Array(0), status = 0):
 }
 
 function awaitRequest(id: bigint, blockMs?: number): Uint8Array {
-  const opts = new OptionsBuilder();
-  if (blockMs !== undefined) opts.addU32(OptionTag.BlockMS, blockMs);
-  return serializeRequest(id, OpCode.ActionAwait, enc.encode("ns"), enc.encode("w"), new Uint8Array(0), opts.build());
+  // An await that leaves block_ms out ([count=1][len=1]["a"][absent][no request key])
+  // waits the server's default.
+  const body = blockMs === undefined ? new Uint8Array([1, 1, 0, 0x61, 0, 0]) : encodeAwaitBody(["a", "b"], blockMs);
+  return serializeRequest(id, OpCode.ActionAwait, enc.encode("ns"), enc.encode("w"), body, new Uint8Array(0));
 }
 
 function getRequest(id: bigint): Uint8Array {

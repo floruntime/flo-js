@@ -88,6 +88,10 @@ interface ClientOptions {
 Every op takes `namespace` in its options; every op but `scan` takes
 `routingKey`, which routes the request in place of the key.
 `delete` and `expire` take `casVersion`: the key's version they require.
+The server decides a `casVersion` or `condition` as the write applies, in
+log order, so a refused one still costs a replicated commit. Inside a
+transaction, a condition, `casVersion` or `incr` conflict is refused at
+`commit`, not at the op.
 
 Every KV read result (`get`, `jsonGet`, each `mget` entry, `scan`,
 `history`, `exists`) carries `stale`. It is set when a halted shard
@@ -165,6 +169,8 @@ Inside a transaction, `get`, `put`, `delete`, `incr`, `expire` and `exists`
 are routed by the transaction's routing key; `delete` and `incr` answer
 nothing until commit. `scan`, `mget`, `history` and the JSON ops throw
 `TxnUnsupportedOpError`.
+A transaction holds at most 64 ops and 256 KiB by default; both are the
+server operator's settings. Past them an op is refused `TxnTooLarge`.
 
 ### Queue Operations
 
@@ -174,7 +180,8 @@ nothing until commit. `scan`, `mget`, `history` and the JSON ops throw
 | `dequeue` | `dequeue(queue, count, opts?) → Promise<DequeueResult>` | Fetch messages |
 | `ack` | `ack(queue, seqs, opts?) → Promise<void>` | Acknowledge messages |
 | `nack` | `nack(queue, seqs, opts?) → Promise<void>` | Negative ack (retry or DLQ) |
-| `dlqList` | `dlqList(queue, opts?) → Promise<DequeueResult>` | List DLQ messages |
+| `peek` | `peek(queue, limit?, opts?) → Promise<PeekResult>` | The next ready messages (1 to 100, default 20), in dequeue order, without taking them; up to 4 KiB of each payload |
+| `dlqList` | `dlqList(queue, { limit?, after? }?) → Promise<DLQListResult>` | A page of dead letters, oldest first (up to 100); pass `lastSeq` as `after` while `hasMore` |
 | `dlqRequeue` | `dlqRequeue(queue, seqs, opts?) → Promise<void>` | Move DLQ messages back |
 
 #### Enqueue Options
@@ -204,8 +211,14 @@ Actions are registered tasks that can be invoked and executed by workers.
 | `register` | `register(name, actionType?, opts?) → Promise<void>` | Register an action |
 | `invoke` | `invoke(name, input, opts?) → Promise<ActionInvokeResult>` | Invoke an action |
 | `status` | `status(runId, opts?) → Promise<ActionRunStatus>` | Get run status |
-| `list` | `list(opts?) → Promise<ActionListResult>` | List actions |
+| `list` | `list(opts?) → Promise<ActionListResult>` | A page of actions, each with its version, owner, lease, attempts and creation time |
+| `info` | `info(name, opts?) → Promise<ActionInfo>` | An action's definition, its runs by status and completed runs' latencies; `NotFoundError` if it isn't registered |
 | `delete` | `delete(name, opts?) → Promise<void>` | Delete an action |
+
+An action's `timeoutMs` is its lease: how long a worker holds a run without
+completing, failing or touching it. It is 5000 to 43200000 ms; unset or 0 sends 0,
+and the server's default of 300000 applies. Touches extend a lease, but a
+worker holds one delivery at most 12 h from when it was delivered.
 
 #### Action Example
 
@@ -242,10 +255,10 @@ Workers execute tasks for registered actions.
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `register` | `register(workerId, taskTypes, opts?) → Promise<void>` | Register a worker |
-| `awaitTask` | `awaitTask(workerId, taskTypes, opts?) → Promise<WorkerAwaitResult>` | Wait for task |
-| `touch` | `touch(workerId, taskId, opts?) → Promise<void>` | Extend task lease |
-| `complete` | `complete(workerId, taskId, result, opts?) → Promise<void>` | Complete task |
-| `fail` | `fail(workerId, taskId, error, opts?) → Promise<void>` | Fail task |
+| `awaitTask` | `awaitTask(workerId, actions, { blockMs?, requestKey? }?) → Promise<WorkerAwaitResult>` | Wait for a task and take it |
+| `touch` | `touch(workerId, task) → Promise<bigint>` | Keep a task; answers when its lease runs out |
+| `complete` | `complete(workerId, task, result, { outcome? }?) → Promise<void>` | Complete a task |
+| `fail` | `fail(workerId, task, error, { retry?, abandoned?, delayMs? }?) → Promise<void>` | Fail a task, or hand it back untried |
 | `list` | `list({ limit?, cursor?, action? }?) → Promise<WorkerListResult>` | A page of workers in id order, or only those that run `action`; pass `cursor` on for the next, null on the last |
 | `info` | `info(workerId, opts?) → Promise<WorkerInfoResult>` | A worker's row (as `list` shows it, with `machineId`), its registered `metadata` (bytes, or null) and its `processes` (`name`, `kind`, `runCount`, `failCount`, `lastRunAtMs`); throws `NotFoundError` for a worker that isn't registered |
 
@@ -274,15 +287,27 @@ while (true) {
   const task = result.task;
   try {
     // Process task
-    const output = await processImage(task.payload);
-    await client.worker.complete(workerId, task.taskId, output);
+    const output = await processImage(task.input);
+    await client.worker.complete(workerId, task, output);
   } catch (err) {
-    await client.worker.fail(workerId, task.taskId, String(err), {
+    await client.worker.fail(workerId, task, String(err), {
       retry: true,
     });
   }
 }
 ```
+
+A task is one delivery of a run: its `runId`, `deliveries`, `term` and
+`index`, with its `action` and `namespace`. Reports pass the task back, and
+the server refuses one for a delivery the run has moved on from (its lease
+ran out, another worker holds it, it finished) with `StaleReportError`. A
+report sent again after it applied answers ok. `taskId` is the id the CLI
+prints, `run:deliveries:term:index:action`; `parseTaskId` reads one.
+
+An await takes the task it answers with. If that answer is lost, sending
+the await again with the same `requestKey` gets the same task back.
+`touch` extends the lease only once half of it or less is left; touch at
+least every half lease.
 
 #### ActionWorker
 
@@ -294,9 +319,13 @@ worker.action("process-image", async (ctx) => ({ done: true }), { timeoutMs: 600
 await worker.start();
 ```
 
-The worker registers each action when it starts, with exactly the options given (the server's defaults when none: a 30 s timeout, 3 attempts). Registering replaces the action's settings, so workers that register one action with different options leave it with whichever registered last.
+The worker registers each action when it starts, with exactly the options given (when unset, the server's 300 s lease and 3 attempts). Registering replaces the action's settings, so workers that register one action with different options leave it with whichever registered last.
 
-A run whose handler goes past the action's `timeoutMs` without touching it is taken back and run again, by this worker or another. `autoTouch: true` touches each run every third of its action's timeout while the handler runs; it's off by default. Without it, call `await ctx.touch()` from long handlers. The worker also stops any handler after its own `actionTimeoutMs` (300 s by default) whatever the action's timeout, so raise it for actions that run longer.
+A run whose handler goes past its lease (the action's `timeoutMs`) without touching it is taken back and run again, by this worker or another. `autoTouch: true` touches each run every sixth of its lease, counted from when the task arrived, while the handler runs; it's off by default. Without it, call `await ctx.touch()` from long handlers. However often it is touched, a delivery is held at most 12 h from when it was delivered; past that it is taken back. The worker also stops any handler after its own `actionTimeoutMs` (300 s by default) whatever the action's timeout, so raise it for actions that run longer.
+
+A handler that throws fails the run with retry: it runs again while attempts are left. A handler past `actionTimeoutMs` fails the same way, with retry. Only `NonRetryableError` fails the run for good, at once. At the time limit the worker aborts `ctx.signal`; it can't stop the handler, so one that ignores the signal runs on while its run is retried (perhaps elsewhere), and holds its concurrency slot until it settles. Pass `ctx.signal` to the work it starts, or check `ctx.cancelled`.
+
+`stop()` ends polling once the outstanding await returns (within `blockMs`). Handlers already running finish, and their completes or fails are sent, before `start()` returns (their signals are not aborted; `start()` doesn't wait for a handler past its time limit, whose run was already failed); then the worker deregisters and closes its connection. A result whose connection is lost after the stop is retried for up to 2 s, then dropped, and the server hands the run out again when its lease runs out.
 
 ### Stream Operations
 
@@ -309,6 +338,8 @@ Streams are append-only logs for event sourcing and real-time data.
 | `groupJoin` | `groupJoin(stream, group, consumer, opts?) → Promise<void>` | Join consumer group |
 | `groupRead` | `groupRead(stream, opts) → Promise<StreamReadResult>` | Read from group |
 | `groupAck` | `groupAck(stream, ids, opts) → Promise<void>` | Ack in group |
+| `groupList` | `groupList(stream, opts?) → Promise<StreamGroupListResult>` | The stream's consumer groups, with members, pending, settings and last delivery; read on the leader |
+| `groupMembers` | `groupMembers(stream, group, opts?) → Promise<StreamGroupMembersResult>` | A group's members, each `active` or `leaving`, with its pending entries; read on the leader |
 
 #### Stream Example
 
@@ -388,7 +419,8 @@ try {
 | `BlockTooLongError` | `blockMs` or `waitMs` over 300000, refused before sending |
 | `NotFoundError` | Resource not found |
 | `StaleNotFoundError` | A `NotFoundError` from `get` or `jsonGet` on a halted shard: the key was absent as of the halt; `stale` is true |
-| `ConflictError` | CAS version mismatch |
+| `ConflictError` | CAS version mismatch, or a condition that didn't hold |
+| `StaleReportError` | A `ConflictError` (reason `StaleReport`) for an action complete, fail or touch whose delivery the run has moved on from; the message says how |
 | `BadRequestError` | Invalid request |
 | `UnauthorizedError` | Authentication failed |
 | `OverloadedError` | Server overloaded, and the client's retries ran out |

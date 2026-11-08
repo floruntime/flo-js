@@ -5,9 +5,12 @@
  * Every op inside it carries that routing key and the transaction's id, so
  * its keys live on that shard.
  *
- * Server-enforced caps:
- *   - 256 ops per transaction
- *   - 1 MiB total payload across buffered writes
+ * The server caps a transaction's ops and bytes, by default at 64 ops and
+ * 256 KiB; both are operator settings. An op past them is refused
+ * (reason TxnTooLarge).
+ *
+ * A condition, casVersion or incr conflict inside a transaction is refused
+ * at commit, not at the op: the server decides them as the batch applies.
  *
  * The following operations are NOT supported inside a transaction and throw
  * `TxnUnsupportedOpError` without a server round-trip: `scan`, `mget`,

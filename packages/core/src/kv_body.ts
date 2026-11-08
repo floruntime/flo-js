@@ -30,6 +30,15 @@ import {
   type WorkerListResult,
   type WorkerStatus,
   type WorkerType,
+  type ActionInfo,
+  type PeekedMessage,
+  type PeekResult,
+  type StreamGroupInfo,
+  type StreamGroupListResult,
+  type StreamGroupMember,
+  type StreamGroupMembersResult,
+  type TaskAssignment,
+  type TaskDelivery,
 } from "./types.js";
 
 /** The longest routing key; its length prefix is a u16. */
@@ -81,8 +90,18 @@ const TABLE_OPS: ReadonlySet<OpCode> = new Set([
   OpCode.KVExpire,
   OpCode.KVExists,
   OpCode.ActionStatus,
+  OpCode.ActionAwait,
+  OpCode.ActionComplete,
+  OpCode.ActionFail,
+  OpCode.ActionTouch,
+  OpCode.ActionInfo,
   OpCode.WorkerList,
   OpCode.WorkerInfo,
+  OpCode.QueuePeek,
+  OpCode.TSInfo,
+  OpCode.StreamGroupList,
+  OpCode.StreamGroupMembers,
+  OpCode.ProcessingRemove,
 ]);
 
 /** Whether `op`'s request carries a schema-coded body, not a value and options. */
@@ -110,6 +129,11 @@ class BodyWriter {
   }
   bytes(b: Uint8Array): void {
     for (const x of b) this.parts.push(x);
+  }
+  /** A byte string with a u8 length prefix. */
+  bytes8(b: Uint8Array): void {
+    this.u8(b.length);
+    this.bytes(b);
   }
   /** A byte string with a u16 length prefix. */
   bytes16(b: Uint8Array): void {
@@ -194,18 +218,24 @@ export class AnswerReader {
   bytes32(): Uint8Array {
     return this.bytes(this.u32());
   }
+  string8(): string {
+    return utf8(this.bytes8());
+  }
   string16(): string {
-    const b = this.bytes16();
-    try {
-      return textDecoder.decode(b);
-    } catch {
-      throw new IncompleteResponseError("malformed UTF-8 string");
-    }
+    return utf8(this.bytes16());
   }
   end(): void {
     if (this.off !== this.data.length) {
       throw new IncompleteResponseError(`${this.data.length - this.off} bytes left over in the answer`);
     }
+  }
+}
+
+function utf8(b: Uint8Array): string {
+  try {
+    return textDecoder.decode(b);
+  } catch {
+    throw new IncompleteResponseError("malformed UTF-8 string");
   }
 }
 
@@ -543,8 +573,8 @@ const RUN_STATUSES = ["pending", "running", "completed", "failed", "cancelled", 
 
 /**
  * action.status's answer: [status:u8][created_at_ms:i64][started_at_ms?][completed_at_ms?]
- * [attempt:u32][output?: u16 length][error_message?: u16 length][worker_id?: u16 length],
- * each ? a present byte first.
+ * [attempt:u32][output?: u16 length][error_message?: u16 length][worker_id?: u16 length]
+ * [outcome?: u16 length], each ? a present byte first.
  */
 export function decodeActionStatusAnswer(runId: string, data: Uint8Array): import("./types.js").ActionRunStatus {
   const r = new AnswerReader(data);
@@ -558,8 +588,9 @@ export function decodeActionStatusAnswer(runId: string, data: Uint8Array): impor
   const output = r.present() ? r.bytes16() : undefined;
   const errorMessage = r.present() ? new TextDecoder().decode(r.bytes16()) : undefined;
   const workerId = r.present() ? new TextDecoder().decode(r.bytes16()) : undefined;
+  const outcome = r.present() ? r.string16() : undefined;
   r.end();
-  return { runId, status, createdAtMs, startedAtMs, completedAtMs, attempt, output, errorMessage, workerId };
+  return { runId, status, createdAtMs, startedAtMs, completedAtMs, attempt, output, errorMessage, workerId, outcome };
 }
 
 /** worker.list's request: limit (1 to 1024), cursor (empty for the first page), action (empty for every worker). */
@@ -634,4 +665,289 @@ export function decodeWorkerInfoAnswer(data: Uint8Array): WorkerInfoResult {
   }
   r.end();
   return { worker, metadata, processes };
+}
+
+// ── Action runs ─────────────────────────────────────────────────────────
+
+/** The longest action name. */
+export const MAX_ACTION_NAME = 256;
+/** The most actions one await names. */
+export const MAX_AWAIT_ACTIONS = 64;
+/** The longest await request key. */
+export const MAX_REQUEST_KEY = 64;
+/** The longest outcome a complete names. */
+export const MAX_OUTCOME = 256;
+/** The longest result a complete carries, and error a fail carries. */
+export const MAX_RESULT = 65_535;
+/** The longest delay a fail asks for: a day. */
+export const MAX_DELAY_MS = 86_400_000;
+
+function checkLength(name: string, b: Uint8Array, max: number): void {
+  if (b.length > max) throw new FloError(`flo: ${name} is ${b.length} bytes, at most ${max}`);
+}
+
+/** action.await's request: actions (tried in order), block_ms, request_key. */
+export function encodeAwaitBody(actions: readonly string[], blockMs: number, requestKey?: string): Uint8Array {
+  if (actions.length === 0 || actions.length > MAX_AWAIT_ACTIONS) {
+    throw new FloError(`flo: an await names 1 to ${MAX_AWAIT_ACTIONS} actions, got ${actions.length}`);
+  }
+  if (!Number.isInteger(blockMs) || blockMs < 0) throw new FloError(`flo: blockMs must be a whole number of ms from 0 to ${MAX_WAIT_MS}, got ${blockMs}`);
+  if (blockMs > MAX_WAIT_MS) throw new BlockTooLongError(blockMs);
+  const w = new BodyWriter();
+  w.u8(actions.length);
+  for (const a of actions) {
+    const b = textEncoder.encode(a);
+    checkLength("action name", b, MAX_ACTION_NAME);
+    w.bytes16(b);
+  }
+  w.u8(1);
+  w.u64(BigInt(blockMs));
+  if (requestKey === undefined) {
+    w.u8(0);
+  } else {
+    const k = textEncoder.encode(requestKey);
+    checkLength("request key", k, MAX_REQUEST_KEY);
+    w.u8(1);
+    w.bytes8(k);
+  }
+  return w.build();
+}
+
+/**
+ * The task's id as the CLI prints and parses it: `run:deliveries:term:index:action`.
+ * A run id holds no colon and the action comes last, so the action may.
+ */
+export function formatTaskId(t: TaskDelivery): string {
+  return `${t.runId}:${t.deliveries}:${t.term}:${t.index}:${t.action}`;
+}
+
+/** A task id as formatTaskId writes it; null for one that isn't. The namespace isn't in it. */
+export function parseTaskId(id: string): Omit<TaskDelivery, "namespace"> | null {
+  const m = /^([^:]+):(\d+):(\d+):(\d+):(.+)$/.exec(id);
+  if (!m) return null;
+  const deliveries = Number(m[2]);
+  const term = BigInt(m[3]!);
+  const index = BigInt(m[4]!);
+  if (deliveries > 0xffffffff || term > U64_MAX || index > U64_MAX) return null;
+  return { runId: m[1]!, deliveries, term, index, action: m[5]! };
+}
+
+/** action.await's answer: the task, or null if no run was ready in time. */
+export function decodeAwaitAnswer(data: Uint8Array): TaskAssignment | null {
+  const r = new AnswerReader(data);
+  if (!r.present()) {
+    r.end();
+    return null;
+  }
+  const runId = r.string16();
+  const namespace = r.string8();
+  const deliveries = r.u32();
+  const term = r.u64();
+  const index = r.u64();
+  const action = r.string16();
+  const createdAtMs = r.i64();
+  const attempt = r.u32();
+  const leaseMs = r.u64();
+  const callerRunId = r.present() ? r.string16() : undefined;
+  const callerWorkflowName = r.present() ? r.string16() : undefined;
+  const input = r.bytes32();
+  r.end();
+  const delivery = { runId, namespace, deliveries, term, index, action };
+  return { ...delivery, taskId: formatTaskId(delivery), createdAtMs, attempt, leaseMs, callerRunId, callerWorkflowName, input };
+}
+
+/** The fields every report starts with: action, worker, deliveries, term, index. */
+function writeDelivery(w: BodyWriter, worker: string, t: TaskDelivery): void {
+  const action = textEncoder.encode(t.action);
+  checkLength("action name", action, MAX_ACTION_NAME);
+  const id = textEncoder.encode(worker);
+  checkLength("worker id", id, MAX_WORKER_ID);
+  if (!Number.isInteger(t.deliveries) || t.deliveries < 0 || t.deliveries > 0xffffffff) throw new FloError(`flo: deliveries must fit a u32, got ${t.deliveries}`);
+  checkU64("term", t.term);
+  checkU64("index", t.index);
+  w.bytes16(action);
+  w.bytes16(id);
+  w.u32(t.deliveries);
+  w.u64(t.term);
+  w.u64(t.index);
+}
+
+/** action.complete's request: the delivery, outcome ("" is success), result. */
+export function encodeCompleteBody(worker: string, t: TaskDelivery, result: Uint8Array, outcome = ""): Uint8Array {
+  const o = textEncoder.encode(outcome);
+  checkLength("outcome", o, MAX_OUTCOME);
+  checkLength("result", result, MAX_RESULT);
+  const w = new BodyWriter();
+  writeDelivery(w, worker, t);
+  w.u8(1);
+  w.bytes16(o);
+  w.u8(1);
+  w.bytes16(result);
+  return w.build();
+}
+
+/**
+ * `b` cut to at most `max` bytes, at a UTF-8 character boundary. An error
+ * message is cut rather than refused: a fail the client refused to send
+ * would leave the run held until its lease ran out, on every attempt.
+ */
+export function truncateUtf8(b: Uint8Array, max: number): Uint8Array {
+  if (b.length <= max) return b;
+  let end = max;
+  // Back off continuation bytes (10xxxxxx) to the start of a character.
+  while (end > 0 && (b[end]! & 0xc0) === 0x80) end--;
+  return b.subarray(0, end);
+}
+
+/** action.fail's request: the delivery, retry, abandoned, delay_ms, error (cut to 65535 bytes). */
+export function encodeFailBody(
+  worker: string,
+  t: TaskDelivery,
+  error: string,
+  opts?: { retry?: boolean; abandoned?: boolean; delayMs?: number }
+): Uint8Array {
+  const delayMs = opts?.delayMs ?? 0;
+  if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > MAX_DELAY_MS) {
+    throw new FloError(`flo: delayMs must be a whole number of ms from 0 to ${MAX_DELAY_MS}, got ${delayMs}`);
+  }
+  const e = truncateUtf8(textEncoder.encode(error), MAX_RESULT);
+  const w = new BodyWriter();
+  writeDelivery(w, worker, t);
+  w.u8(1);
+  w.u8((opts?.retry ?? true) ? 1 : 0);
+  w.u8(1);
+  w.u8(opts?.abandoned ? 1 : 0);
+  w.u8(1);
+  w.u64(BigInt(delayMs));
+  w.u8(1);
+  w.bytes16(e);
+  return w.build();
+}
+
+/** action.touch's request: the delivery alone. */
+export function encodeTouchBody(worker: string, t: TaskDelivery): Uint8Array {
+  const w = new BodyWriter();
+  writeDelivery(w, worker, t);
+  return w.build();
+}
+
+/** action.touch's answer: when the lease runs out without another touch. */
+export function decodeTouchAnswer(data: Uint8Array): bigint {
+  const r = new AnswerReader(data);
+  const expiresAtMs = r.i64();
+  r.end();
+  return expiresAtMs;
+}
+
+/** action.info's answer. */
+export function decodeActionInfoAnswer(data: Uint8Array): ActionInfo {
+  const r = new AnswerReader(data);
+  const opt = () => (r.present() ? r.u64() : undefined);
+  const info: ActionInfo = {
+    owner: r.string16(),
+    version: r.u32(),
+    timeoutMs: r.u64(),
+    maxAttempts: r.u32(),
+    createdAtMs: r.i64(),
+    ready: r.u64(),
+    readyCapped: r.bool(),
+    tooManyRuns: r.bool(),
+  };
+  info.running = opt();
+  info.completed = opt();
+  info.failed = opt();
+  info.timedOut = opt();
+  info.latencyCount = opt();
+  info.latencyAvgMs = opt();
+  info.latencyP50Ms = opt();
+  info.latencyP95Ms = opt();
+  info.latencyMaxMs = opt();
+  r.end();
+  return info;
+}
+
+// ── Queue and stream reads on the leader ────────────────────────────────
+
+/** The most messages one queue.peek shows. */
+export const MAX_PEEK_LIMIT = 100;
+
+/** queue.peek's request: limit (1 to 100). */
+export function encodePeekBody(limit: number): Uint8Array {
+  checkLimit("limit", limit, MAX_PEEK_LIMIT);
+  const w = new BodyWriter();
+  w.u8(1);
+  w.u32(limit);
+  return w.build();
+}
+
+/** queue.peek's answer: the next ready messages, then whether more may follow. */
+export function decodePeekAnswer(data: Uint8Array): PeekResult {
+  const r = new AnswerReader(data);
+  const messages: PeekedMessage[] = [];
+  for (let n = r.u8(); n > 0; n--) {
+    const seq = r.u64();
+    const priority = r.u32();
+    const attempts = r.u32();
+    const enqueuedAtMs = r.i64();
+    const size = r.u32();
+    const payload = r.bytes16();
+    messages.push({ seq, priority, attempts, enqueuedAtMs, size, payload });
+  }
+  const more = r.bool();
+  r.end();
+  return { messages, more };
+}
+
+/** stream.group.list's answer: the stream's groups, then whether it has more. */
+export function decodeGroupListAnswer(data: Uint8Array): StreamGroupListResult {
+  const r = new AnswerReader(data);
+  const groups: StreamGroupInfo[] = [];
+  for (let n = r.u16(); n > 0; n--) {
+    groups.push({
+      name: r.string16(),
+      members: r.u32(),
+      pending: r.u64(),
+      createdAtMs: r.i64(),
+      ackTimeoutMs: r.u32(),
+      maxDeliver: r.u8(),
+      lastDeliveredMs: r.u64(),
+      lastDeliveredSeq: r.u64(),
+    });
+  }
+  const more = r.bool();
+  r.end();
+  return { groups, more };
+}
+
+/** The longest consumer group name. */
+const MAX_GROUP_NAME = 4096;
+
+/** stream.group.members's request: the group. */
+export function encodeGroupMembersBody(group: string): Uint8Array {
+  const g = textEncoder.encode(group);
+  checkLength("group name", g, MAX_GROUP_NAME);
+  const w = new BodyWriter();
+  w.bytes16(g);
+  return w.build();
+}
+
+const MEMBER_STATES = ["active", "leaving"] as const;
+
+/** stream.group.members's answer: the group's members, then whether it has more. */
+export function decodeGroupMembersAnswer(data: Uint8Array): StreamGroupMembersResult {
+  const r = new AnswerReader(data);
+  const members: StreamGroupMember[] = [];
+  for (let n = r.u16(); n > 0; n--) {
+    const id = r.string16();
+    const code = r.u8();
+    const state = MEMBER_STATES[code];
+    if (state === undefined) throw new IncompleteResponseError(`member state ${code} is not one this client knows`);
+    const pending = r.u32();
+    const joinedAtMs = r.i64();
+    const lastActiveMs = r.present() ? r.i64() : undefined;
+    members.push({ id, state, pending, joinedAtMs, lastActiveMs });
+  }
+  const more = r.bool();
+  r.end();
+  return { members, more };
 }

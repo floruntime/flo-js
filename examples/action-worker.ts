@@ -52,7 +52,7 @@ async function processOrder(ctx: ActionContext): Promise<Uint8Array> {
   );
 
   // Simulate a long-running order processing task
-  // For long tasks, periodically call touch() to extend the lease
+  // For long tasks, call touch() at least every half lease to keep it
   const items = req.items || [];
 
   for (const [i, item] of items.entries()) {
@@ -63,11 +63,11 @@ async function processOrder(ctx: ActionContext): Promise<Uint8Array> {
     // Simulate work for each item
     await sleep(2000);
 
-    // Extend the lease every few items to prevent timeout
+    // Touch every few items so the lease never runs out
     // This is critical for long-running tasks
     if ((i + 1) % 3 === 0) {
       try {
-        await ctx.touch(30000);
+        await ctx.touch();
         console.log(`  Extended lease for order ${req.orderId}`);
       } catch (e) {
         console.warn(`Warning: failed to extend lease: ${e}`);
@@ -126,14 +126,14 @@ async function generateReport(ctx: ActionContext): Promise<Uint8Array> {
 
     // Extend lease periodically
     if (step === 2) {
-      await ctx.touch(30000);
+      await ctx.touch();
     }
   }
 
   return ctx.toBytes({
     reportType,
     dateRange,
-    generatedAt: ctx.createdAt.toString(),
+    generatedAt: ctx.createdAtMs.toString(),
     rows: 1500,
   });
 }
@@ -145,7 +145,7 @@ async function healthCheck(ctx: ActionContext) {
   return {
     status: "healthy",
     workerId: ctx.taskId,
-    timestamp: ctx.createdAt.toString(),
+    timestamp: ctx.createdAtMs.toString(),
   };
 }
 

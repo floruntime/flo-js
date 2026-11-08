@@ -708,7 +708,7 @@ export function extractYAMLField(
 
 /**
  * workflow.listDefinitions' answer: [count:u32]([name_len:u16][name]
- * [version_len:u16][version][created_at:i64])*[has_more:u8][cursor_len:u16][cursor].
+ * [version_len:u16][version][created_at:i64][enabled:u8])*[has_more:u8][cursor_len:u16][cursor].
  */
 export function decodeDefinitionsAnswer(data: Uint8Array): WorkflowListDefinitionsResult {
   const r = new AnswerReader(data);
@@ -716,7 +716,8 @@ export function decodeDefinitionsAnswer(data: Uint8Array): WorkflowListDefinitio
   for (let n = r.u32(); n > 0; n--) {
     const name = r.string16();
     const version = r.string16();
-    definitions.push({ name, version, created_at: Number(r.i64()) });
+    const created_at = Number(r.i64());
+    definitions.push({ name, version, created_at, enabled: r.bool() });
   }
   const hasMore = r.bool();
   const cursor = r.bytes16();

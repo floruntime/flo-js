@@ -23,7 +23,10 @@ import {
   type StreamAckOptions,
   type StreamNackOptions,
   type StreamDeleteOptions,
+  type StreamGroupListResult,
+  type StreamGroupMembersResult,
 } from "./types.js";
+import { decodeGroupListAnswer, decodeGroupMembersAnswer, encodeGroupMembersBody } from "./kv_body.js";
 import { kvGet, kvScan } from "./kv.js";
 import { OptionsBuilder, serializeStreamAppendValue } from "./wire.js";
 
@@ -393,6 +396,33 @@ export class StreamOperations {
     }
 
     return parseStreamReadResponse(resp.data);
+  }
+
+  /**
+   * The stream's consumer groups: members, pending entries, settings and
+   * the last record delivered. Read on the leader.
+   */
+  async groupList(stream: string, opts?: { namespace?: string }): Promise<StreamGroupListResult> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+    const resp = await this.sender.sendRequest(OpCode.StreamGroupList, namespace, textEncoder.encode(stream), new Uint8Array(0), new Uint8Array(0));
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+    return decodeGroupListAnswer(resp.data);
+  }
+
+  /**
+   * A consumer group's members: each one's state, pending entries, when it
+   * joined and when it was last delivered to. Read on the leader. A group
+   * that doesn't exist throws NotFoundError.
+   */
+  async groupMembers(stream: string, group: string, opts?: { namespace?: string }): Promise<StreamGroupMembersResult> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+    const resp = await this.sender.sendRequest(OpCode.StreamGroupMembers, namespace, textEncoder.encode(stream), encodeGroupMembersBody(group), new Uint8Array(0));
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+    return decodeGroupMembersAnswer(resp.data);
   }
 
   /**

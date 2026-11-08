@@ -14,7 +14,7 @@ export const VERSION = 0x03;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0xc751512225a42d04n;
+export const TABLE_HASH = 0x7eb599c24442118bn;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -60,7 +60,7 @@ export enum Reason {
   WrongType = 24,
   /** The shard holds as many open transactions as it may. */
   TooManyTransactions = 25,
-  /** An action complete or fail for a run that has moved on (another worker holds it, or it finished). It was dropped; resending it is refused the same way. */
+  /** An action report (complete, fail or touch) for a delivery the run has moved on from; the message says how. Nothing ran. */
   StaleReport = 26,
   /** An action await from a worker that missed its heartbeats: send one, or register again. */
   WorkerUnhealthy = 27,
@@ -70,6 +70,8 @@ export enum Reason {
   ShardHalted = 29,
   /** The op is served only on a node's admin socket. */
   AdminOnly = 30,
+  /** processing.remove of a job that still runs: stop or cancel it first. */
+  JobRunning = 31,
 }
 
 /** Whether a refused request took effect: retry logic reads this, not the message. */
@@ -112,6 +114,7 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.WorkerDraining]: "worker_draining",
   [Reason.ShardHalted]: "shard_halted",
   [Reason.AdminOnly]: "admin_only",
+  [Reason.JobRunning]: "job_running",
 };
 
 /** The server's name for a reason, as it appears in messages. */
@@ -219,6 +222,8 @@ export const OpCode = {
   StreamGroupTouch: 0x15a,
   StreamGroupInfo: 0x15b,
   StreamGroupDelete: 0x15c,
+  StreamGroupList: 0x15d,
+  StreamGroupMembers: 0x15e,
 
   // ── Queues (0x170 – 0x19F) ──
   QueueEnqueue: 0x170,
@@ -229,8 +234,8 @@ export const OpCode = {
   QueueDLQDelete: 0x177,
   QueueDLQRequeue: 0x178,
   QueueStats: 0x17b,
-  QueuePeek: 0x17c,
   QueuePurge: 0x17f,
+  QueuePeek: 0x180,
   QueueList: 0x198,
 
   // ── Time-Series (0x1A0 – 0x1BF) ──
@@ -241,6 +246,7 @@ export const OpCode = {
   TSList: 0x1a4,
   TSDelete: 0x1a5,
   TSRetention: 0x1a6,
+  TSInfo: 0x1a7,
 
   // ── Actions (0x300 – 0x31F) ──
   ActionRegister: 0x300,
@@ -249,10 +255,13 @@ export const OpCode = {
   ActionList: 0x303,
   ActionListRuns: 0x304,
   ActionDelete: 0x305,
-  ActionAwait: 0x306,
-  ActionComplete: 0x307,
-  ActionFail: 0x308,
-  ActionTouch: 0x309,
+  ActionAwait: 0x30a,
+  ActionComplete: 0x30b,
+  ActionFail: 0x30c,
+  ActionTouch: 0x30d,
+  /** Shard to shard only; the SDK never sends it. */
+  ActionDeliver: 0x30e,
+  ActionInfo: 0x30f,
 
   // ── Workers (0x320 – 0x33F) ──
   WorkerRegister: 0x320,
@@ -281,6 +290,7 @@ export const OpCode = {
   ProcessingCancel: 0x362,
   ProcessingStatus: 0x363,
   ProcessingList: 0x364,
+  ProcessingRemove: 0x365,
 } as const;
 
 export type OpCode = (typeof OpCode)[keyof typeof OpCode];
@@ -705,6 +715,49 @@ export interface StreamNackOptions {
 }
 
 /**
+ * A stream's consumer group, as groupList shows it. Members and pending are
+ * the leader's, and a leader change starts them again.
+ */
+export interface StreamGroupInfo {
+  name: string;
+  members: number;
+  pending: bigint;
+  createdAtMs: bigint;
+  ackTimeoutMs: number;
+  maxDeliver: number;
+  /** When the group was last delivered a record, in ms since the Unix epoch; 0 if never. */
+  lastDeliveredMs: bigint;
+  lastDeliveredSeq: bigint;
+}
+
+/** A stream's consumer groups. */
+export interface StreamGroupListResult {
+  groups: StreamGroupInfo[];
+  /** The stream has more groups than the answer holds. */
+  more: boolean;
+}
+
+/**
+ * A consumer group's member, as groupMembers shows it. All of it is the
+ * leader's, and a leader change starts it again.
+ */
+export interface StreamGroupMember {
+  id: string;
+  state: "active" | "leaving";
+  pending: number;
+  joinedAtMs: bigint;
+  /** When it was last delivered to; absent if never. */
+  lastActiveMs?: bigint;
+}
+
+/** A consumer group's members. */
+export interface StreamGroupMembersResult {
+  members: StreamGroupMember[];
+  /** The group has more members than the answer holds. */
+  more: boolean;
+}
+
+/**
  * Options for KV get operations.
  */
 export interface GetOptions {
@@ -866,6 +919,38 @@ export interface NackOptions {
  */
 export interface DLQListOptions {
   namespace?: string;
+  /** Most dead letters on the page, 1 to 100 (default 100); the server clamps it to that range. */
+  limit?: number;
+  /** Start after the dead letter with this seq: the previous page's `lastSeq`. Unset starts from the oldest. */
+  after?: bigint;
+}
+
+/**
+ * A queue's dead letter, as dlqList shows it.
+ */
+export interface DeadLetter {
+  seq: bigint;
+  /** The payload's whole length; `payload` holds at most its first 4 KiB. */
+  size: number;
+  payload: Uint8Array;
+  enqueuedAtMs: bigint;
+  attempts: number;
+  priority: number;
+  /** When it was moved to the dead letter queue, in ms since the Unix epoch. */
+  movedAtMs: bigint;
+}
+
+/**
+ * A page of a queue's dead letters, oldest first.
+ */
+export interface DLQListResult {
+  messages: DeadLetter[];
+  /** The queue's dead letters in all. */
+  total: bigint;
+  /** Whether more follow: ask again with `after` set to `lastSeq`. */
+  hasMore: boolean;
+  /** The seq of the page's last dead letter; 0 on an empty page. */
+  lastSeq: bigint;
 }
 
 /**
@@ -881,6 +966,28 @@ export interface DLQRequeueOptions {
  */
 export interface PeekOptions {
   namespace?: string;
+}
+
+/**
+ * A ready message, as peek shows it.
+ */
+export interface PeekedMessage {
+  seq: bigint;
+  priority: number;
+  attempts: number;
+  enqueuedAtMs: bigint;
+  /** The payload's whole length; `payload` holds at most its first 4 KiB. */
+  size: number;
+  payload: Uint8Array;
+}
+
+/**
+ * A queue's next ready messages, in the order a dequeue takes them.
+ */
+export interface PeekResult {
+  messages: PeekedMessage[];
+  /** More may follow: the limit, the answer's room or a run of taken messages stopped it. */
+  more: boolean;
 }
 
 /**
@@ -1030,6 +1137,8 @@ export interface ActionRunStatus {
    * the run's next update.
    */
   workerId?: string;
+  /** The outcome a completed run's worker named; absent for success. */
+  outcome?: string;
 }
 
 /**
@@ -1040,10 +1149,25 @@ export interface ActionInvokeResult {
 }
 
 /**
- * A page of registered action names.
+ * A registered action, as action.list shows it.
+ */
+export interface ActionListEntry {
+  name: string;
+  /** Its version, counting registrations. */
+  version: number;
+  owner: string;
+  /** Its lease: how long a worker holds a run without touching it. */
+  timeoutMs: bigint;
+  maxAttempts: number;
+  /** When it was first registered, in ms since the Unix epoch. */
+  createdAtMs: bigint;
+}
+
+/**
+ * A page of registered actions.
  */
 export interface ActionListResult {
-  names: string[];
+  actions: ActionListEntry[];
   /** Whether another page follows. */
   hasMore: boolean;
   /** Pass as the next call's cursor; null on the last page. */
@@ -1051,17 +1175,20 @@ export interface ActionListResult {
 }
 
 /**
- * Options for registering an action.
- */
-/**
  * Options for registering an action. Registering replaces the action's
  * settings: the last registration wins.
  */
 export interface ActionRegisterOptions {
   namespace?: string;
-  /** How long a run may go without its worker completing, failing or touching it before it's taken back; 0 means never (default 30000). */
+  /**
+   * The action's lease: how long a worker holds a run without completing,
+   * failing or touching it before the run is taken back. 5000 to 43200000
+   * ms. Unset or 0 sends 0, and the server's default lease of 300000
+   * applies. However often it is touched, a worker holds one delivery at
+   * most 12 h.
+   */
   timeoutMs?: number;
-  /** Attempts in all, counting the first (default 3). */
+  /** Attempts in all, counting the first; the server keeps it within 1 to 1000 (default 3). */
   maxRetries?: number;
   owner?: string;
 }
@@ -1102,6 +1229,47 @@ export interface ActionListOptions {
  */
 export interface ActionDeleteOptions {
   namespace?: string;
+}
+
+/**
+ * Options for an action's info.
+ */
+export interface ActionInfoOptions {
+  namespace?: string;
+}
+
+/**
+ * An action's definition, its runs by status and how long completed runs
+ * took. The counts other than `ready`, and the latencies, are absent when
+ * `tooManyRuns` is set.
+ */
+export interface ActionInfo {
+  owner: string;
+  /** Its version, counting registrations. */
+  version: number;
+  /** Its lease. */
+  timeoutMs: bigint;
+  maxAttempts: number;
+  /** When it was first registered, in ms since the Unix epoch. */
+  createdAtMs: bigint;
+  /** Runs waiting for a worker, counted up to 100,000. */
+  ready: bigint;
+  /** More runs wait than were counted: `ready` is at least that. */
+  readyCapped: boolean;
+  /** The action's shard holds more than 10,000 of the namespace's runs, so the counts below are absent. */
+  tooManyRuns: boolean;
+  running?: bigint;
+  completed?: bigint;
+  /** Runs that failed for good. */
+  failed?: bigint;
+  /** Runs whose last attempt timed out. */
+  timedOut?: bigint;
+  /** Completed runs measured. */
+  latencyCount?: bigint;
+  latencyAvgMs?: bigint;
+  latencyP50Ms?: bigint;
+  latencyP95Ms?: bigint;
+  latencyMaxMs?: bigint;
 }
 
 // ============================================================================
@@ -1153,18 +1321,42 @@ export interface ProcessEntry {
 }
 
 /**
- * A task assigned to a worker.
+ * Which delivery of a run a report names: complete, fail and touch echo
+ * these from the task, and the server refuses one that names a delivery
+ * the run has moved on from (StaleReportError).
  */
-export interface TaskAssignment {
+export interface TaskDelivery {
+  runId: string;
+  /** The run's namespace: reports go there. */
+  namespace: string;
+  /** The run's deliveries, this one included. */
+  deliveries: number;
+  /** The term the delivery was made in. */
+  term: bigint;
+  /** The log index the delivery was made at. */
+  index: bigint;
+  /** The action the run invokes. */
+  action: string;
+}
+
+/**
+ * A task assigned to a worker: one delivery of a run.
+ */
+export interface TaskAssignment extends TaskDelivery {
+  /** The task's id as the CLI prints it, `run:deliveries:term:index:action` (see formatTaskId). */
   taskId: string;
-  taskType: string;
-  payload: Uint8Array;
-  createdAt: bigint;
+  /** When the run was invoked, in ms since the Unix epoch. */
+  createdAtMs: bigint;
+  /** The run's failures so far, plus one. */
   attempt: number;
+  /** How long the worker holds it without a touch. */
+  leaseMs: bigint;
   /** The workflow run that invoked this action, when one did. */
   callerRunId?: string;
   /** That run's workflow. */
   callerWorkflowName?: string;
+  /** The run's input, as invoked. */
+  input: Uint8Array;
 }
 
 /**
@@ -1249,22 +1441,18 @@ export interface WorkerAwaitOptions {
   namespace?: string;
   /** Block waiting for task, in ms. Unset = 30000, 0 = don't wait, max 300000. */
   blockMs?: number;
-}
-
-/**
- * Options for extending task lease.
- */
-export interface WorkerTouchOptions {
-  namespace?: string;
-  extendMs?: number;
+  /**
+   * Up to 64 bytes. An await sent again with the same key, after its answer
+   * was lost, gets the task the first one got while its lease runs.
+   */
+  requestKey?: string;
 }
 
 /**
  * Options for completing a task.
  */
 export interface WorkerCompleteOptions {
-  namespace?: string;
-  /** Named outcome for the action (default: "success"). Used by workflow transitions. */
+  /** The outcome a workflow step follows; unset or "" is success. */
   outcome?: string;
 }
 
@@ -1272,9 +1460,12 @@ export interface WorkerCompleteOptions {
  * Options for failing a task.
  */
 export interface WorkerFailOptions {
-  namespace?: string;
-  /** Whether to retry the task (default: true) */
+  /** Run it again while attempts are left; false fails the run now (default true). */
   retry?: boolean;
+  /** Hand it back untried: no failure is counted, so its attempt doesn't move (default false). */
+  abandoned?: boolean;
+  /** How long before it is ready again, at most 86400000 ms (default 0). */
+  delayMs?: number;
 }
 
 /**
@@ -1490,6 +1681,8 @@ export interface WorkflowDefinitionEntry {
   name: string;
   version: string;
   created_at: number;
+  /** False once the workflow is disabled. */
+  enabled: boolean;
 }
 
 /**
@@ -1581,6 +1774,13 @@ export interface ProcessingCancelOptions {
 }
 
 /**
+ * Options for removing a processing job.
+ */
+export interface ProcessingRemoveOptions {
+  namespace?: string;
+}
+
+/**
  * Status of a processing job.
  */
 export interface ProcessingStatusResult {
@@ -1590,8 +1790,23 @@ export interface ProcessingStatusResult {
   batch_size: number;
   records_processed: number;
   created_at: number;
-  /** Why the job failed; null unless `status` is `"failed"`. */
+  /**
+   * Why the job failed, or, for a running job this node holds without
+   * running it, why ("held here: ..."); null otherwise.
+   */
   failure_reason: string | null;
+  // The rest is this node's runtime of the job: not replicated, so it starts
+  // again with the node or a new leader.
+  /** Whether this node runs any of the job's pipelines. */
+  running: boolean;
+  records_in: number;
+  records_out: number;
+  watermark_ms: number;
+  tick_avg_us: number;
+  tick_max_us: number;
+  uptime_ms: number;
+  /** The definition as submitted. */
+  yaml: string;
 }
 
 /**
@@ -1600,8 +1815,11 @@ export interface ProcessingStatusResult {
 export interface ProcessingListEntry {
   name: string;
   job_id: string;
+  /** The status in capitals; a failed job's reads `FAILED: <reason>`. */
   status: string;
   created_at: number;
+  batch_size: number;
+  records_processed: number;
 }
 
 /**

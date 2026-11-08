@@ -138,7 +138,9 @@ export class KVOperations {
   /**
    * Put sets a key-value pair and returns the new version. A `casVersion`
    * that isn't the key's, or a `condition` that doesn't hold, throws a
-   * conflict with reason CasMismatch or ConditionFailed.
+   * conflict with reason CasMismatch or ConditionFailed. The server decides
+   * both as the write applies, in log order, so a refused put still costs
+   * a replicated commit.
    */
   async put(key: string, value: Uint8Array, opts?: PutOptions): Promise<PutResult> {
     return kvSet(this.sender, this.sender.getNamespace(opts?.namespace), key, value, opts);
