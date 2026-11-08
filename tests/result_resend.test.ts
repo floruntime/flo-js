@@ -19,8 +19,8 @@ import {
   encodeTouchBody,
   type Logger,
 } from "@floruntime/core";
-import { ActionWorker, FloClient, NonRetryableError, StreamWorker } from "@floruntime/node";
-import { okAnswer, taskAnswer, type FakeTask } from "./fake_worker_server.js";
+import { type ActionContext, ActionWorker, FloClient, NonRetryableError, StreamWorker, TimeoutError as ActionTimeoutError } from "@floruntime/node";
+import { fakeServer as timedServer, okAnswer, taskAnswer, type FakeTask } from "./fake_worker_server.js";
 
 /** The task the fakes hand out, as a report names it; its id is t1:1:1:10:a. */
 const TASK = { runId: "t1", namespace: "default", deliveries: 1, term: 1n, index: 10n, action: "a" };
@@ -226,7 +226,7 @@ function heldHandler() {
 function actionWorker(
   endpoint: string,
   logger: Logger,
-  handler: () => Promise<Uint8Array> = async () => new Uint8Array([1, 2, 3]),
+  handler: (ctx: ActionContext) => Promise<Uint8Array> = async () => new Uint8Array([1, 2, 3]),
   actionTimeoutMs?: number,
 ) {
   const w = new ActionWorker({ endpoint, blockMs: 30000, logger, actionTimeoutMs });
@@ -318,6 +318,52 @@ describe("ActionWorker results", () => {
     await done;
     expect(srv.of(OpCode.ActionComplete)).toHaveLength(1);
     expect(srv.of(OpCode.ActionFail)).toHaveLength(0);
+  });
+
+  it("aborts the handler's signal at actionTimeoutMs, with the TimeoutError as its reason", async () => {
+    const srv = await serve(oneTaskThen(() => undefined));
+    const { logger } = recordingLogger();
+    let signal: AbortSignal | undefined;
+    actionWorker(srv.endpoint, logger, (ctx) => {
+      signal = ctx.signal;
+      return new Promise<Uint8Array>(() => {});
+    }, 150);
+    await until(() => signal !== undefined, 3000);
+    expect(signal!.aborted).toBe(false);
+    await until(() => signal!.aborted, 3000);
+    expect(signal!.reason).toBeInstanceOf(ActionTimeoutError);
+    await until(() => srv.of(OpCode.ActionFail).length >= 1, 3000);
+    expect(failRetryByte(srv.of(OpCode.ActionFail)[0]!.bytes)).toBe(1);
+  });
+
+  it("keeps a timed-out handler that ignores its signal in its slot until it settles", async () => {
+    // Every await hands out a task; with concurrency 1 a second runs only
+    // once the first handler has settled, not when its run was failed.
+    let n = 0;
+    const srv = await serve((op) => (op === OpCode.ActionAwait ? taskAnswer({ run: `t${++n}` }) : undefined));
+    const { logger } = recordingLogger();
+    const w = new ActionWorker({ endpoint: srv.endpoint, blockMs: 30000, logger, actionTimeoutMs: 100, concurrency: 1 });
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let started = 0;
+    w.action("a", async () => {
+      started++;
+      if (started === 1) await held;
+      return new Uint8Array(0);
+    });
+    const done = w.start();
+    cleanups.push(async () => {
+      w.stop();
+      release();
+      await done;
+    });
+    await until(() => srv.of(OpCode.ActionFail).length >= 1, 3000);
+    await sleep(500);
+    expect(started).toBe(1);
+    expect(srv.of(OpCode.ActionAwait)).toHaveLength(1);
+    release();
+    await until(() => started >= 2, 3000);
+    expect(started).toBeGreaterThanOrEqual(2);
   });
 
   it("fails a task whose handler throws NonRetryableError at once, without retry", async () => {
@@ -532,6 +578,32 @@ describe("ActionWorker registration and auto-touch", () => {
     // Each names the delivery, and nothing more: a touch asks for no length.
     const body = Buffer.from(encodeTouchBody("w1", TASK));
     for (const t of touches) expect(t.bytes.subarray(t.bytes.length - body.length).equals(body)).toBe(true);
+  });
+
+  it("touches on a grid of a sixth of the lease from the task's arrival, skipping ticks a slow touch overran", async () => {
+    // A 1200 ms lease: ticks every 200 ms from arrival. The first touch, at
+    // 200, is answered 500 ms late, at 700: the ticks at 400 and 600 are
+    // past, so the next touch is the one at 800, then 1000. Touching every
+    // quarter (300), timing from the last touch, or sending the overrun
+    // ticks at once would each put a touch elsewhere.
+    const srv = await timedServer((op, nth) => {
+      if (op === OpCode.ActionAwait) return nth === 0 ? { data: taskAnswer({ leaseMs: 1200n }) } : "park";
+      if (op === OpCode.ActionTouch && nth === 0) return { delayMs: 500 };
+      return undefined;
+    });
+    cleanups.push(srv.close);
+    worker(srv.endpoint, true, 600000, 1100);
+    await until(() => srv.seen.some((x) => x.op === OpCode.ActionComplete), 5000);
+    const arrival = srv.seen.find((x) => x.op === OpCode.ActionAwait)!.at;
+    const touches = srv.seen.filter((x) => x.op === OpCode.ActionTouch).map((x) => Math.round(x.at - arrival));
+    expect(touches.length, `touches at ${touches}`).toBe(3);
+    const [first, second, third] = touches as [number, number, number];
+    expect(first, `touches at ${touches}`).toBeGreaterThanOrEqual(190);
+    expect(first, `touches at ${touches}`).toBeLessThan(270);
+    expect(second, `touches at ${touches}`).toBeGreaterThanOrEqual(790);
+    expect(second, `touches at ${touches}`).toBeLessThan(870);
+    expect(third, `touches at ${touches}`).toBeGreaterThanOrEqual(990);
+    expect(third, `touches at ${touches}`).toBeLessThan(1070);
   });
 
   it("keeps touching after a refusal that isn't final, such as overloaded", async () => {

@@ -102,6 +102,8 @@ interface Seen {
   op: number;
   /** The request's payload after the header: namespace, key, value, options. */
   payload: Buffer;
+  /** When it arrived, performance.now(). */
+  at: number;
 }
 
 /** The current_load a heartbeat carries: its value's first u32. */
@@ -134,7 +136,7 @@ export async function fakeServer(script: (op: number, nth: number) => Answer) {
         if (buf.length < total) return;
         const op = buf.readUInt16LE(20);
         const id = buf.readBigUInt64LE(8);
-        seen.push({ op, payload: Buffer.from(buf.subarray(HEADER_SIZE, total)) });
+        seen.push({ op, payload: Buffer.from(buf.subarray(HEADER_SIZE, total)), at: performance.now() });
         buf = buf.subarray(total);
         const nth = counts.get(op) ?? 0;
         counts.set(op, nth + 1);

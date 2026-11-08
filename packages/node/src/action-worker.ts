@@ -199,11 +199,19 @@ export class ActionContext {
   /** That run's workflow. */
   readonly callerWorkflowName?: string;
 
+  /**
+   * Aborted when the handler runs past the worker's `actionTimeoutMs`: the
+   * run is then failed with retry and may run again elsewhere, so stop work
+   * when it fires. The worker can't stop a handler that ignores it; that
+   * one runs on, and holds its concurrency slot until it settles.
+   */
+  readonly signal: AbortSignal;
+
   private readonly task: TaskAssignment;
   private readonly worker: ActionWorker;
-  private _cancelled = false;
 
-  constructor(task: TaskAssignment, worker: ActionWorker) {
+  constructor(task: TaskAssignment, worker: ActionWorker, signal: AbortSignal = new AbortController().signal) {
+    this.signal = signal;
     this.task = task;
     this.taskId = task.taskId;
     this.runId = task.runId;
@@ -293,24 +301,17 @@ export class ActionContext {
   }
 
   /**
-   * Check if the task has been cancelled.
+   * Whether `signal` has been aborted: the handler ran past its time limit.
    */
   get cancelled(): boolean {
-    return this._cancelled;
+    return this.signal.aborted;
   }
 
   /**
-   * Mark the context as cancelled (internal use).
-   */
-  _setCancelled(): void {
-    this._cancelled = true;
-  }
-
-  /**
-   * Check if cancelled and throw if so.
+   * Throw if `signal` has been aborted.
    */
   checkCancelled(): void {
-    if (this._cancelled) {
+    if (this.signal.aborted) {
       throw new Error("Task was cancelled");
     }
   }
@@ -634,10 +635,16 @@ export class ActionWorker {
           continue;
         }
 
-        // Execute task in background
+        // Execute task in background. Its slot is held until both its
+        // report is sent and its handler has settled, so a timed-out handler
+        // still running counts against the concurrency.
         this.activeTaskCount++;
-        const taskPromise = this.executeTask(result.task, performance.now()).finally(() => {
-          this.activeTaskCount--;
+        let holds = 2;
+        const release = () => {
+          if (--holds === 0) this.activeTaskCount--;
+        };
+        const taskPromise = this.executeTask(result.task, performance.now(), release).finally(() => {
+          release();
           this.pendingTasks.delete(taskPromise);
         });
         this.pendingTasks.add(taskPromise);
@@ -675,7 +682,13 @@ export class ActionWorker {
     }
   }
 
-  private async executeTask(task: TaskAssignment, arrivedAt: number): Promise<void> {
+  /**
+   * Run a task's handler and send its report. `handlerSettled` is called
+   * once, when the handler's promise settles (at once with no handler); a
+   * handler past its time limit is signalled, not stopped, so that can be
+   * after this returns.
+   */
+  private async executeTask(task: TaskAssignment, arrivedAt: number, handlerSettled: () => void): Promise<void> {
     const client = this.client!;
     const { workerId } = this.config;
     const { action, taskId } = task;
@@ -687,14 +700,18 @@ export class ActionWorker {
     let report: () => Promise<unknown>;
     const handler = this.handlers.get(action);
     if (!handler) {
+      handlerSettled();
       this.log(`No handler registered for action: ${action}`);
       what = "fail";
       report = () => client.worker.fail(workerId, task, `No handler for: ${action}`);
     } else {
-      const ctx = new ActionContext(task, this);
+      const abort = new AbortController();
+      const ctx = new ActionContext(task, this, abort.signal);
       const stopTouching = this.config.autoTouch ? this.keepTouching(task, arrivedAt) : () => {};
+      const running = Promise.resolve().then(() => handler(ctx));
+      running.then(handlerSettled, handlerSettled);
       try {
-        const result = await this.withTimeout(handler(ctx), this.config.actionTimeoutMs).finally(stopTouching);
+        const result = await this.withTimeout(running, this.config.actionTimeoutMs, abort).finally(stopTouching);
         // Plain object → JSON bytes, ActionResult → named outcome
         what = "complete";
         if (result instanceof ActionResult) {
@@ -784,8 +801,10 @@ export class ActionWorker {
   /**
    * Signal the worker to stop: polling ends, also mid-reconnect or
    * mid-drain, once an outstanding poll returns (within blockMs). Running
-   * handlers finish and send their results before `start()` returns. A stop
-   * before `start()` ends that run at once.
+   * handlers finish and send their results before `start()` returns; their
+   * signals are not aborted. A handler past its time limit has already had
+   * its run failed, and `start()` doesn't wait for it. A stop before
+   * `start()` ends that run at once.
    */
   stop(): void {
     this.log("Stopping worker...");
@@ -904,12 +923,15 @@ export class ActionWorker {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private async withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  /** `promise`, or a TimeoutError after `ms`, when `abort` is aborted with that error. */
+  private async withTimeout<T>(promise: Promise<T>, ms: number, abort: AbortController): Promise<T> {
     let timeoutId: NodeJS.Timeout;
 
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => {
-        reject(new TimeoutError(`Operation timed out after ${ms}ms`));
+        const err = new TimeoutError(`Operation timed out after ${ms}ms`);
+        abort.abort(err);
+        reject(err);
       }, ms);
     });
 
