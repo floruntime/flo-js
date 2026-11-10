@@ -1032,13 +1032,6 @@ export interface DLQListResult {
 }
 
 /**
- * Options for DLQ requeue operations.
- */
-export interface DLQRequeueOptions {
-  namespace?: string;
-}
-
-/**
  * Options for queue peek operations.
  * Peek reads messages without creating leases (non-consuming read).
  */

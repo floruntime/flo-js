@@ -402,23 +402,6 @@ export function parseEnqueueResponse(data: Uint8Array): bigint {
   return view.getBigUint64(0, true);
 }
 
-/**
- * Serialize sequence numbers for ack/nack.
- */
-export function serializeSeqs(seqs: bigint[]): Uint8Array {
-  const buf = new Uint8Array(4 + seqs.length * 8);
-  const view = new DataView(buf.buffer);
-
-  view.setUint32(0, seqs.length, true);
-  let offset = 4;
-  for (const seq of seqs) {
-    view.setBigUint64(offset, seq, true);
-    offset += 8;
-  }
-
-  return buf;
-}
-
 // ============================================================================
 // ACTION/WORKER SERIALIZATION
 // ============================================================================

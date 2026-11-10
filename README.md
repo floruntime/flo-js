@@ -184,7 +184,6 @@ server operator's settings. Past them an op is refused `TxnTooLarge`.
 | `purge` | `purge(queue, opts?) → Promise<number>` | Remove every message, ready, leased and dead; answers how many |
 | `peek` | `peek(queue, limit?, opts?) → Promise<PeekResult>` | The next ready messages (1 to 100, default 20), in dequeue order, without taking them; up to 4 KiB of each payload |
 | `dlqList` | `dlqList(queue, { limit?, after? }?) → Promise<DLQListResult>` | A page of dead letters, oldest first (up to 100); pass `lastSeq` as `after` while `hasMore` |
-| `dlqRequeue` | `dlqRequeue(queue, seqs, opts?) → Promise<void>` | Move DLQ messages back |
 
 #### Enqueue Options
 

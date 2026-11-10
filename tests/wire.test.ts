@@ -22,7 +22,6 @@ import {
   parseRawResponse,
   RESPONSE_STALE,
   parseEnqueueResponse,
-  serializeSeqs,
   IncompleteResponseError,
   decodeAwaitAnswer,
   encodeAwaitBody,
@@ -245,25 +244,6 @@ describe("Wire Protocol", () => {
 
       const seq = parseEnqueueResponse(data);
       expect(seq).toBe(12345n);
-    });
-  });
-
-  describe("serializeSeqs", () => {
-    it("should serialize empty sequence list", () => {
-      const data = serializeSeqs([]);
-      const view = new DataView(data.buffer);
-      expect(view.getUint32(0, true)).toBe(0);
-      expect(data.length).toBe(4);
-    });
-
-    it("should serialize sequence list", () => {
-      const data = serializeSeqs([1n, 2n, 3n]);
-      const view = new DataView(data.buffer);
-
-      expect(view.getUint32(0, true)).toBe(3);
-      expect(view.getBigUint64(4, true)).toBe(1n);
-      expect(view.getBigUint64(12, true)).toBe(2n);
-      expect(view.getBigUint64(20, true)).toBe(3n);
     });
   });
 

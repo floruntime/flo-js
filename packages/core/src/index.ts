@@ -84,7 +84,6 @@ export {
   type DLQListOptions,
   type DLQListResult,
   type DeadLetter,
-  type DLQRequeueOptions,
   type PeekOptions,
   type PeekResult,
   type PeekedMessage,
@@ -233,7 +232,6 @@ export {
   parseResponseHeader,
   parseRawResponse,
   parseEnqueueResponse,
-  serializeSeqs,
 } from "./wire.js";
 
 // Operations

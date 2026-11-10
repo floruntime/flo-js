@@ -21,7 +21,6 @@ import {
   type DeadLetter,
   type DLQListOptions,
   type DLQListResult,
-  type DLQRequeueOptions,
   type EnqueueOptions,
   type PeekOptions,
   type PeekResult,
@@ -38,7 +37,6 @@ import {
 import {
   OptionsBuilder,
   parseEnqueueResponse,
-  serializeSeqs,
 } from "./wire.js";
 
 /**
@@ -204,34 +202,6 @@ export class QueueOperations {
     }
 
     return decodeDlqListAnswer(resp.data);
-  }
-
-  /**
-   * DLQRequeue moves messages from DLQ back to the main queue.
-   */
-  async dlqRequeue(
-    queue: string,
-    seqs: bigint[],
-    opts?: DLQRequeueOptions
-  ): Promise<void> {
-    if (seqs.length === 0) {
-      return;
-    }
-
-    const namespace = this.sender.getNamespace(opts?.namespace);
-    const value = serializeSeqs(seqs);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.QueueDLQRequeue,
-      namespace,
-      textEncoder.encode(queue),
-      value,
-      new Uint8Array(0)
-    );
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
   }
 
   /**

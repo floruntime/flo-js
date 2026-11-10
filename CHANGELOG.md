@@ -114,6 +114,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Removed
 
 - `queue.ack` and `queue.nack`, `AckOptions`, `NackOptions`, `parseDequeueResponse`, and the retired queue codes 0x171, 0x172 and 0x174: use `complete` and `fail`.
+- **Breaking:** `queue.dlqRequeue`, `DLQRequeueOptions` and `serializeSeqs`: the server refuses a DLQ requeue (not implemented), so the call could never succeed.
 
 - The old action report and await codes 0x306 to 0x309 and their hand-coded values (`serializeWorkerAwaitValue`, `serializeWorkerTouchValue`, `serializeWorkerCompleteValue`, `serializeWorkerFailValue`, `parseTaskAssignment`, `WorkerTouchOptions`), and the old queue peek, 0x17c, which answered nothing. `WorkerCompleteOptions` and `WorkerFailOptions` lose `namespace`: a report goes to its run's.
 
