@@ -14,7 +14,7 @@ export const VERSION = 0x03;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0x7eb599c24442118bn;
+export const TABLE_HASH = 0x19075df8e1ed5f75n;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -126,7 +126,11 @@ export const HEADER_SIZE = 32;
 /** Most bytes one answer frame carries, header included; the server sends no more. */
 export const MAX_ANSWER_BYTES = 256 * 1024;
 
-/** Response flag: a halted shard answered from its state before the halt. */
+/**
+ * Response flag: the read was answered from state that may be behind what
+ * was committed: a halted shard's state before the halt, or a node whose
+ * reads are blocked serving what it last applied.
+ */
 export const RESPONSE_STALE = 0x01;
 
 // Size limits (for client-side validation)
@@ -227,15 +231,16 @@ export const OpCode = {
 
   // ── Queues (0x170 – 0x19F) ──
   QueueEnqueue: 0x170,
-  QueueDequeue: 0x171,
-  QueueComplete: 0x172,
-  QueueFail: 0x174,
   QueueDLQList: 0x176,
   QueueDLQDelete: 0x177,
   QueueDLQRequeue: 0x178,
   QueueStats: 0x17b,
   QueuePurge: 0x17f,
   QueuePeek: 0x180,
+  QueueDequeue: 0x181,
+  QueueComplete: 0x182,
+  QueueFail: 0x183,
+  QueueTouch: 0x184,
   QueueList: 0x198,
 
   // ── Time-Series (0x1A0 – 0x1BF) ──
@@ -367,7 +372,8 @@ export const OptionTag = {
 
   // Queue Options (0x10 - 0x1F)
   Priority: 0x10, // u8: Message priority (0-255, lower is taken first; unset is 0)
-  Count: 0x15, // u32: Number of messages to dequeue
+  DelayMS: 0x11, // u64: How long before an enqueued message is ready (at most a day)
+  Count: 0x15, // u32: Most records a stream read returns
   BlockMS: 0x17, // u32: Blocking timeout (0 = don't wait, max 300000)
 
   // Stream Options (0x20 - 0x2F) - StreamID-native ONLY
@@ -406,7 +412,7 @@ export type OptionTag = (typeof OptionTag)[keyof typeof OptionTag];
 export interface ScanResult {
   keys: string[];
   cursor: Uint8Array | null;
-  /** Served by a halted shard from its state just before the entry it halted at; not an error. */
+  /** Served from state that may be behind: a halted shard's, as of the entry it halted at, or a read-blocked node's; not an error. */
   stale: boolean;
 }
 
@@ -461,7 +467,7 @@ export interface GetResult {
   version: bigint;
   /** When the key's TTL runs out, in ms since the Unix epoch; null with no TTL. */
   expiresAtMs: bigint | null;
-  /** Served by a halted shard from its state just before the entry it halted at; not an error. */
+  /** Served from state that may be behind: a halted shard's, as of the entry it halted at, or a read-blocked node's; not an error. */
   stale: boolean;
 }
 
@@ -472,7 +478,7 @@ export interface GetResult {
 export interface JsonGetResult {
   value: Uint8Array;
   version: bigint;
-  /** Served by a halted shard from its state just before the entry it halted at; not an error. */
+  /** Served from state that may be behind: a halted shard's, as of the entry it halted at, or a read-blocked node's; not an error. */
   stale: boolean;
 }
 
@@ -483,7 +489,7 @@ export interface JsonGetResult {
 export interface KVExistsResult {
   exists: boolean;
   version: bigint;
-  /** Served by a halted shard from its state just before the entry it halted at; not an error. */
+  /** Served from state that may be behind: a halted shard's, as of the entry it halted at, or a read-blocked node's; not an error. */
   stale: boolean;
 }
 
@@ -495,7 +501,7 @@ export interface KVExistsResult {
 export interface HistoryResult {
   versions: VersionEntry[];
   more: boolean;
-  /** Served by a halted shard from its state just before the entry it halted at; not an error. */
+  /** Served from state that may be behind: a halted shard's, as of the entry it halted at, or a read-blocked node's; not an error. */
   stale: boolean;
 }
 
@@ -508,26 +514,76 @@ export interface MGetEntry {
   value: Uint8Array;
   version: bigint;
   found: boolean;
-  /** Served by a halted shard from its state just before the entry it halted at; not an error. */
+  /** Served from state that may be behind: a halted shard's, as of the entry it halted at, or a read-blocked node's; not an error. */
   stale: boolean;
 }
 
 /**
- * Queue message.
+ * A dequeued message, leased to its consumer.
  */
 export interface Message {
   seq: bigint;
   payload: Uint8Array;
   enqueuedAtMs: bigint;
-  deliveryCount: number;
+  /** Its deliveries, this one included: more than 1 once a lease ran out or it failed. */
+  deliveries: number;
   priority: number;
 }
 
 /**
- * Result of a queue dequeue operation.
+ * The messages a report names, from one dequeue: the consumer that took
+ * them, the delivery's token (term, index), and each message's seq and
+ * deliveries. A `DequeueResult` is one; to report on some of its messages,
+ * pass it with `messages` narrowed.
  */
-export interface DequeueResult {
+export interface QueueDelivery {
+  consumer: string;
+  term: bigint;
+  index: bigint;
+  messages: readonly { seq: bigint; deliveries: number }[];
+}
+
+/**
+ * The messages a dequeue took, leased to `consumer` until `expiresAtMs`
+ * unless completed, failed or touched first. Empty when nothing was ready.
+ */
+export interface DequeueResult extends QueueDelivery {
   messages: Message[];
+  /** When the lease runs out without a touch, in ms since the Unix epoch; 0 when nothing was taken, or with ack. */
+  expiresAtMs: bigint;
+}
+
+/** Why a report left a message alone. */
+export const QueueRefusal = {
+  /** Completed already, or not in this queue: for a complete, it is done. */
+  Gone: 0,
+  /** Delivered again since this delivery. */
+  DeliveredAgain: 1,
+  /** Another consumer holds it. */
+  OtherHolder: 2,
+  /** Its lease ran out. */
+  Expired: 3,
+  /** It was failed, or handed back. */
+  Released: 4,
+  /** No one holds it. */
+  NotHeld: 5,
+} as const;
+
+export type QueueRefusal = (typeof QueueRefusal)[keyof typeof QueueRefusal];
+
+/**
+ * What a complete, fail or touch did: how many messages it applied to, and
+ * each one it didn't, with why. These come inside an ok answer.
+ */
+export interface QueueReportResult {
+  applied: number;
+  refused: { seq: bigint; why: QueueRefusal; reason: string }[];
+}
+
+/** A touch's result, with when the lease now runs out. */
+export interface QueueTouchResult extends QueueReportResult {
+  /** In ms since the Unix epoch. */
+  expiresAtMs: bigint;
 }
 
 // ============================================================================
@@ -542,6 +598,10 @@ export const StorageTier = {
   Hot: 0,
   /** Served from the warm store after leaving the in-memory log. */
   Warm: 1,
+  /** Read back from the log's segments on disk, past the warm store. */
+  Disk: 2,
+  /** A tier this SDK doesn't know: a newer server's. */
+  Unknown: 255,
 } as const;
 
 export type StorageTier = (typeof StorageTier)[keyof typeof StorageTier];
@@ -889,6 +949,8 @@ export interface EnqueueOptions {
   namespace?: string;
   /** 0-255; lower is taken first. Unset is 0, so it is taken before any explicit priority. */
   priority?: number;
+  /** How long before the message is ready, at most 86400000 ms (a day). */
+  delayMs?: number;
 }
 
 /**
@@ -898,20 +960,36 @@ export interface DequeueOptions {
   namespace?: string;
   /** Wait for messages if the queue is empty, in ms. 0 = don't wait, max 300000. */
   blockMs?: number;
+  /** Who takes them: complete, fail and touch must name the same. Up to 4082 bytes; "" when unset. */
+  consumer?: string;
+  /** How long they're held without a touch, 5000 to 43200000 ms; the server's 30 s when unset. */
+  leaseMs?: number;
+  /**
+   * Complete them as they're taken: a one-shot consume. The answer comes
+   * once the complete applies; if the leader fails in between, they come
+   * back once their lease runs out.
+   */
+  ack?: boolean;
 }
 
 /**
- * Options for queue ack operations.
+ * Options for queue complete and touch operations.
  */
-export interface AckOptions {
+export interface QueueReportOptions {
   namespace?: string;
 }
 
 /**
- * Options for queue nack operations.
+ * Options for queue fail operations.
  */
-export interface NackOptions {
+export interface QueueFailOptions {
   namespace?: string;
+  /** How long before they're ready again, at most 86400000 ms (default 0). */
+  delayMs?: number;
+  /** Dead-letter them now, whatever attempts are left (default false). */
+  dead?: boolean;
+  /** Why they failed, up to 1024 bytes; longer is cut. */
+  error?: string;
 }
 
 /**

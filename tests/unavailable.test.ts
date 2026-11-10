@@ -1,0 +1,103 @@
+/**
+ * `unavailable`, not run, is routine: a group read whose records are being
+ * read back from disk is refused that way, having claimed and delivered
+ * nothing. A StreamWorker reads again, with the same group and consumer,
+ * soon and quietly, and handles the records once they come.
+ */
+
+import { afterEach, describe, expect, it } from "vitest";
+import { OpCode, Reason, StatusCode, StorageTier, UnavailableError, parseStreamReadResponse } from "@floruntime/core";
+import { FloClient, StreamWorker } from "@floruntime/node";
+import { fakeServer, oneRecord, refusal, until } from "./fake_worker_server.js";
+
+// The server's texts for a stream read waiting on its disk.
+const DISK_TEXTS = [
+  "unavailable: the stream's records are being read from disk — retry",
+  "unavailable: the stream's records are being read from disk and weren't back in time — retry",
+  "unavailable: the shard's cache of records read from disk is full of ones not yet served — retry",
+  "unavailable: the stream's records haven't reached the durable log yet — retry",
+];
+
+let close: (() => void) | undefined;
+afterEach(() => close?.());
+
+/** The group and consumer a group read names: the first two u16-prefixed strings of its value. */
+function groupAndConsumer(payload: Buffer): string {
+  let o = 2 + payload.readUInt16LE(0); // namespace
+  o += 2 + payload.readUInt16LE(o); // key (stream)
+  o += 4; // value length
+  const g = payload.readUInt16LE(o);
+  const group = payload.subarray(o + 2, o + 2 + g).toString();
+  o += 2 + g;
+  const c = payload.readUInt16LE(o);
+  return `${group}/${payload.subarray(o + 2, o + 2 + c).toString()}`;
+}
+
+describe("a group read refused unavailable, not run", () => {
+  it("is read again by a StreamWorker, the same group and consumer, without warning, until the records come", async () => {
+    const srv = await fakeServer((op, nth) => {
+      if (op !== OpCode.StreamGroupRead) return undefined;
+      if (nth < DISK_TEXTS.length) return refusal(StatusCode.Unavailable, Reason.Unclassified, DISK_TEXTS[nth]!);
+      return nth === DISK_TEXTS.length ? { data: oneRecord() } : "park";
+    });
+    close = srv.close;
+    const warned: string[] = [];
+    const errors: string[] = [];
+    const debug: string[] = [];
+    const logger = { debug: (m: string) => void debug.push(m), warn: (m: string) => void warned.push(m), error: (m: string) => void errors.push(m) };
+    let handled = 0;
+    // No client retries, so every refusal reaches the worker.
+    const w = new StreamWorker(srv.endpoint, { stream: "s", group: "g1", consumer: "c1", blockMs: 30000, logger, retry: { maxAttempts: 1 } }, async () => {
+      handled++;
+    });
+    const done = w.start();
+    const started = Date.now();
+    await until(() => handled === 1, 5000);
+    const took = Date.now() - started;
+    w.stop();
+    srv.close();
+    await done;
+    expect(handled).toBe(1);
+    // 50 ms doubling: four waits of at most 50, 100, 200, 400 ms.
+    expect(took).toBeLessThan(1500);
+    const reads = srv.seen.filter((s) => s.op === OpCode.StreamGroupRead);
+    expect(reads.length).toBeGreaterThanOrEqual(DISK_TEXTS.length + 1);
+    for (const r of reads) expect(groupAndConsumer(r.payload)).toBe("g1/c1");
+    expect([...warned, ...errors].filter((m) => m.includes("GroupRead"))).toEqual([]);
+    expect(debug.filter((m) => m.startsWith("GroupRead not ready"))).toHaveLength(DISK_TEXTS.length);
+  });
+
+  it("is retried by the client, and once its retries run out, thrown as UnavailableError with ran no", async () => {
+    const srv = await fakeServer((op) => (op === OpCode.StreamRead ? refusal(StatusCode.Unavailable, Reason.Unclassified, DISK_TEXTS[0]!) : undefined));
+    close = srv.close;
+    const client = new FloClient(srv.endpoint, { retry: { maxAttempts: 3, initialBackoffMs: 1, maxBackoffMs: 2 } });
+    await client.connect();
+    try {
+      const err = await client.stream.read("s").catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnavailableError);
+      expect(err).toMatchObject({ status: 12, serverMessage: DISK_TEXTS[0] });
+      expect(srv.ops().filter((o) => o === OpCode.StreamRead)).toHaveLength(3);
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe("stream record tier", () => {
+  // [count:u32]([seq:u64][ts:i64][tier:u8][partition:u32][key_present:u8][payload_len:u32][payload][header_count:u32])*
+  function withTier(tier: number): Uint8Array {
+    const buf = oneRecord();
+    buf[20] = tier;
+    return buf;
+  }
+
+  it("reads the server's tiers, 0 hot, 1 warm, 2 disk, and a code it doesn't know as Unknown", () => {
+    expect([0, 1, 2, 3, 200].map((t) => parseStreamReadResponse(withTier(t)).records[0]!.tier)).toEqual([
+      StorageTier.Hot,
+      StorageTier.Warm,
+      StorageTier.Disk,
+      StorageTier.Unknown,
+      StorageTier.Unknown,
+    ]);
+  });
+});

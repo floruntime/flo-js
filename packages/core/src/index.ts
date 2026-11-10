@@ -44,6 +44,10 @@ export {
   // Queue types (for Node.js backend use)
   type Message,
   type DequeueResult,
+  type QueueDelivery,
+  QueueRefusal,
+  type QueueReportResult,
+  type QueueTouchResult,
   // Stream types (for real-time applications)
   StorageTier,
   StreamID,
@@ -75,8 +79,8 @@ export {
   // Queue Option types (for Node.js backend use)
   type EnqueueOptions,
   type DequeueOptions,
-  type AckOptions,
-  type NackOptions,
+  type QueueReportOptions,
+  type QueueFailOptions,
   type DLQListOptions,
   type DLQListResult,
   type DeadLetter,
@@ -228,7 +232,6 @@ export {
   serializeRequest,
   parseResponseHeader,
   parseRawResponse,
-  parseDequeueResponse,
   parseEnqueueResponse,
   serializeSeqs,
 } from "./wire.js";
@@ -266,6 +269,15 @@ export {
   decodePeekAnswer,
   decodeGroupListAnswer,
   decodeGroupMembersAnswer,
+  MAX_QUEUE_BATCH,
+  MAX_CONSUMER,
+  encodeDequeueBody,
+  decodeDequeueAnswer,
+  encodeQueueReportBody,
+  encodeQueueFailBody,
+  decodeQueueReportAnswer,
+  decodeQueueTouchAnswer,
+  truncateUtf8,
   decodeWorkerListAnswer,
   decodeWorkerInfoAnswer,
   encodeWorkerListBody,
@@ -289,6 +301,7 @@ export {
   parseStreamReadResponse,
   parseStreamAppendResponse,
   parseStreamInfoResponse,
+  storageTier,
   type StreamRequestSender,
 } from "./streams.js";
 export {

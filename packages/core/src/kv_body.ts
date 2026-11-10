@@ -39,6 +39,12 @@ import {
   type StreamGroupMembersResult,
   type TaskAssignment,
   type TaskDelivery,
+  type DequeueResult,
+  type Message,
+  type QueueDelivery,
+  type QueueRefusal,
+  type QueueReportResult,
+  type QueueTouchResult,
 } from "./types.js";
 
 /** The longest routing key; its length prefix is a u16. */
@@ -98,6 +104,10 @@ const TABLE_OPS: ReadonlySet<OpCode> = new Set([
   OpCode.WorkerList,
   OpCode.WorkerInfo,
   OpCode.QueuePeek,
+  OpCode.QueueDequeue,
+  OpCode.QueueComplete,
+  OpCode.QueueFail,
+  OpCode.QueueTouch,
   OpCode.TSInfo,
   OpCode.StreamGroupList,
   OpCode.StreamGroupMembers,
@@ -950,4 +960,140 @@ export function decodeGroupMembersAnswer(data: Uint8Array): StreamGroupMembersRe
   const more = r.bool();
   r.end();
   return { members, more };
+}
+
+// ── Queue leases ────────────────────────────────────────────────────────
+
+/** The most messages one dequeue takes, and one report names. */
+export const MAX_QUEUE_BATCH = 100;
+/** The longest consumer id. */
+export const MAX_CONSUMER = 4082;
+/** The longest error a queue fail carries. */
+export const MAX_QUEUE_ERROR = 1024;
+/** A queue lease's bounds. */
+export const MIN_QUEUE_LEASE_MS = 5000;
+export const MAX_QUEUE_LEASE_MS = 43_200_000;
+
+function consumerBytes(consumer: string): Uint8Array {
+  const b = textEncoder.encode(consumer);
+  checkLength("consumer", b, MAX_CONSUMER);
+  return b;
+}
+
+/** queue.dequeue's request: consumer, count, lease_ms, block_ms, ack. */
+export function encodeDequeueBody(count: number, opts?: { consumer?: string; leaseMs?: number; blockMs?: number; ack?: boolean }): Uint8Array {
+  checkLimit("count", count, MAX_QUEUE_BATCH);
+  const leaseMs = opts?.leaseMs;
+  if (leaseMs !== undefined && (!Number.isInteger(leaseMs) || leaseMs < MIN_QUEUE_LEASE_MS || leaseMs > MAX_QUEUE_LEASE_MS)) {
+    throw new FloError(`flo: leaseMs must be a whole number of ms from ${MIN_QUEUE_LEASE_MS} to ${MAX_QUEUE_LEASE_MS}, got ${leaseMs}`);
+  }
+  const blockMs = opts?.blockMs ?? 0;
+  if (!Number.isInteger(blockMs) || blockMs < 0) throw new FloError(`flo: blockMs must be a whole number of ms from 0 to ${MAX_WAIT_MS}, got ${blockMs}`);
+  if (blockMs > MAX_WAIT_MS) throw new BlockTooLongError(blockMs);
+  const w = new BodyWriter();
+  w.u8(1);
+  w.bytes16(consumerBytes(opts?.consumer ?? ""));
+  w.u8(1);
+  w.u32(count);
+  w.optU64(leaseMs === undefined ? undefined : BigInt(leaseMs));
+  w.u8(1);
+  w.u64(BigInt(blockMs));
+  w.u8(1);
+  w.u8(opts?.ack ? 1 : 0);
+  return w.build();
+}
+
+/** queue.dequeue's answer: the messages, the delivery's token, the lease's expiry. */
+export function decodeDequeueAnswer(data: Uint8Array, consumer: string): DequeueResult {
+  const r = new AnswerReader(data);
+  const messages: Message[] = [];
+  for (let n = r.u8(); n > 0; n--) {
+    const seq = r.u64();
+    const priority = r.u32();
+    const deliveries = r.u32();
+    const enqueuedAtMs = r.i64();
+    const payload = r.bytes32();
+    messages.push({ seq, payload, enqueuedAtMs, deliveries, priority });
+  }
+  const term = r.u64();
+  const index = r.u64();
+  const expiresAtMs = r.i64();
+  r.end();
+  return { consumer, term, index, messages, expiresAtMs };
+}
+
+/** The fields every queue report starts with: consumer, term, index, messages. */
+function writeQueueDelivery(w: BodyWriter, d: QueueDelivery): void {
+  if (d.messages.length === 0 || d.messages.length > MAX_QUEUE_BATCH) {
+    throw new FloError(`flo: a report names 1 to ${MAX_QUEUE_BATCH} messages, got ${d.messages.length}`);
+  }
+  checkU64("term", d.term);
+  checkU64("index", d.index);
+  w.u8(1);
+  w.bytes16(consumerBytes(d.consumer));
+  w.u64(d.term);
+  w.u64(d.index);
+  w.u8(d.messages.length);
+  for (const m of d.messages) {
+    checkU64("seq", m.seq);
+    if (!Number.isInteger(m.deliveries) || m.deliveries < 0 || m.deliveries > 0xffffffff) throw new FloError(`flo: deliveries must fit a u32, got ${m.deliveries}`);
+    w.u64(m.seq);
+    w.u32(m.deliveries);
+  }
+}
+
+/** queue.complete's and queue.touch's request: the delivery alone. */
+export function encodeQueueReportBody(d: QueueDelivery): Uint8Array {
+  const w = new BodyWriter();
+  writeQueueDelivery(w, d);
+  return w.build();
+}
+
+/** queue.fail's request: the delivery, delay_ms, dead, error (cut to 1024 bytes). */
+export function encodeQueueFailBody(d: QueueDelivery, opts?: { delayMs?: number; dead?: boolean; error?: string }): Uint8Array {
+  const delayMs = opts?.delayMs ?? 0;
+  if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > MAX_DELAY_MS) {
+    throw new FloError(`flo: delayMs must be a whole number of ms from 0 to ${MAX_DELAY_MS}, got ${delayMs}`);
+  }
+  const w = new BodyWriter();
+  writeQueueDelivery(w, d);
+  w.u8(1);
+  w.u64(BigInt(delayMs));
+  w.u8(1);
+  w.u8(opts?.dead ? 1 : 0);
+  w.u8(1);
+  w.bytes16(truncateUtf8(textEncoder.encode(opts?.error ?? ""), MAX_QUEUE_ERROR));
+  return w.build();
+}
+
+const QUEUE_REFUSALS = 6; // gone, delivered_again, other_holder, expired, released, not_held
+
+function readRefused(r: AnswerReader): QueueReportResult["refused"] {
+  const out: QueueReportResult["refused"] = [];
+  for (let n = r.u8(); n > 0; n--) {
+    const seq = r.u64();
+    const why = r.u8();
+    if (why >= QUEUE_REFUSALS) throw new IncompleteResponseError(`queue refusal ${why} is not one this client knows`);
+    out.push({ seq, why: why as QueueRefusal, reason: utf8(r.bytes8()) });
+  }
+  return out;
+}
+
+/** queue.complete's and queue.fail's answer: applied, then each message refused and why. */
+export function decodeQueueReportAnswer(data: Uint8Array): QueueReportResult {
+  const r = new AnswerReader(data);
+  const applied = r.u32();
+  const refused = readRefused(r);
+  r.end();
+  return { applied, refused };
+}
+
+/** queue.touch's answer: the lease's expiry, applied, then each message refused. */
+export function decodeQueueTouchAnswer(data: Uint8Array): QueueTouchResult {
+  const r = new AnswerReader(data);
+  const expiresAtMs = r.i64();
+  const applied = r.u32();
+  const refused = readRefused(r);
+  r.end();
+  return { expiresAtMs, applied, refused };
 }

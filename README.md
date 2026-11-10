@@ -45,11 +45,10 @@ const seq = await client.queue.enqueue(
   encoder.encode(JSON.stringify({ task: "process" }))
 );
 
-const result = await client.queue.dequeue("tasks", 10);
-for (const msg of result.messages) {
-  console.log(decoder.decode(msg.payload));
-  await client.queue.ack("tasks", [msg.seq]);
-}
+// A dequeue leases its messages; complete them within the lease.
+const taken = await client.queue.dequeue("tasks", 10, { consumer: "worker-1" });
+for (const msg of taken.messages) console.log(decoder.decode(msg.payload));
+if (taken.messages.length > 0) await client.queue.complete("tasks", taken);
 
 await client.close();
 ```
@@ -94,12 +93,13 @@ transaction, a condition, `casVersion` or `incr` conflict is refused at
 `commit`, not at the op.
 
 Every KV read result (`get`, `jsonGet`, each `mget` entry, `scan`,
-`history`, `exists`) carries `stale`. It is set when a halted shard
-answered: the read succeeded, served from the shard's state just before the
-entry it halted at, and nothing written since. It is not an error. A key
-such a shard didn't find is not reported as absent: `get` and `jsonGet`
-throw `StaleNotFoundError` (a `NotFoundError` with `stale` true), since the
-key was absent only as of the halt. Only KV reads carry `stale` for now:
+`history`, `exists`) carries `stale`. It is set when the read was served
+from state that may be behind what was committed: a halted shard's, just
+before the entry it halted at, or a node whose reads are blocked, serving
+what it last applied. The read succeeded; it is not an error. A key such a
+read didn't find is not reported as absent: `get` and `jsonGet` throw
+`StaleNotFoundError` (a `NotFoundError` with `stale` true), since the key
+was absent only as of that state. Only KV reads carry `stale` for now:
 other reads (streams, queues) and the read-only client's `get` drop it.
 
 `history` returns one page at a time. To read every kept version:
@@ -177,9 +177,11 @@ server operator's settings. Past them an op is refused `TxnTooLarge`.
 | Method | Signature | Description |
 |--------|-----------|-------------|
 | `enqueue` | `enqueue(queue, payload, opts?) → Promise<bigint>` | Add message, returns seq |
-| `dequeue` | `dequeue(queue, count, opts?) → Promise<DequeueResult>` | Fetch messages |
-| `ack` | `ack(queue, seqs, opts?) → Promise<void>` | Acknowledge messages |
-| `nack` | `nack(queue, seqs, opts?) → Promise<void>` | Negative ack (retry or DLQ) |
+| `dequeue` | `dequeue(queue, count?, { consumer?, leaseMs?, blockMs?, ack? }?) → Promise<DequeueResult>` | Take up to `count` (1 to 100, default 1) ready messages, leased to `consumer` |
+| `complete` | `complete(queue, delivery, opts?) → Promise<QueueReportResult>` | Complete dequeued messages: they leave the queue |
+| `fail` | `fail(queue, delivery, { delayMs?, dead?, error? }?) → Promise<QueueReportResult>` | Fail them: ready again after `delayMs`, or dead once their attempts are spent (at once with `dead`) |
+| `touch` | `touch(queue, delivery, opts?) → Promise<QueueTouchResult>` | Keep them: extends the lease once half of it or less is left |
+| `purge` | `purge(queue, opts?) → Promise<number>` | Remove every message, ready, leased and dead; answers how many |
 | `peek` | `peek(queue, limit?, opts?) → Promise<PeekResult>` | The next ready messages (1 to 100, default 20), in dequeue order, without taking them; up to 4 KiB of each payload |
 | `dlqList` | `dlqList(queue, { limit?, after? }?) → Promise<DLQListResult>` | A page of dead letters, oldest first (up to 100); pass `lastSeq` as `after` while `hasMore` |
 | `dlqRequeue` | `dlqRequeue(queue, seqs, opts?) → Promise<void>` | Move DLQ messages back |
@@ -190,8 +192,15 @@ server operator's settings. Past them an op is refused `TxnTooLarge`.
 interface EnqueueOptions {
   namespace?: string;
   priority?: number;       // 0-255, lower is taken first; unset is 0, so it goes before any explicit priority
+  delayMs?: number;        // Ready after this long, at most 86400000 (a day)
 }
 ```
+
+A queue past its cap (messages or held bytes, counting ready, leased and
+dead), or a shard whose queues hold as many bytes as it may, refuses an
+enqueue as overloaded, not run. The client retries it as it does any such
+refusal (see Retries), then throws `OverloadedError`; consume or purge the
+queue.
 
 #### Dequeue Options
 
@@ -199,8 +208,23 @@ interface EnqueueOptions {
 interface DequeueOptions {
   namespace?: string;
   blockMs?: number;  // Wait for messages if queue empty (ms; 0 = don't wait, max 300000)
+  consumer?: string; // Who takes them; complete, fail and touch must name the same ("" when unset)
+  leaseMs?: number;  // How long they're held without a touch: 5000 to 43200000 (the server's 30 s when unset)
+  ack?: boolean;     // Complete them as they're taken: a one-shot consume
 }
 ```
+
+Queues are at-least-once. A dequeue leases its messages to `consumer`; it
+doesn't remove them. Complete each within its lease (or touch the lease to
+keep it), or it is delivered again with `deliveries` one higher. Pass the
+dequeue's result to `complete`, `fail` or `touch`, or it with `messages`
+narrowed: a report names the consumer, the delivery's term and index, and
+each message's seq and deliveries. Messages a report didn't apply to come
+back in `refused`, inside an ok answer, each with a `QueueRefusal`; for a
+complete, `Gone` means the message was completed already (a resent
+complete), so it is done. With `ack: true` a dequeue completes its messages
+as it takes them; if the leader fails in between, they come back once their
+lease runs out.
 
 ### Action Operations
 
@@ -418,7 +442,7 @@ try {
 | `TimeoutError` | Operation timed out |
 | `BlockTooLongError` | `blockMs` or `waitMs` over 300000, refused before sending |
 | `NotFoundError` | Resource not found |
-| `StaleNotFoundError` | A `NotFoundError` from `get` or `jsonGet` on a halted shard: the key was absent as of the halt; `stale` is true |
+| `StaleNotFoundError` | A `NotFoundError` from `get` or `jsonGet` served stale (a halted shard, or a node whose reads are blocked): the key was absent as of that state; `stale` is true |
 | `ConflictError` | CAS version mismatch, or a condition that didn't hold |
 | `StaleReportError` | A `ConflictError` (reason `StaleReport`) for an action complete, fail or touch whose delivery the run has moved on from; the message says how |
 | `BadRequestError` | Invalid request |
@@ -438,6 +462,15 @@ straight back. Two never come back to be retried: `unavailable` with reason
 `shard_halted` (an operator has to repair the shard, so resending is no
 use), and `outcome_pending` (the write is committed; resending it would
 write it twice, or halt the shard again).
+
+`unavailable` (not run) is routine: a stream read whose records are being
+read back from disk, or a leader not yet ready, is refused that way and
+answers once retried. The client's retries (about 350 ms by default) may not
+outlast a disk read; a `StreamWorker`'s group read refused so after them is
+read again, the same group and consumer, from 50 ms doubling to 1 s, logged
+at debug. Such a read claimed and delivered nothing, so the same read is
+safe to send again. Your own `stream.read` or `groupRead` throws
+`UnavailableError` once the client's retries run out: read again.
 
 Workers are different: registering, a `StreamWorker`'s group join and the
 poll loops are safe to repeat, so on `unavailable` with reason

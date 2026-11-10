@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `queue.complete`, `queue.fail` and `queue.touch` (0x182 to 0x184): reports on dequeued messages, each naming the dequeue's consumer, its term and index, and each message's seq and deliveries (`QueueDelivery`; a `DequeueResult` is one). Messages a report didn't apply to come back in `refused` with a `QueueRefusal`, inside an ok answer; for a complete, `Gone` means done. `fail` takes `delayMs`, `dead` and `error` (cut to 1024 bytes).
+- `queue.purge(queue)`: removes every message, answering how many.
+- `EnqueueOptions.delayMs` (`OptionTag.DelayMS`, 0x11): the message is ready after that long, at most a day.
+- `StorageTier.Disk` (2): a record read back from the log's segments. A tier code this SDK doesn't know reads as `StorageTier.Unknown`, not an error (`storageTier`).
+
 - `action.info(name)` (`ActionInfo`; `OpCode.ActionInfo`, 0x30f): an action's definition, its runs by status and completed runs' latencies; the counts are absent when `tooManyRuns` is set. An action that isn't registered throws `NotFoundError`.
 - `ActionRunStatus.outcome`: the outcome a completed run's worker named; absent for success.
 - `queue.peek(queue, limit?)` on the server's new op (0x180): the next ready messages in dequeue order, without taking them, as `{ messages, more }`; each message has its seq, priority, attempts, enqueue time, whole size and up to 4 KiB of payload. `limit` is 1 to 100, 20 by default.
@@ -41,6 +46,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Reason.StaleReport` (26): an action report for a delivery the run has moved on from is refused with it, as `StaleReportError`. The table hash moves with the server.
 
 ### Changed
+
+- **Breaking:** the table hash moves to `0x19075df8e1ed5f75` with the server (flo `5213836`).
+- **Breaking:** queues are at-least-once. `queue.dequeue(queue, count?, { consumer?, leaseMs?, blockMs?, ack? })` moves to 0x181 and leases what it takes: it returns `{ consumer, term, index, messages, expiresAtMs }`, and each message has `deliveries` (was `deliveryCount`). Complete each within its lease, or it is delivered again; `ack: true` completes them as they're taken. `count` defaults to 1.
+- A `StreamWorker` group read refused `unavailable` or `overloaded`, not run (records being read back from disk, or a leader not ready), is read again from 50 ms doubling to 1 s and logged at debug, not counted as a failed poll. Such a read claimed and delivered nothing.
+- An enqueue to a full queue, or to a shard whose queues hold as many bytes as they may, is refused overloaded, not run; the client retries it as any such refusal, then throws `OverloadedError`.
+- `stale` (KV reads, `StaleNotFoundError`, `RESPONSE_STALE`) is also set by a node whose reads are blocked, not only a halted shard.
 
 - **Breaking:** the table hash moves to `0x7eb599c24442118b` with the server (flo `e63add5`); a server built from an older table refuses this SDK's requests.
 - **Breaking:** action runs live in the server's log. `worker.awaitTask`, `complete`, `fail` and `touch` move to the server's new ops (0x30a to 0x30d) with typed bodies. A `TaskAssignment` is one delivery of a run: `runId`, `namespace`, `deliveries`, `term`, `index`, `action` (was `taskType`), `createdAtMs` (was `createdAt`), `attempt`, `leaseMs`, the caller, and `input` (was `payload`). `complete(workerId, task, result, { outcome? })`, `fail(workerId, task, error, { retry?, abandoned?, delayMs? })` and `touch(workerId, task)` take the task and echo its delivery; each goes to the run's namespace, keyed by the run id. `touch` takes no extend length and returns the lease's expiry: the server extends a lease only with half of it or less left. An unset outcome is now "" (success), not "success".
@@ -101,6 +112,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `kv.scan` reads the server's reply layout, `[count][entries][has_more:u8][cursor_len:u16][cursor]`; it parsed a header-first layout the server never sent.
 
 ### Removed
+
+- `queue.ack` and `queue.nack`, `AckOptions`, `NackOptions`, `parseDequeueResponse`, and the retired queue codes 0x171, 0x172 and 0x174: use `complete` and `fail`.
 
 - The old action report and await codes 0x306 to 0x309 and their hand-coded values (`serializeWorkerAwaitValue`, `serializeWorkerTouchValue`, `serializeWorkerCompleteValue`, `serializeWorkerFailValue`, `parseTaskAssignment`, `WorkerTouchOptions`), and the old queue peek, 0x17c, which answered nothing. `WorkerCompleteOptions` and `WorkerFailOptions` lose `namespace`: a report goes to its run's.
 

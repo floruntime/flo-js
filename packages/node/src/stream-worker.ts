@@ -29,6 +29,7 @@
  */
 
 import {
+  Backoff,
   Logger,
   ProcessKind,
   ServerError,
@@ -57,6 +58,10 @@ import {
   sendResult,
 } from "./reconnect.js";
 import crypto from "crypto";
+
+/** A group read refused as not ready (unavailable or overloaded, not run) is read again after 50 ms, doubling to 1 s. */
+const NOT_READY_INITIAL_MS = 50;
+const NOT_READY_MAX_MS = 1000;
 import os from "os";
 
 const textDecoder = new TextDecoder();
@@ -456,6 +461,7 @@ export class StreamWorker {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
     const halted = new HaltBackoff(this.logger);
+    const notReady = new Backoff(NOT_READY_INITIAL_MS, NOT_READY_MAX_MS);
     let unproven = false;
     while (!this.leaving()) {
       // The connection this iteration's poll goes on, to redial only it.
@@ -479,6 +485,7 @@ export class StreamWorker {
         });
         failed.reset();
         halted.reset();
+        notReady.reset();
         unproven = false;
 
         const empty = !result || result.records.length === 0;
@@ -521,6 +528,13 @@ export class StreamWorker {
           unproven = true;
         } else if (isOutcomePending(err)) {
           throw err;
+        } else if (isRefusedUnrun(err)) {
+          // Routine, not a failure: records being read back from disk, or a
+          // leader not ready yet. The read claimed and delivered nothing, so
+          // the same read again is safe.
+          const d = notReady.next();
+          this.log(`GroupRead not ready: ${(err as ServerError).serverMessage}; retrying in ${d}ms`);
+          await pause(d, this.leave.signal);
         } else if (!(await halted.waitIf(err, "GroupRead", this.leave.signal))) {
           const d = failed.next();
           this.log(`GroupRead error: ${err}, retrying in ${d}ms...`);
