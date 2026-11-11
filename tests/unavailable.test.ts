@@ -55,6 +55,11 @@ describe("a group read refused unavailable, not run", () => {
     const started = Date.now();
     await until(() => handled === 1, 5000);
     const took = Date.now() - started;
+    // The handler has run, but its ack goes out after it returns: wait for it
+    // to reach the server before closing that server, or the ack is dropped
+    // for want of one (the worker's documented end of a result once stopped).
+    await until(() => srv.ops().includes(OpCode.StreamGroupAck), 5000);
+    expect(srv.ops()).toContain(OpCode.StreamGroupAck);
     w.stop();
     srv.close();
     await done;
