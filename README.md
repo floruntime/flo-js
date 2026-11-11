@@ -466,8 +466,10 @@ write it twice, or halt the shard again).
 read back from disk, or a leader not yet ready, is refused that way and
 answers once retried. The client's retries (about 350 ms by default) may not
 outlast a disk read; a `StreamWorker`'s group read refused so after them is
-read again, the same group and consumer, from 50 ms doubling to 1 s, logged
-at debug. Such a read claimed and delivered nothing, so the same read is
+read again, the same group and consumer, from 50 ms doubling to 5 s. The
+first refusal of a run is logged at warn with the server's message, which
+says if the shard is damaged or offline, then at most every 30 s while the
+refusals go on. Such a read claimed and delivered nothing, so the same read is
 safe to send again. Your own `stream.read` or `groupRead` throws
 `UnavailableError` once the client's retries run out: read again.
 

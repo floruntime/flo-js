@@ -377,7 +377,7 @@ describe.skipIf(!endpoint)("live", () => {
     const late = await client.queue.complete("jobs", first);
     expect(late.applied).toBe(0);
     expect(late.refused).toHaveLength(1);
-    expect(late.refused[0]!.why).not.toBe(QueueRefusal.Gone);
+    expect(late.refused[0]).toMatchObject({ seq: first.messages[0]!.seq, why: QueueRefusal.DeliveredAgain });
     expect(await client.queue.complete("jobs", again)).toMatchObject({ applied: 1 });
   }, 30000);
 

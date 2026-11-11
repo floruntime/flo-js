@@ -49,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** the table hash moves to `0x19075df8e1ed5f75` with the server (flo `5213836`).
 - **Breaking:** queues are at-least-once. `queue.dequeue(queue, count?, { consumer?, leaseMs?, blockMs?, ack? })` moves to 0x181 and leases what it takes: it returns `{ consumer, term, index, messages, expiresAtMs }`, and each message has `deliveries` (was `deliveryCount`). Complete each within its lease, or it is delivered again; `ack: true` completes them as they're taken. `count` defaults to 1.
-- A `StreamWorker` group read refused `unavailable` or `overloaded`, not run (records being read back from disk, or a leader not ready), is read again from 50 ms doubling to 1 s and logged at debug, not counted as a failed poll. Such a read claimed and delivered nothing.
+- A `StreamWorker` group read refused `unavailable` or `overloaded`, not run (records being read back from disk, or a leader not ready), is read again from 50 ms doubling to 5 s, not counted as a failed poll. Such a read claimed and delivered nothing. The first refusal of a run is logged at warn with the server's message (which says if the shard is damaged or offline), then at most every 30 s while it goes on.
 - An enqueue to a full queue, or to a shard whose queues hold as many bytes as they may, is refused overloaded, not run; the client retries it as any such refusal, then throws `OverloadedError`.
 - `stale` (KV reads, `StaleNotFoundError`, `RESPONSE_STALE`) is also set by a node whose reads are blocked, not only a halted shard.
 

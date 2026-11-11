@@ -29,7 +29,6 @@
  */
 
 import {
-  Backoff,
   Logger,
   ProcessKind,
   ServerError,
@@ -47,7 +46,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff, HaltBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { EmptyPollBackoff, HaltBackoff, MAX_TIMER_MS, NotReadyWarnings, newNotReadyBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
 import {
   DRAIN_NOTICE_INTERVAL_MS,
   closedSince,
@@ -58,10 +57,6 @@ import {
   sendResult,
 } from "./reconnect.js";
 import crypto from "crypto";
-
-/** A group read refused as not ready (unavailable or overloaded, not run) is read again after 50 ms, doubling to 1 s. */
-const NOT_READY_INITIAL_MS = 50;
-const NOT_READY_MAX_MS = 1000;
 import os from "os";
 
 const textDecoder = new TextDecoder();
@@ -461,7 +456,8 @@ export class StreamWorker {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
     const halted = new HaltBackoff(this.logger);
-    const notReady = new Backoff(NOT_READY_INITIAL_MS, NOT_READY_MAX_MS);
+    const notReady = newNotReadyBackoff();
+    const notReadyWarnings = new NotReadyWarnings();
     let unproven = false;
     while (!this.leaving()) {
       // The connection this iteration's poll goes on, to redial only it.
@@ -486,6 +482,7 @@ export class StreamWorker {
         failed.reset();
         halted.reset();
         notReady.reset();
+        notReadyWarnings.reset();
         unproven = false;
 
         const empty = !result || result.records.length === 0;
@@ -531,9 +528,13 @@ export class StreamWorker {
         } else if (isRefusedUnrun(err)) {
           // Routine, not a failure: records being read back from disk, or a
           // leader not ready yet. The read claimed and delivered nothing, so
-          // the same read again is safe.
+          // the same read again is safe. A damaged or offline shard refuses
+          // the same way and won't answer soon: the server's message says
+          // which, so the first of a run is a warning, then one every 30 s.
           const d = notReady.next();
-          this.log(`GroupRead not ready: ${(err as ServerError).serverMessage}; retrying in ${d}ms`);
+          const msg = `GroupRead on stream ${this.config.stream} not ready: ${(err as ServerError).serverMessage}; retrying in ${d}ms`;
+          if (notReadyWarnings.due()) this.logger.warn(msg);
+          else this.log(msg);
           await pause(d, this.leave.signal);
         } else if (!(await halted.waitIf(err, "GroupRead", this.leave.signal))) {
           const d = failed.next();
