@@ -19,6 +19,7 @@ import {
   NoNamespaceError,
   NotFoundError,
   ProcessKind,
+  QueueRefusal,
   Ran,
   Reason,
   ServerError,
@@ -353,14 +354,55 @@ describe.skipIf(!endpoint)("live", () => {
     await client.stream.delete("doomed");
   });
 
-  it("enqueues, dequeues and acks a message", async () => {
+  it("leases what a dequeue takes until it is completed: completed, it is gone; let go, it comes back", async () => {
     const { client } = await liveClient();
     await client.queue.enqueue("jobs", encoder.encode("job-1"));
-    const res = await client.queue.dequeue("jobs", 1);
-    expect(res.messages.map((m) => decoder.decode(m.payload))).toEqual(["job-1"]);
-    await client.queue.ack("jobs", [res.messages[0]!.seq]);
-    expect((await client.queue.peek("jobs", 10)).messages).toHaveLength(0);
-  });
+    const taken = await client.queue.dequeue("jobs", 1, { consumer: "c1", leaseMs: 5000 });
+    expect(taken.messages.map((m) => [decoder.decode(m.payload), m.deliveries])).toEqual([["job-1", 1]]);
+    expect(taken.expiresAtMs).toBeGreaterThan(BigInt(Date.now()));
+    // Leased, not removed: nothing else is ready.
+    expect((await client.queue.dequeue("jobs", 1, { consumer: "c2" })).messages).toHaveLength(0);
+    expect(await client.queue.complete("jobs", taken)).toEqual({ applied: 1, refused: [] });
+    // A resent complete: the message is gone, so done.
+    expect((await client.queue.complete("jobs", taken)).refused.map((r) => r.why)).toEqual([QueueRefusal.Gone]);
+    expect((await client.queue.dequeue("jobs", 1, { consumer: "c1" })).messages).toHaveLength(0);
+
+    // A lease left to run out is delivered again, deliveries 2.
+    await client.queue.enqueue("jobs", encoder.encode("job-2"));
+    const first = await client.queue.dequeue("jobs", 1, { consumer: "c1", leaseMs: 5000 });
+    expect(first.messages[0]!.deliveries).toBe(1);
+    const again = await client.queue.dequeue("jobs", 1, { consumer: "c2", blockMs: 15000 });
+    expect(again.messages.map((m) => [decoder.decode(m.payload), m.deliveries])).toEqual([["job-2", 2]]);
+    // The first consumer's lease is over: its complete is refused, inside an ok answer.
+    const late = await client.queue.complete("jobs", first);
+    expect(late.applied).toBe(0);
+    expect(late.refused).toHaveLength(1);
+    expect(late.refused[0]).toMatchObject({ seq: first.messages[0]!.seq, why: QueueRefusal.DeliveredAgain });
+    expect(await client.queue.complete("jobs", again)).toMatchObject({ applied: 1 });
+  }, 30000);
+
+  it("fails a dequeued message back to ready, touches a lease, dequeues with ack, delays and purges", async () => {
+    const { client } = await liveClient();
+    await client.queue.enqueue("jobs", encoder.encode("x"));
+    const taken = await client.queue.dequeue("jobs", 1, { consumer: "c1" });
+    const touched = await client.queue.touch("jobs", taken);
+    expect(touched).toMatchObject({ applied: 1, refused: [] });
+    expect(touched.expiresAtMs).toBe(taken.expiresAtMs);
+    expect(await client.queue.fail("jobs", taken, { error: "boom" })).toEqual({ applied: 1, refused: [] });
+    const back = await client.queue.dequeue("jobs", 1, { consumer: "c1", ack: true });
+    expect(back.messages.map((m) => m.deliveries)).toEqual([2]);
+    expect(back.expiresAtMs).toBe(0n);
+    expect((await client.queue.dequeue("jobs", 1, { consumer: "c1" })).messages).toHaveLength(0);
+
+    await client.queue.enqueue("jobs", encoder.encode("later"), { delayMs: 1500 });
+    expect((await client.queue.dequeue("jobs", 1)).messages).toHaveLength(0);
+    const later = await client.queue.dequeue("jobs", 1, { blockMs: 5000, ack: true });
+    expect(later.messages.map((m) => decoder.decode(m.payload))).toEqual(["later"]);
+
+    for (let i = 0; i < 3; i++) await client.queue.enqueue("jobs", encoder.encode(`${i}`));
+    expect(await client.queue.purge("jobs")).toBe(3);
+    expect((await client.queue.peek("jobs")).messages).toHaveLength(0);
+  }, 30000);
 
   it("peeks a queue's next messages in dequeue order without taking them, and pages its dead letters", async () => {
     const { client } = await liveClient();

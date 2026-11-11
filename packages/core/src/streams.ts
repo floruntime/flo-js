@@ -47,6 +47,13 @@ export interface StreamRequestSender {
 
 const textEncoder = new TextEncoder();
 
+const TIERS: readonly StorageTier[] = [StorageTier.Hot, StorageTier.Warm, StorageTier.Disk];
+
+/** A record's tier byte; one this SDK doesn't know is StorageTier.Unknown, not an error. */
+export function storageTier(code: number): StorageTier {
+  return TIERS[code] ?? StorageTier.Unknown;
+}
+
 /**
  * Parse stream read response into records.
  *
@@ -79,7 +86,7 @@ export function parseStreamReadResponse(data: Uint8Array): StreamReadResult {
 
     // tier (u8)
     if (offset + 1 > data.length) break;
-    const tier = data[offset] as StorageTier;
+    const tier = storageTier(data[offset]!);
     offset += 1;
 
     // partition (u32) — skip

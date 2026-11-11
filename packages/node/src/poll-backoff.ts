@@ -103,3 +103,41 @@ export class HaltBackoff {
     this.backoff.reset();
   }
 }
+
+/**
+ * A worker's read refused as not ready (unavailable or overloaded, not
+ * run) is read again after 50 ms, doubling to 5 s. Usually it is records
+ * being read back from disk; a damaged or offline shard refuses the same
+ * way at once, so the reads slow to one per 5 s.
+ */
+export const NOT_READY_INITIAL_MS = 50;
+export const NOT_READY_MAX_MS = 5000;
+
+export function newNotReadyBackoff(): Backoff {
+  return new Backoff(NOT_READY_INITIAL_MS, NOT_READY_MAX_MS);
+}
+
+/** How often a run of not-ready refusals is logged at warn. */
+export const NOT_READY_WARN_EVERY_MS = 30_000;
+
+/**
+ * Whether to warn of a not-ready refusal: the first of a run, then at most
+ * once per NOT_READY_WARN_EVERY_MS while the run goes on. A read that goes
+ * through ends the run (`reset`).
+ */
+export class NotReadyWarnings {
+  private lastWarnAt: number | null = null;
+
+  constructor(private readonly now: () => number = () => performance.now()) {}
+
+  due(): boolean {
+    const t = this.now();
+    if (this.lastWarnAt !== null && t - this.lastWarnAt < NOT_READY_WARN_EVERY_MS) return false;
+    this.lastWarnAt = t;
+    return true;
+  }
+
+  reset(): void {
+    this.lastWarnAt = null;
+  }
+}

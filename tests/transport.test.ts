@@ -11,6 +11,7 @@ import {
   OptionTag,
   OptionsBuilder,
   encodeAwaitBody,
+  encodeDequeueBody,
   TimeoutError,
   BadRequestError,
   FloError,
@@ -37,7 +38,7 @@ const enc = new TextEncoder();
 function request(id: bigint, blockMs?: number): Uint8Array {
   const opts = new OptionsBuilder().addU32(OptionTag.Count, 1);
   if (blockMs !== undefined) opts.addU32(OptionTag.BlockMS, blockMs);
-  return serializeRequest(id, OpCode.QueueDequeue, enc.encode("ns"), enc.encode("q"), new Uint8Array(0), opts.build());
+  return serializeRequest(id, OpCode.StreamGroupRead, enc.encode("ns"), enc.encode("s"), new Uint8Array(0), opts.build());
 }
 
 /** A refusal's body as the server writes it: [reason:u16][ran:u8][message]. */
@@ -150,6 +151,14 @@ describe("requestBlockMs", () => {
     expect(requestBlockMs(watch)).toBe(1234);
   });
 
+  it("reads a queue dequeue's block_ms from its body, with or without a lease", () => {
+    const dequeue = (o: { blockMs?: number; leaseMs?: number }) =>
+      serializeRequest(1n, OpCode.QueueDequeue, enc.encode("ns"), enc.encode("q"), encodeDequeueBody(1, { consumer: "c1", ...o }), new Uint8Array(0));
+    expect(requestBlockMs(dequeue({}))).toBe(0);
+    expect(requestBlockMs(dequeue({ blockMs: 2500 }))).toBe(2500);
+    expect(requestBlockMs(dequeue({ blockMs: 2500, leaseMs: 60000 }))).toBe(2500);
+  });
+
   it("counts an await with no BlockMS as the server's 30000 default", () => {
     expect(requestBlockMs(awaitRequest(1n))).toBe(30000);
     expect(requestBlockMs(awaitRequest(1n, 0))).toBe(0);
@@ -159,7 +168,7 @@ describe("requestBlockMs", () => {
 
 describe("requestTakesItems", () => {
   it("is true for requests whose reply carries what they took", () => {
-    const op = (code: number) => serializeRequest(1n, code as OpCode, enc.encode("ns"), enc.encode("k"), new Uint8Array(0), new Uint8Array(0));
+    const op = (code: number) => serializeRequest(1n, code as OpCode, enc.encode("ns"), enc.encode("k"), code === OpCode.QueueDequeue ? encodeDequeueBody(1) : new Uint8Array(0), new Uint8Array(0));
     for (const code of [OpCode.QueueDequeue, OpCode.StreamGroupRead, OpCode.StreamGroupClaim, OpCode.ActionAwait]) {
       expect(requestTakesItems(op(code))).toBe(true);
     }

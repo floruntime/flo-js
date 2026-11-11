@@ -13,14 +13,12 @@ import {
   ValueTooLargeError,
 } from "./errors.js";
 import {
-  DequeueResult,
   HEADER_SIZE,
   MAGIC,
   MAX_BLOCK_MS,
   MAX_KEY_SIZE,
   MAX_NAMESPACE_SIZE,
   MAX_VALUE_SIZE,
-  type Message,
   OpCode,
   OptionTag,
   type RawResponse,
@@ -83,7 +81,8 @@ export function workerBlockMs(blockMs: number | undefined): number {
 
 /**
  * How long the server may hold a serialized request before answering: a
- * kv.get's wait_ms, an action await's block_ms, or its BlockMS option;
+ * kv.get's wait_ms, an action await's or queue dequeue's block_ms, or its
+ * BlockMS option;
  * else 0.
  * Transports add this to their timeout so a long poll is not cut off
  * client-side while the server is still waiting.
@@ -106,6 +105,15 @@ export function requestBlockMs(request: Uint8Array): number {
         if (request.length < off + 2) return 0;
         off += 2 + view.getUint16(off, true);
       }
+    } else if (op === OpCode.QueueDequeue) {
+      // consumer [present:u8][len:u16][..], count [present:u8][u32], lease_ms [present:u8]([u64])?,
+      // then block_ms [present:u8][u64], 0 when absent.
+      if (request.length < off + 3 || request[off] !== 1) return 0;
+      off += 3 + view.getUint16(off + 1, true) + 5;
+      if (request.length < off + 1) return 0;
+      off += request[off] === 1 ? 9 : 1;
+      if (request.length < off + 9 || request[off] !== 1) return 0;
+      return Number(view.getBigUint64(off + 1, true));
     } else if (op !== OpCode.KVGet) {
       return 0;
     }
@@ -383,57 +391,6 @@ export function parseRawResponse(
 }
 
 /**
- * Parse dequeue response data.
- */
-export function parseDequeueResponse(data: Uint8Array): DequeueResult {
-  if (data.length < 4) {
-    throw new IncompleteResponseError("dequeue response too short");
-  }
-
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  let offset = 0;
-
-  const count = view.getUint32(offset, true);
-  offset += 4;
-
-  // Each message: [seq:u64][payload_len:u32][payload]
-  //               [enqueued_at_ms:i64][delivery_count:u32][priority:u8]
-  const messages: Message[] = [];
-  for (let i = 0; i < count; i++) {
-    if (data.length < offset + 12) {
-      throw new IncompleteResponseError("dequeue response truncated at message");
-    }
-
-    const seq = view.getBigUint64(offset, true);
-    offset += 8;
-
-    const payloadLen = view.getUint32(offset, true);
-    offset += 4;
-
-    if (data.length < offset + payloadLen) {
-      throw new IncompleteResponseError(
-        "dequeue response truncated at payload"
-      );
-    }
-
-    const payload = data.slice(offset, offset + payloadLen);
-    offset += payloadLen;
-
-    if (data.length < offset + 13) {
-      throw new IncompleteResponseError("dequeue response truncated at message trailer");
-    }
-    const enqueuedAtMs = view.getBigInt64(offset, true);
-    const deliveryCount = view.getUint32(offset + 8, true);
-    const priority = view.getUint8(offset + 12);
-    offset += 13;
-
-    messages.push({ seq, payload, enqueuedAtMs, deliveryCount, priority });
-  }
-
-  return { messages };
-}
-
-/**
  * Parse enqueue response data.
  */
 export function parseEnqueueResponse(data: Uint8Array): bigint {
@@ -443,23 +400,6 @@ export function parseEnqueueResponse(data: Uint8Array): bigint {
 
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   return view.getBigUint64(0, true);
-}
-
-/**
- * Serialize sequence numbers for ack/nack.
- */
-export function serializeSeqs(seqs: bigint[]): Uint8Array {
-  const buf = new Uint8Array(4 + seqs.length * 8);
-  const view = new DataView(buf.buffer);
-
-  view.setUint32(0, seqs.length, true);
-  let offset = 4;
-  for (const seq of seqs) {
-    view.setBigUint64(offset, seq, true);
-    offset += 8;
-  }
-
-  return buf;
 }
 
 // ============================================================================

@@ -21,9 +21,7 @@ import {
   parseResponseHeader,
   parseRawResponse,
   RESPONSE_STALE,
-  parseDequeueResponse,
   parseEnqueueResponse,
-  serializeSeqs,
   IncompleteResponseError,
   decodeAwaitAnswer,
   encodeAwaitBody,
@@ -139,7 +137,7 @@ describe("Wire Protocol", () => {
 
       // Version, then the pinned table hash at 24-31
       expect(request[22]).toBe(VERSION);
-      expect(view.getBigUint64(24, true)).toBe(0x7eb599c24442118bn);
+      expect(view.getBigUint64(24, true)).toBe(0x19075df8e1ed5f75n);
     });
 
     it("should include namespace in payload", () => {
@@ -238,62 +236,6 @@ describe("Wire Protocol", () => {
     });
   });
 
-  describe("parseDequeueResponse", () => {
-    it("should parse empty dequeue response", () => {
-      const data = new Uint8Array(4);
-      const view = new DataView(data.buffer);
-      view.setUint32(0, 0, true); // count = 0
-
-      const result = parseDequeueResponse(data);
-      expect(result.messages).toEqual([]);
-    });
-
-    it("parses every message of a multi-message answer as the server writes it", () => {
-      // [seq:u64][payload_len:u32][payload][enqueued_at_ms:i64][delivery_count:u32][priority:u8]
-      const want = [
-        { seq: 42n, payload: "hi", enqueuedAtMs: 1700000000000n, deliveryCount: 1, priority: 0 },
-        { seq: 43n, payload: "two", enqueuedAtMs: 1700000000005n, deliveryCount: 2, priority: 7 },
-        { seq: 44n, payload: "", enqueuedAtMs: 1700000000009n, deliveryCount: 3, priority: 255 },
-      ];
-      const size = 4 + want.reduce((n, m) => n + 8 + 4 + m.payload.length + 13, 0);
-      const data = new Uint8Array(size);
-      const view = new DataView(data.buffer);
-      view.setUint32(0, want.length, true);
-      let at = 4;
-      for (const m of want) {
-        view.setBigUint64(at, m.seq, true);
-        view.setUint32(at + 8, m.payload.length, true);
-        data.set(new TextEncoder().encode(m.payload), at + 12);
-        at += 12 + m.payload.length;
-        view.setBigInt64(at, m.enqueuedAtMs, true);
-        view.setUint32(at + 8, m.deliveryCount, true);
-        view.setUint8(at + 12, m.priority);
-        at += 13;
-      }
-
-      const result = parseDequeueResponse(data);
-
-      expect(
-        result.messages.map((m) => ({
-          seq: m.seq,
-          payload: new TextDecoder().decode(m.payload),
-          enqueuedAtMs: m.enqueuedAtMs,
-          deliveryCount: m.deliveryCount,
-          priority: m.priority,
-        }))
-      ).toEqual(want);
-    });
-
-    it("refuses a message whose trailer is cut short", () => {
-      const data = new Uint8Array(4 + 12 + 1 + 12);
-      const view = new DataView(data.buffer);
-      view.setUint32(0, 1, true);
-      view.setBigUint64(4, 1n, true);
-      view.setUint32(12, 1, true);
-      expect(() => parseDequeueResponse(data)).toThrow(IncompleteResponseError);
-    });
-  });
-
   describe("parseEnqueueResponse", () => {
     it("should parse enqueue response", () => {
       const data = new Uint8Array(8);
@@ -302,25 +244,6 @@ describe("Wire Protocol", () => {
 
       const seq = parseEnqueueResponse(data);
       expect(seq).toBe(12345n);
-    });
-  });
-
-  describe("serializeSeqs", () => {
-    it("should serialize empty sequence list", () => {
-      const data = serializeSeqs([]);
-      const view = new DataView(data.buffer);
-      expect(view.getUint32(0, true)).toBe(0);
-      expect(data.length).toBe(4);
-    });
-
-    it("should serialize sequence list", () => {
-      const data = serializeSeqs([1n, 2n, 3n]);
-      const view = new DataView(data.buffer);
-
-      expect(view.getUint32(0, true)).toBe(3);
-      expect(view.getBigUint64(4, true)).toBe(1n);
-      expect(view.getBigUint64(12, true)).toBe(2n);
-      expect(view.getBigUint64(20, true)).toBe(3n);
     });
   });
 

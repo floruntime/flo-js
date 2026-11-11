@@ -2,20 +2,33 @@
  * Queue operations for Flo SDK.
  */
 
-import { createServerError, FloError } from "./errors.js";
-import { AnswerReader, decodePeekAnswer, encodePeekBody } from "./kv_body.js";
+import { createServerError, FloError, IncompleteResponseError } from "./errors.js";
 import {
-  type AckOptions,
+  AnswerReader,
+  decodeDequeueAnswer,
+  decodePeekAnswer,
+  decodeQueueReportAnswer,
+  decodeQueueTouchAnswer,
+  encodeDequeueBody,
+  encodePeekBody,
+  encodeQueueFailBody,
+  encodeQueueReportBody,
+  MAX_DELAY_MS,
+} from "./kv_body.js";
+import {
   type DequeueOptions,
   type DequeueResult,
   type DeadLetter,
   type DLQListOptions,
   type DLQListResult,
-  type DLQRequeueOptions,
   type EnqueueOptions,
-  type NackOptions,
   type PeekOptions,
   type PeekResult,
+  type QueueDelivery,
+  type QueueFailOptions,
+  type QueueReportOptions,
+  type QueueReportResult,
+  type QueueTouchResult,
   OpCode,
   OptionTag,
   type RawResponse,
@@ -23,9 +36,7 @@ import {
 } from "./types.js";
 import {
   OptionsBuilder,
-  parseDequeueResponse,
   parseEnqueueResponse,
-  serializeSeqs,
 } from "./wire.js";
 
 /**
@@ -52,8 +63,14 @@ export class QueueOperations {
   constructor(private readonly sender: RequestSender) {}
 
   /**
-   * Enqueue adds a message to a queue.
+   * Enqueue adds a message to a queue, ready at once or after `delayMs`.
    * Returns the sequence number of the enqueued message.
+   *
+   * A queue past its cap (messages or held bytes, ready, leased and dead),
+   * or a shard whose queues hold as many bytes as it may, refuses it as
+   * overloaded, not run. The client retries that as it retries any
+   * overloaded refusal (about 350 ms by default), then throws
+   * OverloadedError: consume or purge the queue.
    */
   async enqueue(
     queue: string,
@@ -67,6 +84,11 @@ export class QueueOperations {
     if (opts?.priority !== undefined && opts.priority !== 0) {
       builder.addU8(OptionTag.Priority, opts.priority);
     }
+    const delayMs = opts?.delayMs ?? 0;
+    if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > MAX_DELAY_MS) {
+      throw new FloError(`flo: delayMs must be a whole number of ms from 0 to ${MAX_DELAY_MS}, got ${delayMs}`);
+    }
+    if (delayMs > 0) builder.addU64(OptionTag.DelayMS, BigInt(delayMs));
 
     const resp = await this.sender.sendRequest(
       OpCode.QueueEnqueue,
@@ -84,85 +106,79 @@ export class QueueOperations {
   }
 
   /**
-   * Dequeue fetches messages from a queue.
+   * Take up to `count` (1 to 100) of the queue's next ready messages, leased
+   * to `consumer` for `leaseMs` (the server's 30 s when unset). A dequeue
+   * doesn't remove them: complete each within its lease, or fail it, or it
+   * is delivered again once the lease runs out, with `deliveries` one
+   * higher. Touch a lease to keep it. With `ack`, they are completed as
+   * they're taken. Waits up to `blockMs` when nothing is ready; an empty
+   * result has no messages.
    */
-  async dequeue(
-    queue: string,
-    count: number,
-    opts?: DequeueOptions
-  ): Promise<DequeueResult> {
+  async dequeue(queue: string, count = 1, opts?: DequeueOptions): Promise<DequeueResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const builder = new OptionsBuilder();
-    builder.addU32(OptionTag.Count, count);
-
-    if (opts?.blockMs !== undefined) {
-      builder.addU32(OptionTag.BlockMS, opts.blockMs);
-    }
-
-    const resp = await this.sender.sendRequest(
-      OpCode.QueueDequeue,
-      namespace,
-      textEncoder.encode(queue),
-      new Uint8Array(0),
-      builder.build()
-    );
-
+    const resp = await this.sender.sendRequest(OpCode.QueueDequeue, namespace, textEncoder.encode(queue), encodeDequeueBody(count, opts), new Uint8Array(0));
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
-
-    return parseDequeueResponse(resp.data);
+    return decodeDequeueAnswer(resp.data, opts?.consumer ?? "");
   }
 
   /**
-   * Ack acknowledges messages as successfully processed.
+   * Complete dequeued messages: they leave the queue. Pass the dequeue's
+   * result, or it with `messages` narrowed. Messages the report didn't
+   * apply to come back in `refused`, inside an ok answer; one refused
+   * `QueueRefusal.Gone` was completed already (a resent complete), so it is
+   * done.
    */
-  async ack(queue: string, seqs: bigint[], opts?: AckOptions): Promise<void> {
-    if (seqs.length === 0) {
-      return;
-    }
-
+  async complete(queue: string, delivery: QueueDelivery, opts?: QueueReportOptions): Promise<QueueReportResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-    const value = serializeSeqs(seqs);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.QueueComplete,
-      namespace,
-      textEncoder.encode(queue),
-      value,
-      new Uint8Array(0)
-    );
-
+    const resp = await this.sender.sendRequest(OpCode.QueueComplete, namespace, textEncoder.encode(queue), encodeQueueReportBody(delivery), new Uint8Array(0));
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
+    return decodeQueueReportAnswer(resp.data);
   }
 
   /**
-   * Nack negatively acknowledges messages. Queues are at-most-once today:
-   * a dequeue consumes its messages, so a nack doesn't redeliver them
-   * (tracked in floruntime/flo#179).
+   * Fail dequeued messages: ready again after `delayMs`, or dead-lettered
+   * once their attempts are spent, or at once with `dead`. Messages it
+   * didn't apply to come back in `refused`.
    */
-  async nack(queue: string, seqs: bigint[], opts?: NackOptions): Promise<void> {
-    if (seqs.length === 0) {
-      return;
-    }
-
+  async fail(queue: string, delivery: QueueDelivery, opts?: QueueFailOptions): Promise<QueueReportResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-    const value = serializeSeqs(seqs);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.QueueFail,
-      namespace,
-      textEncoder.encode(queue),
-      value,
-      new Uint8Array(0)
-    );
-
+    const resp = await this.sender.sendRequest(OpCode.QueueFail, namespace, textEncoder.encode(queue), encodeQueueFailBody(delivery, opts), new Uint8Array(0));
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
+    return decodeQueueReportAnswer(resp.data);
+  }
+
+  /**
+   * Keep dequeued messages: with half their lease or less left, it runs a
+   * full lease from now, up to 12 h from their dequeue; with more left,
+   * nothing changes. Touch at least every half lease.
+   */
+  async touch(queue: string, delivery: QueueDelivery, opts?: QueueReportOptions): Promise<QueueTouchResult> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+    const resp = await this.sender.sendRequest(OpCode.QueueTouch, namespace, textEncoder.encode(queue), encodeQueueReportBody(delivery), new Uint8Array(0));
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+    return decodeQueueTouchAnswer(resp.data);
+  }
+
+  /**
+   * Remove every message from the queue, ready, leased and dead. Returns
+   * how many it removed.
+   */
+  async purge(queue: string, opts?: QueueReportOptions): Promise<number> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+    const resp = await this.sender.sendRequest(OpCode.QueuePurge, namespace, textEncoder.encode(queue), new Uint8Array(0), new Uint8Array(0));
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+    if (resp.data.length !== 4) throw new IncompleteResponseError(`purge answer of ${resp.data.length} bytes`);
+    return new DataView(resp.data.buffer, resp.data.byteOffset, 4).getUint32(0, true);
   }
 
   /**
@@ -186,34 +202,6 @@ export class QueueOperations {
     }
 
     return decodeDlqListAnswer(resp.data);
-  }
-
-  /**
-   * DLQRequeue moves messages from DLQ back to the main queue.
-   */
-  async dlqRequeue(
-    queue: string,
-    seqs: bigint[],
-    opts?: DLQRequeueOptions
-  ): Promise<void> {
-    if (seqs.length === 0) {
-      return;
-    }
-
-    const namespace = this.sender.getNamespace(opts?.namespace);
-    const value = serializeSeqs(seqs);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.QueueDLQRequeue,
-      namespace,
-      textEncoder.encode(queue),
-      value,
-      new Uint8Array(0)
-    );
-
-    if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
-    }
   }
 
   /**

@@ -46,7 +46,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff, HaltBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { EmptyPollBackoff, HaltBackoff, MAX_TIMER_MS, NotReadyWarnings, newNotReadyBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
 import {
   DRAIN_NOTICE_INTERVAL_MS,
   closedSince,
@@ -456,6 +456,8 @@ export class StreamWorker {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
     const halted = new HaltBackoff(this.logger);
+    const notReady = newNotReadyBackoff();
+    const notReadyWarnings = new NotReadyWarnings();
     let unproven = false;
     while (!this.leaving()) {
       // The connection this iteration's poll goes on, to redial only it.
@@ -479,6 +481,8 @@ export class StreamWorker {
         });
         failed.reset();
         halted.reset();
+        notReady.reset();
+        notReadyWarnings.reset();
         unproven = false;
 
         const empty = !result || result.records.length === 0;
@@ -521,6 +525,17 @@ export class StreamWorker {
           unproven = true;
         } else if (isOutcomePending(err)) {
           throw err;
+        } else if (isRefusedUnrun(err)) {
+          // Routine, not a failure: records being read back from disk, or a
+          // leader not ready yet. The read claimed and delivered nothing, so
+          // the same read again is safe. A damaged or offline shard refuses
+          // the same way and won't answer soon: the server's message says
+          // which, so the first of a run is a warning, then one every 30 s.
+          const d = notReady.next();
+          const msg = `GroupRead on stream ${this.config.stream} not ready: ${(err as ServerError).serverMessage}; retrying in ${d}ms`;
+          if (notReadyWarnings.due()) this.logger.warn(msg);
+          else this.log(msg);
+          await pause(d, this.leave.signal);
         } else if (!(await halted.waitIf(err, "GroupRead", this.leave.signal))) {
           const d = failed.next();
           this.log(`GroupRead error: ${err}, retrying in ${d}ms...`);
