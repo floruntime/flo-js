@@ -9,24 +9,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { OpCode } from "@floruntime/core";
 import { ActionWorker, StreamWorker } from "@floruntime/node";
-import { type Answer, fakeServer, notFound, oneTask, quiet, sleep, until } from "./fake_worker_server.js";
+import { type Answer, fakeServer, groupRead, notFound, oneTask, quiet, sleep, until } from "./fake_worker_server.js";
 
 type Run = { stop: () => void; drain: () => Promise<void>; start: () => Promise<void> };
 
-/** A group read answer holding `n` records. */
-function records(n: number): Uint8Array {
-  const one = 8 + 8 + 1 + 4 + 1 + 4 + 1 + 4;
-  const buf = new Uint8Array(4 + n * one);
-  const view = new DataView(buf.buffer);
-  view.setUint32(0, n, true);
-  for (let i = 0; i < n; i++) {
-    const at = 4 + i * one;
-    view.setBigUint64(at, BigInt(i + 1), true); // sequence
-    view.setUint32(at + 22, 1, true); // payload_len
-    buf[at + 26] = 0x78;
-  }
-  return buf;
-}
+/** A group read answer holding `n` records, seqs 1 to n. */
+const records = (n: number) => groupRead({ term: 4n, index: 9n, records: Array.from({ length: n }, (_, i) => ({ seq: BigInt(i + 1), deliveries: 2 })) });
 
 // Each worker, its poll op and the work a first poll hands it; its handler
 // takes `handlerMs` and calls `onStart` first.
@@ -41,7 +29,7 @@ const workers: [string, number, Uint8Array, (endpoint: string, handlerMs: number
     return { stop: () => w.stop(), drain: () => w.drain(), start: () => w.start() };
   }],
   ["StreamWorker", OpCode.StreamGroupRead, records(1), (endpoint, handlerMs, onStart, concurrency = 2) => {
-    const w = new StreamWorker(endpoint, { stream: "s", blockMs: BLOCK_MS, heartbeatIntervalMs: 50, concurrency, logger: quiet }, async () => {
+    const w = new StreamWorker(endpoint, { stream: "s", ackTimeoutMs: 30000, blockMs: BLOCK_MS, heartbeatIntervalMs: 50, concurrency, logger: quiet }, async () => {
       onStart?.();
       await sleep(handlerMs);
     });
@@ -268,7 +256,7 @@ describe("StreamWorker", () => {
       w.stop();
       await done;
     }
-    expect(srv.ops().filter((o) => o === OpCode.StreamGroupJoin).length).toBe(2);
+    expect(srv.ops().filter((o) => o === OpCode.StreamGroupCreate).length).toBe(2);
   });
 
   it("a stop hands back the records of its last batch it hasn't started", async () => {
@@ -283,12 +271,14 @@ describe("StreamWorker", () => {
     expect(srv.ops().filter((o) => o === OpCode.StreamGroupAck).length).toBe(1);
     const nacks = srv.seen.filter((s) => s.op === OpCode.StreamGroupNack);
     expect(nacks.length).toBe(1);
-    // [group_len:u16][group][consumer_len:u16][consumer][count:u32]([ts:u64][seq:u64])*
+    // [group_len:u16][group][consumer_len:u16][consumer][term:u64][index:u64][count:u32]([ms:u64][seq:u64][deliveries:u32])*
     const v = valueOf(nacks[0]!.payload);
     let at = 2 + v.readUInt16LE(0);
     at += 2 + v.readUInt16LE(at);
+    expect([v.readBigUInt64LE(at), v.readBigUInt64LE(at + 8)]).toEqual([4n, 9n]); // the read's delivery
+    at += 16;
     const count = v.readUInt32LE(at);
-    const seqs = Array.from({ length: count }, (_, i) => v.readBigUInt64LE(at + 4 + i * 16 + 8));
-    expect(seqs).toEqual([2n, 3n]); // the two it never started
+    const sent = Array.from({ length: count }, (_, i) => [v.readBigUInt64LE(at + 4 + i * 20 + 8), v.readUInt32LE(at + 4 + i * 20 + 16)]);
+    expect(sent).toEqual([[2n, 2], [3n, 2]]); // the two it never started, with their deliveries
   });
 });

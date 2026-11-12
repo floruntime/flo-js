@@ -144,7 +144,7 @@ export function requestBlockMs(request: Uint8Array): number {
 
 /**
  * Whether a serialized request takes items its reply carries (a dequeued
- * message, a group read's records, a claimed or awaited task). If its reply
+ * message, a group read's records, an awaited task). If its reply
  * is dropped, those items stay leased to nobody until their lease runs out.
  *
  * @internal
@@ -155,7 +155,6 @@ export function requestTakesItems(request: Uint8Array): boolean {
   return (
     op === OpCode.QueueDequeue ||
     op === OpCode.StreamGroupRead ||
-    op === OpCode.StreamGroupClaim ||
     op === OpCode.ActionAwait
   );
 }

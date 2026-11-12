@@ -329,6 +329,21 @@ export class OutcomePendingError extends ServerError {
 }
 
 /**
+ * Error thrown when the node is at a limit an operator sets: `reason` says
+ * which (MemoryBudget, TooManyActions, TooManyWorkflowDefinitions,
+ * TooManyWorkflowRuns) and the message names it. It never ran. Terminal:
+ * retrying won't clear it until something is deleted, the node is given
+ * more room, or the setting is raised, so the client never retries it.
+ * It doesn't mean permanent.
+ */
+export class LimitError extends ServerError {
+  constructor(message?: string) {
+    super(StatusCode.Limit, message);
+    this.name = "LimitError";
+  }
+}
+
+/**
  * Error thrown when there is an internal server error. Not retryable: the
  * server also uses it for a write that committed but was not applied, which
  * must not be resent.
@@ -387,6 +402,8 @@ function serverErrorFor(status: StatusCode, message: string): ServerError {
       return new InternalError(message);
     case StatusCode.OutcomePending:
       return new OutcomePendingError(message);
+    case StatusCode.Limit:
+      return new LimitError(message);
     default:
       return new ServerError(status, message);
   }
@@ -460,4 +477,11 @@ export function isOutcomePending(err: unknown): err is OutcomePendingError {
  */
 export function isInternal(err: unknown): err is InternalError {
   return err instanceof ServerError && err.status === StatusCode.InternalError;
+}
+
+/**
+ * Check if an error is a LimitError.
+ */
+export function isLimit(err: unknown): err is LimitError {
+  return err instanceof ServerError && err.status === StatusCode.Limit;
 }

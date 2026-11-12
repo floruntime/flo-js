@@ -1,9 +1,11 @@
 /**
  * Flo KV Per-Shard Transactions
  *
- * A transaction is pinned to the shard of the routing key passed to `begin`.
- * Every op inside it carries that routing key and the transaction's id, so
- * its keys live on that shard.
+ * A transaction is pinned to the `{tag}` of the key passed to `begin`, or
+ * to the whole key when it has none. Every key inside it must route with
+ * that key, so give them all the same `{tag}` (`{user:1}:balance`,
+ * `{user:1}:visits`); one that routes elsewhere is refused with reason
+ * KeysNotColocated, not run.
  *
  * The server caps a transaction's ops and bytes, by default at 64 ops and
  * 256 KiB; both are operator settings. An op past them is refused
@@ -30,7 +32,7 @@ import {
   encodeExpireBody,
   encodeIncrBody,
   encodeTxnBody,
-  MAX_ROUTING_KEY,
+  MAX_MGET_KEY,
 } from "./kv_body.js";
 import {
   type GetResult,
@@ -83,10 +85,10 @@ async function send(sender: TxnRequestSender, op: OpCode, namespace: string, key
  * is called. Use with `try/finally` for safe cleanup:
  *
  * ```ts
- * const txn = await client.kv.begin("user:123");
+ * const txn = await client.kv.begin("{user:123}");
  * try {
- *   await txn.put("user:123:name", new TextEncoder().encode("Jane"));
- *   await txn.incr("user:123:visits", 1n);
+ *   await txn.put("{user:123}:name", new TextEncoder().encode("Jane"));
+ *   await txn.incr("{user:123}:visits", 1n);
  *   await txn.commit();
  * } catch (err) {
  *   await txn.rollback();
@@ -100,10 +102,9 @@ export class Transaction {
   constructor(
     private readonly sender: TxnRequestSender,
     private readonly namespace: string,
-    private readonly routingKey: string,
     /** Server-assigned transaction id. */
     public readonly id: bigint,
-    /** Partition hash this transaction is bound to. */
+    /** The routing hash this transaction is pinned to. */
     public readonly pinnedHash: bigint
   ) {}
 
@@ -114,13 +115,13 @@ export class Transaction {
   /** Buffer a put inside the transaction; it has no version until commit (0n). */
   async put(key: string, value: Uint8Array, opts?: PutOptions): Promise<PutResult> {
     this.checkAlive();
-    return kvSet(this.sender, this.namespace, key, value, { ...opts, routingKey: this.routingKey }, this.id);
+    return kvSet(this.sender, this.namespace, key, value, opts, this.id);
   }
 
   /** Read a key inside the transaction (sees buffered writes). */
   async get(key: string): Promise<GetResult | null> {
     this.checkAlive();
-    return kvGet(this.sender, this.namespace, key, { routingKey: this.routingKey }, this.id);
+    return kvGet(this.sender, this.namespace, key, undefined, this.id);
   }
 
   /**
@@ -129,7 +130,7 @@ export class Transaction {
    */
   async delete(key: string, opts?: { casVersion?: bigint }): Promise<void> {
     this.checkAlive();
-    const body = encodeDeleteBody({ casVersion: opts?.casVersion, routingKey: this.routingKey }, this.id);
+    const body = encodeDeleteBody({ casVersion: opts?.casVersion }, this.id);
     decodeDeleteAnswer((await send(this.sender, OpCode.KVDelete, this.namespace, key, body)).data);
   }
 
@@ -139,7 +140,7 @@ export class Transaction {
    */
   async incr(key: string, delta: bigint = 1n): Promise<void> {
     this.checkAlive();
-    const body = encodeIncrBody({ delta, routingKey: this.routingKey }, this.id);
+    const body = encodeIncrBody({ delta }, this.id);
     decodeIncrAnswer((await send(this.sender, OpCode.KVIncr, this.namespace, key, body)).data);
   }
 
@@ -149,14 +150,14 @@ export class Transaction {
    */
   async expire(key: string, ttlMs: bigint | number, opts?: { casVersion?: bigint }): Promise<void> {
     this.checkAlive();
-    const body = encodeExpireBody(ttlMs, { casVersion: opts?.casVersion, routingKey: this.routingKey }, this.id);
+    const body = encodeExpireBody(ttlMs, { casVersion: opts?.casVersion }, this.id);
     decodeEmptyAnswer((await send(this.sender, OpCode.KVExpire, this.namespace, key, body)).data);
   }
 
   /** Check key existence inside the transaction (sees buffered writes; version 0 for one). */
   async exists(key: string): Promise<KVExistsResult> {
     this.checkAlive();
-    const body = encodeExistsBody({ routingKey: this.routingKey }, this.id);
+    const body = encodeExistsBody(this.id);
     const resp = await send(this.sender, OpCode.KVExists, this.namespace, key, body);
     return { ...decodeExistsAnswer(resp.data), stale: resp.stale === true };
   }
@@ -212,16 +213,12 @@ export class Transaction {
   }
 }
 
-/** Open a new per-shard KV transaction; the routing key is the request's key. */
-export async function beginTxn(
-  sender: TxnRequestSender,
-  namespace: string,
-  routingKey: string
-): Promise<Transaction> {
-  const n = textEncoder.encode(routingKey).length;
-  if (n === 0) throw new FloError("flo: a transaction needs a routing key");
-  if (n > MAX_ROUTING_KEY) throw new FloError(`flo: routing key is ${n} bytes, at most ${MAX_ROUTING_KEY}`);
-  const resp = await send(sender, OpCode.KVBeginTxn, namespace, routingKey, new Uint8Array(0));
+/** Open a new per-shard KV transaction, pinned to `key`'s {tag} (the request's key). */
+export async function beginTxn(sender: TxnRequestSender, namespace: string, key: string): Promise<Transaction> {
+  const n = textEncoder.encode(key).length;
+  if (n === 0) throw new FloError("flo: a transaction is begun with a key");
+  if (n > MAX_MGET_KEY) throw new FloError(`flo: key is ${n} bytes, at most ${MAX_MGET_KEY}`);
+  const resp = await send(sender, OpCode.KVBeginTxn, namespace, key, new Uint8Array(0));
   const { txn, pinned } = decodeTxnBeginAnswer(resp.data);
-  return new Transaction(sender, namespace, routingKey, txn, pinned);
+  return new Transaction(sender, namespace, txn, pinned);
 }

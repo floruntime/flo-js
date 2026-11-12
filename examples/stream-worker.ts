@@ -2,7 +2,8 @@
  * Example: StreamWorker API usage with the Flo Node.js SDK
  *
  * This example demonstrates how to use the StreamWorker class to consume
- * stream records via consumer groups.
+ * stream records via a consumer group, which leases each record to one
+ * consumer until it is acked.
  *
  * Usage:
  *   npx tsx examples/stream-worker.ts

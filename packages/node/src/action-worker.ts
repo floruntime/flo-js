@@ -35,6 +35,7 @@ import {
   Reason,
   ServerError,
   isOutcomePending,
+  isRefusedUnrun,
   StatusCode,
   WorkerStatus,
   WorkerType,
@@ -46,7 +47,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff, HaltBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { EmptyPollBackoff, HaltBackoff, LimitBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
 import {
   DRAIN_NOTICE_INTERVAL_MS,
   closedSince,
@@ -454,8 +455,12 @@ export class ActionWorker {
    * this run. Running handlers finish and send their results before it
    * returns, and it may be called again afterwards.
    *
+   * start() fails with the limit error; a limit hit while running is
+   * logged and backed off.
+   *
    * @throws Error if no handlers are registered
    * @throws Error if connection to server fails
+   * @throws LimitError if registering is refused at a limit
    */
   async start(): Promise<void> {
     if (this.handlers.size === 0) {
@@ -529,18 +534,25 @@ export class ActionWorker {
   }
 
   /**
-   * Register, waiting out a halted shard; false if a stop or drain ended
-   * the wait.
+   * Register, waiting out a halted shard or a refusal that wasn't run
+   * (overloaded or unavailable, past the client's own retries); false if a
+   * stop or drain ended the wait. Any other refusal, a limit included, is
+   * thrown as its typed error: the caller decides.
    */
   private async registerThroughHalts(actionNames: string[]): Promise<boolean> {
     const halted = new HaltBackoff(this.logger);
+    const failed = newWorkerBackoff();
     for (;;) {
+      if (this.leaving()) return false;
       try {
         await this.register(actionNames);
         return true;
       } catch (err) {
-        if (!(await halted.waitIf(err, "Register", this.leave.signal))) throw err;
-        if (this.leaving()) return false;
+        if (await halted.waitIf(err, "Register", this.leave.signal)) continue;
+        if (!isRefusedUnrun(err)) throw err;
+        const d = failed.next();
+        this.log(`Register refused: ${err}, retrying in ${d}ms...`);
+        await pause(d, this.leave.signal);
       }
     }
   }
@@ -581,13 +593,22 @@ export class ActionWorker {
       }
       return;
     }
-    try {
-      await this.register(actionNames);
-    } catch (err) {
-      // Committed but not applied: resending it would write it twice.
-      if (isOutcomePending(err)) throw err;
-      // A connection error here surfaces again on the next poll.
-      this.logger.warn(`Re-register after reconnect failed: ${err}`);
+    // A limit here leaves the worker unregistered, serving nothing: it
+    // keeps trying, and says so at error.
+    const limited = new LimitBackoff(this.logger, "error");
+    for (;;) {
+      try {
+        await this.register(actionNames);
+        return;
+      } catch (err) {
+        // Committed but not applied: resending it would write it twice.
+        if (isOutcomePending(err)) throw err;
+        if (this.leaving()) return;
+        if (await limited.waitIf(err, "Re-register after reconnect (the worker is not registered and serves nothing until it is)", this.leave.signal)) continue;
+        // A connection error here surfaces again on the next poll.
+        this.logger.warn(`Re-register after reconnect failed: ${err}`);
+        return;
+      }
     }
   }
 
@@ -595,6 +616,7 @@ export class ActionWorker {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
     const halted = new HaltBackoff(this.logger);
+    const limited = new LimitBackoff(this.logger);
     let unproven = false;
     // An await takes a task. Its answer can be lost with the connection, or
     // refused when the node stopped leading after taking it; the next await
@@ -627,6 +649,7 @@ export class ActionWorker {
         requestKey = newRequestKey();
         failed.reset();
         halted.reset();
+        limited.reset();
         unproven = false;
 
         const wait = backoff.next(result.task === null, performance.now() - started, this.config.blockMs);
@@ -663,7 +686,7 @@ export class ActionWorker {
         } else if (err instanceof ServerError && err.reason === Reason.WorkerDraining) {
           this.log("The server drained this worker; finishing its running work");
           this.beginDrain();
-        } else if (await halted.waitIf(err, "Await", this.leave.signal)) {
+        } else if ((await halted.waitIf(err, "Await", this.leave.signal)) || (await limited.waitIf(err, "Await", this.leave.signal))) {
           // Polled again once the wait is over.
         } else {
           if (err instanceof ServerError && err.reason === Reason.WorkerUnhealthy) {
@@ -755,31 +778,44 @@ export class ActionWorker {
    * at a half extends it and the two after it can fail before it runs out.
    * Conflict (a stale report: the run moved on), not found or bad request
    * stops touching; any other refusal, an overloaded leader say, or a touch
-   * lost with its connection, is tried again at the next tick. A touch in
-   * flight when this stops is left to finish.
+   * lost with its connection, is tried again with a backoff (100 ms
+   * doubling to 5 s), never later than the next tick. A touch in flight when
+   * this stops is left to finish.
    */
   private keepTouching(task: TaskAssignment, arrivedAt: number): () => void {
     const intervalMs = Math.max(Number(task.leaseMs) / 6, MIN_TOUCH_INTERVAL_MS);
+    const failed = newWorkerBackoff();
     let stopped = false;
     let ticks = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    // The next tick on the schedule from arrival, skipping any a slow touch overran.
-    const schedule = () => {
+    // The next tick on the schedule from arrival, skipping any a slow touch
+    // overran; after a failed touch, `retryMs` from now if sooner.
+    const schedule = (retryMs?: number) => {
       const now = performance.now();
-      ticks = Math.max(ticks + 1, Math.floor((now - arrivedAt) / intervalMs) + 1);
+      // The next tick not yet run. A timer can fire a hair before its time,
+      // so the clock alone can name the tick just run.
+      const next = Math.max(ticks + 1, Math.floor((now - arrivedAt) / intervalMs) + 1);
+      if (retryMs !== undefined && now + retryMs < arrivedAt + next * intervalMs) {
+        timer = setTimeout(tick, retryMs);
+        return;
+      }
+      ticks = next;
       timer = setTimeout(tick, Math.max(0, arrivedAt + ticks * intervalMs - now));
     };
     const tick = async (): Promise<void> => {
+      let retryMs: number | undefined;
       try {
         await this._touchTask(task);
+        failed.reset();
       } catch (err) {
         if (err instanceof ServerError && TOUCH_FINAL.includes(err.status)) {
           this.logger.warn(`Touch for task ${task.taskId} was refused, stopping: ${err}`);
           return;
         }
-        this.logger.warn(`Touch for task ${task.taskId} failed: ${err}; trying again`);
+        retryMs = failed.next();
+        this.logger.warn(`Touch for task ${task.taskId} failed: ${err}; trying again in ${retryMs}ms`);
       }
-      if (!stopped) schedule();
+      if (!stopped) schedule(retryMs);
     };
     schedule();
     return () => {

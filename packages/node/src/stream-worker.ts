@@ -1,11 +1,13 @@
 /**
  * High-level StreamWorker API for Flo.
  *
- * Consumes stream records via consumer groups with:
- * - Automatic group join/leave
+ * Consumes stream records via a consumer group, which leases each record
+ * to one consumer until it is acked, with:
+ * - The group created at start with the lease and attempts given, if any
  * - Worker registry integration (register, heartbeat, deregister)
  * - Concurrency control
- * - Automatic ack/nack on handler success/failure
+ * - Automatic ack/nack on handler success/failure, and touches that keep
+ *   a record's lease while its handler runs
  * - Graceful drain support
  *
  * @example
@@ -41,12 +43,17 @@ import {
   silentLogger,
   type ProcessEntry,
   type RetryPolicy,
+  type StreamGroupDelivery,
+  type StreamGroupReadResult,
+  type StreamGroupRecord,
+  type StreamGroupReportResult,
   type StreamID,
-  type StreamRecord,
+  MAX_GROUP_BATCH,
+  QueueRefusal,
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff, HaltBackoff, MAX_TIMER_MS, NotReadyWarnings, newNotReadyBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { EmptyPollBackoff, HaltBackoff, LimitBackoff, MAX_TIMER_MS, NotReadyWarnings, newNotReadyBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
 import {
   DRAIN_NOTICE_INTERVAL_MS,
   closedSince,
@@ -62,6 +69,139 @@ import os from "os";
 const textDecoder = new TextDecoder();
 const textEncoder = new TextEncoder();
 
+/** Touches never go more often than this, whatever the lease. */
+const MIN_TOUCH_INTERVAL_MS = 100;
+/** A group's lease bounds: the touch schedule assumes one within them. */
+const MIN_LEASE_MS = 5000;
+const MAX_LEASE_MS = 43_200_000;
+/** Touch refusals that mean touching again can't help; a stale report is a conflict. */
+const TOUCH_FINAL: StatusCode[] = [StatusCode.Conflict, StatusCode.NotFound, StatusCode.BadRequest];
+
+/** A record's id as logs show it: `ms-seq`. */
+function recordId(r: { id: StreamID }): string {
+  return `${r.id.timestampMs}-${r.id.sequence}`;
+}
+
+/**
+ * Keeps the leases of one group read's records while they are open: from
+ * the read's arrival, whether a record is running or waiting for a free
+ * handler slot, until it is acked or nacked (`done`). One touch names the
+ * read's delivery and every record still open, every sixth of the lease, at
+ * least 100 ms apart. The server extends a lease only with half of it or
+ * less left, so the touch at a half extends it and the two after it can
+ * fail before it runs out.
+ *
+ * The lease and its start are read off the server's expiry against this
+ * host's clock: first the read's, then each touch answer's, so pacing
+ * follows the server's expiry rather than one reading of a skewed clock.
+ * A record a touch didn't apply to (a stale report: its delivery is over)
+ * is touched no more; a touch refused conflict, not found or bad request
+ * stops touching; any other failure is tried again with a backoff (100 ms
+ * doubling to 5 s), never later than the next tick.
+ */
+class LeaseKeeper {
+  private readonly open = new Map<string, StreamGroupRecord>();
+  private leaseMs: number;
+  /** When the current lease began, by performance.now(). */
+  private anchor: number;
+  private lastExpiry: bigint;
+  private ticks = 0;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private stopped = false;
+  private readonly failed = newWorkerBackoff();
+
+  constructor(
+    private readonly client: FloClient,
+    private readonly stream: string,
+    private readonly group: string,
+    private readonly read: StreamGroupReadResult,
+    arrivedAt: number,
+    private readonly logger: Logger
+  ) {
+    for (const r of read.records) this.open.set(recordId(r), r);
+    const wallAtArrival = Date.now() - (performance.now() - arrivedAt);
+    this.leaseMs = clampLease(Number(read.expiresAtMs) - wallAtArrival);
+    this.anchor = arrivedAt;
+    this.lastExpiry = read.expiresAtMs;
+    this.schedule();
+  }
+
+  /** `record` is acked or nacked: touch it no more. */
+  done(record: StreamGroupRecord): void {
+    this.open.delete(recordId(record));
+    if (this.open.size === 0) this.stop();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    clearTimeout(this.timer);
+  }
+
+  /**
+   * The next tick on the schedule from the lease's start, skipping any a
+   * slow touch overran; after a failed touch, `retryMs` from now if sooner.
+   */
+  private schedule(retryMs?: number): void {
+    if (this.stopped) return;
+    const interval = Math.max(this.leaseMs / 6, MIN_TOUCH_INTERVAL_MS);
+    const now = performance.now();
+    // The next tick not yet run. A timer can fire a hair before its time,
+    // so the clock alone can name the tick just run.
+    const next = Math.max(this.ticks + 1, Math.floor((now - this.anchor) / interval) + 1);
+    let delay: number;
+    if (retryMs !== undefined && now + retryMs < this.anchor + next * interval) {
+      delay = retryMs;
+    } else {
+      this.ticks = next;
+      delay = Math.max(0, this.anchor + this.ticks * interval - now);
+    }
+    this.timer = setTimeout(() => void this.tick(), delay);
+  }
+
+  /** Re-read the lease from an expiry the server just gave. */
+  private calibrate(expiresAtMs: bigint): void {
+    if (expiresAtMs <= this.lastExpiry) return;
+    const remaining = Number(expiresAtMs) - Date.now();
+    this.lastExpiry = expiresAtMs;
+    this.leaseMs = clampLease(remaining);
+    this.anchor = performance.now() + remaining - this.leaseMs;
+    this.ticks = 0;
+  }
+
+  private async tick(): Promise<void> {
+    if (this.stopped) return;
+    const records = [...this.open.values()];
+    try {
+      const got = await this.client.stream.groupTouch(this.stream, deliveryOf(this.read, records), { group: this.group });
+      for (const r of got.refused) {
+        const id = `${r.id.timestampMs}-${r.id.sequence}`;
+        if (this.open.delete(id)) this.logger.warn(`Touch for record ${id} applied nothing, no longer touching it: ${r.reason}`);
+      }
+      if (got.applied === 0 || this.open.size === 0) return this.stop();
+      this.failed.reset();
+      this.calibrate(got.expiresAtMs);
+    } catch (err) {
+      if (err instanceof ServerError && TOUCH_FINAL.includes(err.status)) {
+        this.logger.warn(`Touch for ${records.length} records was refused, stopping: ${err}`);
+        return this.stop();
+      }
+      const d = this.failed.next();
+      this.logger.warn(`Touch for ${records.length} records failed: ${err}; trying again in ${d}ms`);
+      return this.schedule(d);
+    }
+    this.schedule();
+  }
+}
+
+function clampLease(ms: number): number {
+  return Math.min(Math.max(ms, MIN_LEASE_MS), MAX_LEASE_MS);
+}
+
+/** The delivery a report names: `records` of the read `read`. */
+function deliveryOf(read: StreamGroupReadResult, records: StreamGroupRecord[]): StreamGroupDelivery {
+  return { consumer: read.consumer, term: read.term, index: read.index, records };
+}
+
 /**
  * Configuration for a Flo stream worker.
  */
@@ -75,6 +215,20 @@ export interface StreamWorkerConfig {
   /** Consumer name within the group (default: workerId) */
   consumer?: string;
 
+  /**
+   * The group's lease in ms, 5000 to 43200000. Given this or `maxDeliver`,
+   * the worker creates the group at start with both (one unset is the
+   * server's default); a group that exists with other settings makes
+   * `start()` throw ConflictError, since a create can't change them. Given
+   * neither, the first read creates the group at the server's defaults
+   * (30000 ms, 5). A record not acked within the lease is delivered again;
+   * the worker touches a record's lease while its handler runs.
+   */
+  ackTimeoutMs?: number;
+
+  /** The group's attempts, 1 to 255: a record nacked or expired this many times is dead. See `ackTimeoutMs`. */
+  maxDeliver?: number;
+
   /** Unique worker identifier (auto-generated if not provided) */
   workerId?: string;
 
@@ -84,7 +238,7 @@ export interface StreamWorkerConfig {
   /** Maximum number of concurrent message handlers (default: 10) */
   concurrency?: number;
 
-  /** Number of records to read per poll (default: 10) */
+  /** Number of records to read per poll, 1 to 100 (default: 10) */
   batchSize?: number;
 
   /**
@@ -121,7 +275,8 @@ export interface StreamWorkerConfig {
 /**
  * Handler function for processing stream records.
  * Return normally for success (auto-ack).
- * Throw an error to nack and redeliver.
+ * Throw an error to nack: the record is delivered again, and is dead once
+ * nacked or expired the group's `maxDeliver` times.
  */
 export type StreamRecordHandler = (ctx: StreamContext) => Promise<void>;
 
@@ -132,8 +287,8 @@ export type StreamRecordHandler = (ctx: StreamContext) => Promise<void>;
  * along with helpers for parsing payloads.
  */
 export class StreamContext {
-  /** The stream record being processed */
-  readonly record: StreamRecord;
+  /** The stream record being processed, with its deliveries (1 the first time) */
+  readonly record: StreamGroupRecord;
 
   /** Namespace */
   readonly namespace: string;
@@ -148,7 +303,7 @@ export class StreamContext {
   readonly consumer: string;
 
   constructor(
-    record: StreamRecord,
+    record: StreamGroupRecord,
     namespace: string,
     stream: string,
     group: string,
@@ -209,8 +364,8 @@ export class StreamContext {
  */
 export class StreamWorker {
   private readonly config: Required<
-    Omit<StreamWorkerConfig, "logger">
-  >;
+    Omit<StreamWorkerConfig, "logger" | "ackTimeoutMs" | "maxDeliver">
+  > & Pick<StreamWorkerConfig, "ackTimeoutMs" | "maxDeliver">;
   private readonly logger: Logger;
   private readonly client: FloClient;
   private readonly ownedClient: boolean;
@@ -261,14 +416,21 @@ export class StreamWorker {
       throw new RangeError(`heartbeatIntervalMs must be more than 0 and at most ${MAX_TIMER_MS}, not ${heartbeatIntervalMs}`);
     }
 
+    const batchSize = config.batchSize ?? 10;
+    if (!(Number.isInteger(batchSize) && batchSize >= 1 && batchSize <= MAX_GROUP_BATCH)) {
+      throw new RangeError(`batchSize must be an integer from 1 to ${MAX_GROUP_BATCH}, not ${batchSize}`);
+    }
+
     this.config = {
       stream: config.stream,
       group: config.group ?? "default",
       consumer: config.consumer ?? workerId,
+      ackTimeoutMs: config.ackTimeoutMs,
+      maxDeliver: config.maxDeliver,
       workerId,
       machineId: config.machineId ?? (os.hostname() || ""),
       concurrency: config.concurrency ?? 10,
-      batchSize: config.batchSize ?? 10,
+      batchSize,
       blockMs: workerBlockMs(config.blockMs),
       messageTimeoutMs: config.messageTimeoutMs ?? 300000,
       heartbeatIntervalMs,
@@ -299,6 +461,9 @@ export class StreamWorker {
    * Start consuming stream records until `stop()`, or a drain once its
    * running handlers finish and ack. Either one before or during startup
    * ends this run. It may be called again afterwards.
+   *
+   * start() fails with the limit error; a limit hit while running is
+   * logged and backed off.
    */
   async start(): Promise<void> {
     this.log(
@@ -307,7 +472,7 @@ export class StreamWorker {
     );
 
     this.running = true;
-    let joined = false;
+    let registered = false;
     try {
       // Connect if we own the client: on a later run, again after close().
       if (this.ownedClient && !this.client.isConnected()) {
@@ -316,9 +481,9 @@ export class StreamWorker {
       this.clientCloses = this.client.closes();
 
       if (!this.stopRequested) {
-        // Left and deregistered at the end even if this answer is lost.
-        joined = true;
-        if (await this.joinGroup()) {
+        // Deregistered at the end even if this answer is lost.
+        registered = true;
+        if (await this.setUp()) {
           this.startHeartbeat();
           await this.pollLoop();
           if (this.draining && !this.stopRequested) await this.finishDrain();
@@ -334,18 +499,9 @@ export class StreamWorker {
       // Before deregistering: a heartbeat answering after it mustn't register again.
       this.running = false;
 
-      if (joined) {
+      if (registered) {
         try {
           await this.client.worker.deregister(this.config.workerId);
-        } catch {
-          // Best-effort
-        }
-        try {
-          await this.client.stream.groupLeave(
-            this.config.stream,
-            this.config.group,
-            this.config.consumer
-          );
         } catch {
           // Best-effort
         }
@@ -376,36 +532,46 @@ export class StreamWorker {
   }
 
   /**
-   * Join the consumer group and register this worker with the server. A
-   * join the server refused without running it (overloaded or unavailable,
-   * past the client's own retries) is tried again with the worker backoff;
-   * any other error is thrown. Returns false if a stop or drain came first.
+   * Create the consumer group, when given its settings, and register this
+   * worker with the server. Either one refused by a halted shard, or
+   * refused without being run (overloaded or unavailable, past the
+   * client's own retries), is tried again with a backoff; any other
+   * refusal, a limit included, is thrown as its typed error. Returns false
+   * if a stop or drain came first.
    */
-  private async joinGroup(): Promise<boolean> {
+  private async setUp(): Promise<boolean> {
     const failed = newWorkerBackoff();
     const halted = new HaltBackoff(this.logger);
-    for (;;) {
+    const create = this.config.ackTimeoutMs !== undefined || this.config.maxDeliver !== undefined;
+    while (create) {
       if (this.leaving()) return false;
       try {
-        await this.client.stream.groupJoin(this.config.stream, this.config.group, this.config.consumer);
+        await this.client.stream.groupCreate(this.config.stream, this.config.group, {
+          ackTimeoutMs: this.config.ackTimeoutMs,
+          maxDeliver: this.config.maxDeliver,
+        });
         break;
       } catch (err) {
-        if (await halted.waitIf(err, "Group join", this.leave.signal)) continue;
+        if (await halted.waitIf(err, "Group create", this.leave.signal)) continue;
         if (!isRefusedUnrun(err)) throw err;
         const d = failed.next();
-        this.log(`Group join refused: ${err}, retrying in ${d}ms...`);
+        this.log(`Group create refused: ${err}, retrying in ${d}ms...`);
         await pause(d, this.leave.signal);
       }
     }
-    this.log("Joined consumer group");
     halted.reset();
+    failed.reset();
     for (;;) {
+      if (this.leaving()) return false;
       try {
         await this.registerWorker();
         return true;
       } catch (err) {
-        if (!(await halted.waitIf(err, "Register", this.leave.signal))) throw err;
-        if (this.leaving()) return false;
+        if (await halted.waitIf(err, "Register", this.leave.signal)) continue;
+        if (!isRefusedUnrun(err)) throw err;
+        const d = failed.next();
+        this.log(`Register refused: ${err}, retrying in ${d}ms...`);
+        await pause(d, this.leave.signal);
       }
     }
   }
@@ -431,7 +597,7 @@ export class StreamWorker {
     this.log("Registered in worker registry");
   }
 
-  /** Reconnect after a dropped connection, then join again. */
+  /** Reconnect after a dropped connection, then set up again. */
   private async recover(cause: unknown, connection: number): Promise<void> {
     this.logger.warn(`Connection lost: ${cause}; reconnecting...`);
     const seen = { connection, closes: this.clientCloses };
@@ -442,13 +608,22 @@ export class StreamWorker {
       }
       return;
     }
-    try {
-      await this.joinGroup();
-    } catch (err) {
-      // Committed but not applied: resending it would write it twice.
-      if (isOutcomePending(err)) throw err;
-      // A connection error here surfaces again on the next read.
-      this.logger.warn(`Re-join after reconnect failed: ${err}`);
+    // A limit here leaves the worker unregistered, serving nothing: it
+    // keeps trying, and says so at error.
+    const limited = new LimitBackoff(this.logger, "error");
+    for (;;) {
+      try {
+        await this.setUp();
+        return;
+      } catch (err) {
+        // Committed but not applied: resending it would write it twice.
+        if (isOutcomePending(err)) throw err;
+        if (this.leaving()) return;
+        if (await limited.waitIf(err, "Set-up after reconnect (the worker is not registered and serves nothing until it is)", this.leave.signal)) continue;
+        // A connection error here surfaces again on the next read.
+        this.logger.warn(`Set-up after reconnect failed: ${err}`);
+        return;
+      }
     }
   }
 
@@ -456,6 +631,7 @@ export class StreamWorker {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
     const halted = new HaltBackoff(this.logger);
+    const limited = new LimitBackoff(this.logger);
     const notReady = newNotReadyBackoff();
     const notReadyWarnings = new NotReadyWarnings();
     let unproven = false;
@@ -479,19 +655,24 @@ export class StreamWorker {
           limit: this.config.batchSize,
           blockMs: this.config.blockMs,
         });
+        const arrivedAt = performance.now();
         failed.reset();
         halted.reset();
+        limited.reset();
         notReady.reset();
         notReadyWarnings.reset();
         unproven = false;
 
-        const empty = !result || result.records.length === 0;
+        const empty = result.records.length === 0;
         const wait = backoff.next(empty, performance.now() - started, this.config.blockMs);
         if (empty) {
           if (wait > 0) await pause(wait, this.leave.signal);
           continue;
         }
 
+        // Every record of the read is leased from now, waiting for a slot or
+        // not: keep each one's lease until it is acked or nacked.
+        const keeper = new LeaseKeeper(this.client, this.config.stream, this.config.group, result, arrivedAt, this.logger);
         // Process each record with concurrency control. A drain handles the
         // whole batch, already delivered here; a stop hands back the rest.
         let dispatched = 0;
@@ -505,14 +686,14 @@ export class StreamWorker {
           if (this.stopRequested) break;
 
           this.activeCount++;
-          const taskPromise = this.processRecord(record).finally(() => {
+          const taskPromise = this.processRecord(record, result, keeper).finally(() => {
             this.activeCount--;
             this.pendingTasks.delete(taskPromise);
           });
           this.pendingTasks.add(taskPromise);
           dispatched++;
         }
-        if (dispatched < result.records.length) await this.handBack(result.records.slice(dispatched));
+        if (dispatched < result.records.length) await this.handBack(result, result.records.slice(dispatched), keeper);
       } catch (err) {
         if (this.leaving()) break;
         if (isConnectionError(err)) {
@@ -527,8 +708,8 @@ export class StreamWorker {
           throw err;
         } else if (isRefusedUnrun(err)) {
           // Routine, not a failure: records being read back from disk, or a
-          // leader not ready yet. The read claimed and delivered nothing, so
-          // the same read again is safe. A damaged or offline shard refuses
+          // leader not ready yet. The read leased nothing, so the same read
+          // again is safe. A damaged or offline shard refuses
           // the same way and won't answer soon: the server's message says
           // which, so the first of a run is a warning, then one every 30 s.
           const d = notReady.next();
@@ -536,6 +717,8 @@ export class StreamWorker {
           if (notReadyWarnings.due()) this.logger.warn(msg);
           else this.log(msg);
           await pause(d, this.leave.signal);
+        } else if (await limited.waitIf(err, "GroupRead", this.leave.signal)) {
+          // Read again once the wait is over.
         } else if (!(await halted.waitIf(err, "GroupRead", this.leave.signal))) {
           const d = failed.next();
           this.log(`GroupRead error: ${err}, retrying in ${d}ms...`);
@@ -547,16 +730,18 @@ export class StreamWorker {
 
   /**
    * Nack records delivered here that a stop kept from starting, so the group
-   * hands them out again now rather than after its ack timeout.
+   * hands them out again now rather than once their lease runs out. Like
+   * the lease running out, the nack counts as one of their attempts.
    */
-  private async handBack(records: StreamRecord[]): Promise<void> {
-    const opts = { group: this.config.group, consumer: this.config.consumer };
-    await sendResult(this.client, this.leave.signal, this.logger, this.clientCloses, `nack of ${records.length} records not started`, () =>
-      this.client.stream.groupNack(this.config.stream, records.map((r) => r.id), opts)
+  private async handBack(read: StreamGroupReadResult, records: StreamGroupRecord[], keeper: LeaseKeeper): Promise<void> {
+    for (const r of records) keeper.done(r);
+    const delivery = deliveryOf(read, records);
+    await sendResult(this.client, this.leave.signal, this.logger, this.clientCloses, `nack of ${records.length} records not started`, async () =>
+      this.noteRefused("nack", await this.client.stream.groupNack(this.config.stream, delivery, { group: this.config.group }))
     );
   }
 
-  private async processRecord(record: StreamRecord): Promise<void> {
+  private async processRecord(record: StreamGroupRecord, read: StreamGroupReadResult, keeper: LeaseKeeper): Promise<void> {
     const client = this.client;
     const ctx = new StreamContext(
       record,
@@ -565,8 +750,9 @@ export class StreamWorker {
       this.config.group,
       this.config.consumer
     );
-    const id = `${record.id.timestampMs}-${record.id.sequence}`;
-    const opts = { group: this.config.group, consumer: this.config.consumer };
+    const id = recordId(record);
+    const delivery = deliveryOf(read, [record]);
+    const opts = { group: this.config.group };
 
     // The handler's outcome alone picks ack or nack; sending it is separate,
     // so a lost ack is resent, never turned into a nack.
@@ -576,14 +762,30 @@ export class StreamWorker {
     } catch (err) {
       this.log(`Record ${id} failed: ${err}`);
       acked = false;
+    } finally {
+      keeper.done(record);
     }
 
     const what = acked ? "ack" : "nack";
-    await sendResult(client, this.leave.signal, this.logger, this.clientCloses, `${what} for record ${id}`, () =>
-      acked
-        ? client.stream.groupAck(this.config.stream, [record.id], opts)
-        : client.stream.groupNack(this.config.stream, [record.id], opts)
+    await sendResult(client, this.leave.signal, this.logger, this.clientCloses, `${what} for record ${id}`, async () =>
+      this.noteRefused(
+        what,
+        acked ? await client.stream.groupAck(this.config.stream, delivery, opts) : await client.stream.groupNack(this.config.stream, delivery, opts)
+      )
     );
+  }
+
+  /**
+   * Log the records a report didn't apply to: its delivery was over (the
+   * lease ran out, or the record went to another read). A resent ack whose
+   * first applied finds its record gone, so gone after an ack is quiet.
+   */
+  private noteRefused(what: string, result: StreamGroupReportResult): void {
+    for (const r of result.refused) {
+      const msg = `${what} of record ${r.id.timestampMs}-${r.id.sequence} applied nothing: ${r.reason}`;
+      if (what === "ack" && r.why === QueueRefusal.Gone) this.log(msg);
+      else this.logger.warn(msg);
+    }
   }
 
   /**
@@ -592,6 +794,9 @@ export class StreamWorker {
    * records of the last batch not yet started are handed back. Running
    * handlers finish and ack before `start()` returns. A stop before
    * `start()` ends that run at once.
+   *
+   * The hand-back is a nack, so it spends one of each record's attempts:
+   * with `maxDeliver` 1, a stop kills the records it hands back.
    */
   stop(): void {
     this.log("Stopping stream worker...");

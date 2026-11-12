@@ -47,8 +47,6 @@ import {
   type QueueTouchResult,
 } from "./types.js";
 
-/** The longest routing key; its length prefix is a u16. */
-export const MAX_ROUTING_KEY = 4096;
 /** The most keys one kv.mget takes. */
 export const MAX_MGET_KEYS = 256;
 /** The most names one kv.scan page holds. */
@@ -60,7 +58,7 @@ export const MAX_TTL_MS = 18_446_744_073_709n;
 /** The longest JSON path. */
 export const MAX_JSON_PATH = 1024;
 /** The longest JSON document kv.json_set takes. */
-export const MAX_JSON_DOCUMENT = 252_819;
+export const MAX_JSON_DOCUMENT = 256_918;
 /** The longest scan cursor: the shard (u16), then the longest key. */
 const MAX_SCAN_CURSOR = 2 + 4096;
 /** The most workers one worker.list page holds. */
@@ -71,10 +69,9 @@ const MAX_WORKER_ID = 4096;
 export const MAX_MGET_KEY = 4096;
 /**
  * The most bytes a kv.mget request's key elements (each u16 length + key)
- * may total: what fits one request frame after the count and the largest
- * routing key.
+ * may total: what fits one request frame after the count.
  */
-export const MAX_MGET_KEYS_BYTES = 253_848;
+export const MAX_MGET_KEYS_BYTES = 257_947;
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -159,13 +156,6 @@ class BodyWriter {
     if (v === undefined) return this.u8(0);
     this.u8(1);
     this.u64(v);
-  }
-  routingKey(k: string | undefined): void {
-    if (!k) return this.u8(0);
-    const b = textEncoder.encode(k);
-    if (b.length > MAX_ROUTING_KEY) throw new FloError(`flo: routing key is ${b.length} bytes, at most ${MAX_ROUTING_KEY}`);
-    this.u8(1);
-    this.bytes16(b);
   }
   /** A JSON path: defaulted, so always present. */
   jsonPath(path: string | undefined): void {
@@ -261,7 +251,7 @@ function checkLimit(name: string, v: number, max: number): void {
   if (!Number.isInteger(v) || v < 1 || v > max) throw new FloError(`flo: ${name} must be a whole number from 1 to ${max}, got ${v}`);
 }
 
-/** kv.get's request: wait_ms, wait_for, routing_key, txn. */
+/** kv.get's request: wait_ms, wait_for, txn. */
 export function encodeGetBody(opts: GetOptions | undefined, txn?: bigint): Uint8Array {
   const waitMs = opts?.waitMs ?? 0;
   if (!Number.isInteger(waitMs) || waitMs < 0) throw new FloError(`flo: waitMs must be a whole number of ms from 0 to ${MAX_WAIT_MS}, got ${waitMs}`);
@@ -273,12 +263,11 @@ export function encodeGetBody(opts: GetOptions | undefined, txn?: bigint): Uint8
   w.u64(BigInt(waitMs));
   w.u8(1);
   w.u8(waitFor);
-  w.routingKey(opts?.routingKey);
   w.optU64(txn);
   return w.build();
 }
 
-/** kv.set's request: value, ttl_ms, condition, cas_version, routing_key, txn. */
+/** kv.set's request: value, ttl_ms, condition, cas_version, txn. */
 export function encodeSetBody(value: Uint8Array, opts: PutOptions | undefined, txn?: bigint): Uint8Array {
   if (value.length > MAX_KV_VALUE_SIZE) throw new FloError(`flo: value is ${value.length} bytes, at most ${MAX_KV_VALUE_SIZE}`);
   const condition = opts?.condition ?? Condition.Always;
@@ -293,17 +282,15 @@ export function encodeSetBody(value: Uint8Array, opts: PutOptions | undefined, t
   w.u8(1);
   w.u8(condition);
   w.optU64(opts?.casVersion);
-  w.routingKey(opts?.routingKey);
   w.optU64(txn);
   return w.build();
 }
 
-/** kv.delete's request: cas_version, routing_key, txn. */
-export function encodeDeleteBody(opts: { casVersion?: bigint; routingKey?: string } | undefined, txn?: bigint): Uint8Array {
+/** kv.delete's request: cas_version, txn. */
+export function encodeDeleteBody(opts: { casVersion?: bigint } | undefined, txn?: bigint): Uint8Array {
   checkU64("casVersion", opts?.casVersion);
   const w = new BodyWriter();
   w.optU64(opts?.casVersion);
-  w.routingKey(opts?.routingKey);
   w.optU64(txn);
   return w.build();
 }
@@ -320,15 +307,14 @@ export function encodeScanBody(limit: number, cursor: Uint8Array | undefined): U
   return w.build();
 }
 
-/** kv.history's request: limit (1 to 65), before_version, routing_key. */
-export function encodeHistoryBody(limit: number, opts?: { beforeVersion?: bigint; routingKey?: string }): Uint8Array {
+/** kv.history's request: limit (1 to 65), before_version. */
+export function encodeHistoryBody(limit: number, opts?: { beforeVersion?: bigint }): Uint8Array {
   checkLimit("limit", limit, MAX_HISTORY_LIMIT);
   checkU64("beforeVersion", opts?.beforeVersion);
   const w = new BodyWriter();
   w.u8(1);
   w.u32(limit);
   w.optU64(opts?.beforeVersion);
-  w.routingKey(opts?.routingKey);
   return w.build();
 }
 
@@ -336,9 +322,8 @@ export function encodeHistoryBody(limit: number, opts?: { beforeVersion?: bigint
  * Split mget's keys into runs whose bodies each fit one request frame;
  * returns each run's end index. Refuses a bad key list.
  */
-export function splitMGetKeys(keys: readonly Uint8Array[], routingKey?: string): number[] {
+export function splitMGetKeys(keys: readonly Uint8Array[]): number[] {
   if (keys.length === 0 || keys.length > MAX_MGET_KEYS) throw new FloError(`flo: mget takes 1 to ${MAX_MGET_KEYS} keys, got ${keys.length}`);
-  new BodyWriter().routingKey(routingKey); // refuses one too long
   const ends: number[] = [];
   let size = 0;
   keys.forEach((k, i) => {
@@ -353,8 +338,8 @@ export function splitMGetKeys(keys: readonly Uint8Array[], routingKey?: string):
   return ends;
 }
 
-/** kv.mget's request: the keys (1 to 256), routing_key for the whole batch. */
-export function encodeMGetBody(keys: readonly Uint8Array[], routingKey?: string): Uint8Array {
+/** kv.mget's request: the keys (1 to 256). */
+export function encodeMGetBody(keys: readonly Uint8Array[]): Uint8Array {
   if (keys.length === 0 || keys.length > MAX_MGET_KEYS) throw new FloError(`flo: mget takes 1 to ${MAX_MGET_KEYS} keys, got ${keys.length}`);
   const w = new BodyWriter();
   w.u16(keys.length);
@@ -362,26 +347,24 @@ export function encodeMGetBody(keys: readonly Uint8Array[], routingKey?: string)
     if (k.length > MAX_MGET_KEY) throw new FloError(`flo: mget key is ${k.length} bytes, at most ${MAX_MGET_KEY}`);
     w.bytes16(k);
   }
-  w.routingKey(routingKey);
   return w.build();
 }
 
-/** kv.incr's request: delta (sent present, 1 by default), routing_key, txn. */
-export function encodeIncrBody(opts: { delta?: bigint; routingKey?: string } | undefined, txn?: bigint): Uint8Array {
+/** kv.incr's request: delta (sent present, 1 by default), txn. */
+export function encodeIncrBody(opts: { delta?: bigint } | undefined, txn?: bigint): Uint8Array {
   const delta = opts?.delta ?? 1n;
   if (delta < I64_MIN || delta > I64_MAX) throw new FloError(`flo: delta must fit an i64, got ${delta}`);
   const w = new BodyWriter();
   w.u8(1);
   w.i64(delta);
-  w.routingKey(opts?.routingKey);
   w.optU64(txn);
   return w.build();
 }
 
-/** kv.expire's request: ttl_ms (0 clears the TTL), cas_version, routing_key, txn. */
+/** kv.expire's request: ttl_ms (0 clears the TTL), cas_version, txn. */
 export function encodeExpireBody(
   ttlMs: bigint | number,
-  opts: { casVersion?: bigint; routingKey?: string } | undefined,
+  opts: { casVersion?: bigint } | undefined,
   txn?: bigint
 ): Uint8Array {
   if (typeof ttlMs === "number" && (!Number.isInteger(ttlMs) || ttlMs < 0)) {
@@ -393,34 +376,30 @@ export function encodeExpireBody(
   const w = new BodyWriter();
   w.u64(ttl);
   w.optU64(opts?.casVersion);
-  w.routingKey(opts?.routingKey);
   w.optU64(txn);
   return w.build();
 }
 
-/** kv.exists's request: routing_key, txn. */
-export function encodeExistsBody(opts: { routingKey?: string } | undefined, txn?: bigint): Uint8Array {
+/** kv.exists's request: txn. */
+export function encodeExistsBody(txn?: bigint): Uint8Array {
   const w = new BodyWriter();
-  w.routingKey(opts?.routingKey);
   w.optU64(txn);
   return w.build();
 }
 
-/** kv.json_get's and kv.json_del's request: path ("$" by default), routing_key. */
-export function encodeJsonPathBody(path: string | undefined, opts: { routingKey?: string } | undefined): Uint8Array {
+/** kv.json_get's and kv.json_del's request: path ("$" by default). */
+export function encodeJsonPathBody(path: string | undefined): Uint8Array {
   const w = new BodyWriter();
   w.jsonPath(path);
-  w.routingKey(opts?.routingKey);
   return w.build();
 }
 
-/** kv.json_set's request: path ("$" by default), document, routing_key. */
-export function encodeJsonSetBody(path: string | undefined, document: Uint8Array, opts: { routingKey?: string } | undefined): Uint8Array {
+/** kv.json_set's request: path ("$" by default), document. */
+export function encodeJsonSetBody(path: string | undefined, document: Uint8Array): Uint8Array {
   if (document.length > MAX_JSON_DOCUMENT) throw new FloError(`flo: JSON document is ${document.length} bytes, at most ${MAX_JSON_DOCUMENT}`);
   const w = new BodyWriter();
   w.jsonPath(path);
   w.bytes32(document);
-  w.routingKey(opts?.routingKey);
   return w.build();
 }
 

@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { HEADER_SIZE, MAGIC, OpCode, TABLE_HASH, VERSION, computeCRC32C } from "@floruntime/core";
 import { ActionWorker, StreamWorker } from "@floruntime/node";
 import { EmptyPollBackoff } from "../packages/node/src/poll-backoff.js";
-import { okAnswer } from "./fake_worker_server.js";
+import { groupRead, okAnswer } from "./fake_worker_server.js";
 
 function reply(id: bigint, data: Uint8Array = new Uint8Array(0)): Uint8Array {
   const buf = new Uint8Array(HEADER_SIZE + data.length);
@@ -25,15 +25,7 @@ function reply(id: bigint, data: Uint8Array = new Uint8Array(0)): Uint8Array {
 }
 
 /** A group read answer holding one record with sequence `seq`. */
-function oneRecord(seq: number): Uint8Array {
-  const buf = new Uint8Array(4 + 8 + 8 + 1 + 4 + 1 + 4 + 1 + 4);
-  const view = new DataView(buf.buffer);
-  view.setUint32(0, 1, true);
-  view.setBigUint64(4, BigInt(seq), true);
-  view.setUint32(26, 1, true); // payload_len
-  buf[30] = 0x78;
-  return buf;
-}
+const oneRecord = (seq: number) => groupRead({ records: [{ seq: BigInt(seq) }] });
 
 type Answer = { delayMs: number; data?: Uint8Array } | null;
 type Script = (op: number, nth: number) => Answer | undefined;

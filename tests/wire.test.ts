@@ -137,7 +137,7 @@ describe("Wire Protocol", () => {
 
       // Version, then the pinned table hash at 24-31
       expect(request[22]).toBe(VERSION);
-      expect(view.getBigUint64(24, true)).toBe(0x19075df8e1ed5f75n);
+      expect(view.getBigUint64(24, true)).toBe(0xc688167b51fcc846n);
     });
 
     it("should include namespace in payload", () => {
@@ -267,9 +267,9 @@ describe("Wire Protocol", () => {
       const { sender, sent } = capture({ status: StatusCode.OK, data: new Uint8Array([1, 3, 0, 0, 0, 0, 0, 0, 0]), requestId: 0n });
       const r = await new KVOperations(sender).put("k", new Uint8Array([1]), { ttlMs: 90_000n });
       expect(r.version).toBe(3n);
-      // value [len:u32][1], ttl_ms present 90000, condition always, no cas, routing key or txn
+      // value [len:u32][1], ttl_ms present 90000, condition always, no cas or txn
       expect(sent.value).toEqual(
-        new Uint8Array([1, 0, 0, 0, 1, 1, 0x90, 0x5f, 0x01, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0])
+        new Uint8Array([1, 0, 0, 0, 1, 1, 0x90, 0x5f, 0x01, 0, 0, 0, 0, 0, 1, 0, 0, 0])
       );
       expect(sent.options).toEqual(new Uint8Array(0));
     });
@@ -277,9 +277,9 @@ describe("Wire Protocol", () => {
     it("encodes expire's ttl_ms as a u64 of milliseconds, 0 clearing the TTL", async () => {
       const { sender, sent } = capture();
       await new KVOperations(sender).expire("k", 90_000n);
-      expect(sent.value).toEqual(new Uint8Array([0x90, 0x5f, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]));
+      expect(sent.value).toEqual(new Uint8Array([0x90, 0x5f, 0x01, 0, 0, 0, 0, 0, 0, 0]));
       await new KVOperations(sender).expire("k", 0);
-      expect(sent.value).toEqual(new Uint8Array(11));
+      expect(sent.value).toEqual(new Uint8Array(10));
       expect(sent.options).toEqual(new Uint8Array(0));
     });
   });

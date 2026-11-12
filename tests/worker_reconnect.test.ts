@@ -1,6 +1,6 @@
 /**
  * Worker reconnect: a dropped connection is redialed with backoff, the
- * worker registers (or joins its group) again before polling, and stop()
+ * worker registers (or creates its group) again before polling, and stop()
  * cuts the backoff short.
  */
 
@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { HEADER_SIZE, MAGIC, OpCode, TABLE_HASH, VERSION, computeCRC32C, type Logger } from "@floruntime/core";
 import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
 import { reconnect } from "../packages/node/src/reconnect.js";
-import { okAnswer, oneTask } from "./fake_worker_server.js";
+import { okAnswer, oneGroupRecord, oneTask } from "./fake_worker_server.js";
 
 function reply(id: bigint, data: Uint8Array = new Uint8Array(0)): Uint8Array {
   const buf = new Uint8Array(HEADER_SIZE + data.length);
@@ -25,15 +25,7 @@ function reply(id: bigint, data: Uint8Array = new Uint8Array(0)): Uint8Array {
 }
 
 /** A group read answer holding one record. */
-function oneRecord(): Uint8Array {
-  const buf = new Uint8Array(4 + 8 + 8 + 1 + 4 + 1 + 4 + 1 + 4);
-  const view = new DataView(buf.buffer);
-  view.setUint32(0, 1, true);
-  view.setBigUint64(4, 1n, true);
-  view.setUint32(26, 1, true); // payload_len
-  buf[30] = 0x78;
-  return buf;
-}
+const oneRecord = () => oneGroupRecord();
 
 type Action = "drop" | "park" | Uint8Array | undefined;
 
@@ -118,11 +110,11 @@ const cases: [string, Case][] = [
   }],
   ["StreamWorker", {
     poll: OpCode.StreamGroupRead,
-    rejoin: [OpCode.StreamGroupJoin, OpCode.WorkerRegister],
+    rejoin: [OpCode.StreamGroupCreate, OpCode.WorkerRegister],
     handled: OpCode.StreamGroupAck,
     work: oneRecord(),
     start: (endpoint, logger) => {
-      const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000, logger }, async () => {});
+      const w = new StreamWorker(endpoint, { stream: "s", ackTimeoutMs: 30000, blockMs: 30000, logger }, async () => {});
       return { stop: () => w.stop(), done: w.start() };
     },
   }],
