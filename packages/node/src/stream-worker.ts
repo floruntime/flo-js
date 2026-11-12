@@ -74,8 +74,8 @@ const MIN_TOUCH_INTERVAL_MS = 100;
 /** A group's lease bounds: the touch schedule assumes one within them. */
 const MIN_LEASE_MS = 5000;
 const MAX_LEASE_MS = 43_200_000;
-/** Touch refusals that mean touching again can't help. */
-const TOUCH_FINAL: StatusCode[] = [StatusCode.NotFound, StatusCode.BadRequest];
+/** Touch refusals that mean touching again can't help; a stale report is a conflict. */
+const TOUCH_FINAL: StatusCode[] = [StatusCode.Conflict, StatusCode.NotFound, StatusCode.BadRequest];
 
 /** A record's id as logs show it: `ms-seq`. */
 function recordId(r: { id: StreamID }): string {
@@ -94,9 +94,10 @@ function recordId(r: { id: StreamID }): string {
  * The lease and its start are read off the server's expiry against this
  * host's clock: first the read's, then each touch answer's, so pacing
  * follows the server's expiry rather than one reading of a skewed clock.
- * A record a touch didn't apply to (its delivery is over) is touched no
- * more; a touch refused not found or bad request stops touching; any other
- * failure is tried again at the next tick.
+ * A record a touch didn't apply to (a stale report: its delivery is over)
+ * is touched no more; a touch refused conflict, not found or bad request
+ * stops touching; any other failure is tried again with a backoff (100 ms
+ * doubling to 5 s), never later than the next tick.
  */
 class LeaseKeeper {
   private readonly open = new Map<string, StreamGroupRecord>();
@@ -107,6 +108,7 @@ class LeaseKeeper {
   private ticks = 0;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
+  private readonly failed = newWorkerBackoff();
 
   constructor(
     private readonly client: FloClient,
@@ -135,13 +137,23 @@ class LeaseKeeper {
     clearTimeout(this.timer);
   }
 
-  /** The next tick on the schedule from the lease's start, skipping any a slow touch overran. */
-  private schedule(): void {
+  /**
+   * The next tick on the schedule from the lease's start, skipping any a
+   * slow touch overran; after a failed touch, `retryMs` from now if sooner.
+   */
+  private schedule(retryMs?: number): void {
     if (this.stopped) return;
     const interval = Math.max(this.leaseMs / 6, MIN_TOUCH_INTERVAL_MS);
     const now = performance.now();
-    this.ticks = Math.max(this.ticks + 1, Math.floor((now - this.anchor) / interval) + 1);
-    this.timer = setTimeout(() => void this.tick(), Math.max(0, this.anchor + this.ticks * interval - now));
+    const next = Math.floor((now - this.anchor) / interval) + 1;
+    let delay: number;
+    if (retryMs !== undefined && now + retryMs < this.anchor + next * interval) {
+      delay = retryMs;
+    } else {
+      this.ticks = Math.max(this.ticks + 1, next);
+      delay = Math.max(0, this.anchor + this.ticks * interval - now);
+    }
+    this.timer = setTimeout(() => void this.tick(), delay);
   }
 
   /** Re-read the lease from an expiry the server just gave. */
@@ -164,13 +176,16 @@ class LeaseKeeper {
         if (this.open.delete(id)) this.logger.warn(`Touch for record ${id} applied nothing, no longer touching it: ${r.reason}`);
       }
       if (got.applied === 0 || this.open.size === 0) return this.stop();
+      this.failed.reset();
       this.calibrate(got.expiresAtMs);
     } catch (err) {
       if (err instanceof ServerError && TOUCH_FINAL.includes(err.status)) {
         this.logger.warn(`Touch for ${records.length} records was refused, stopping: ${err}`);
         return this.stop();
       }
-      this.logger.warn(`Touch for ${records.length} records failed: ${err}; trying again`);
+      const d = this.failed.next();
+      this.logger.warn(`Touch for ${records.length} records failed: ${err}; trying again in ${d}ms`);
+      return this.schedule(d);
     }
     this.schedule();
   }

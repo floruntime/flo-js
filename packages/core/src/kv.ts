@@ -296,9 +296,11 @@ export class KVOperations {
   }
 
   /**
-   * Open a per-shard KV transaction pinned to `key`'s `{tag}`, or to the
-   * whole key when it has none. Every key inside it must route with that:
-   * give them all the same `{tag}`. A key that routes elsewhere is refused
+   * Open a per-shard KV transaction pinned to `key`'s `{tag}` (the part
+   * between its first `{` and the `}` after it), or to the whole key when it
+   * has none. `{}` is an empty tag, which every key with one shares; a `{`
+   * with no `}` after it routes by the whole key. Every key inside it must
+   * route with that: give them all the same `{tag}`. A key that routes elsewhere is refused
    * with reason KeysNotColocated, not run.
    *
    * Returns a {@link Transaction} handle. Use `try/finally` for safe cleanup:

@@ -87,7 +87,9 @@ interface ClientOptions {
 Every op takes `namespace` in its options. A key routes by its `{tag}`, the
 part between its first `{` and the `}` after it, or by the whole key when it
 has none: keys that belong together, in a transaction say, share a `{tag}`
-(`{user:1}:balance`, `{user:1}:visits`).
+(`{user:1}:balance`, `{user:1}:visits`). Only the first `{` counts. An empty
+tag, `{}`, is still a tag: every key with one co-locates. A `{` with no `}`
+after it is no tag, so the key routes whole.
 `delete` and `expire` take `casVersion`: the key's version they require.
 The server decides a `casVersion` or `condition` as the write applies, in
 log order, so a refused one still costs a replicated commit. Inside a
@@ -399,7 +401,11 @@ still waiting for a free handler slot, the worker keeps their leases: one
 touch every sixth of the lease (at least 100 ms apart) names the read and
 every record still open. It reads the lease off the server's expiry against
 this host's clock, the read's and then each touch answer's, so a skewed
-clock is corrected as touches come back. Given `ackTimeoutMs` or `maxDeliver` it creates
+clock is corrected as touches come back. A touch refused conflict, not found or bad request
+stops touching; a record a touch didn't apply to (a stale report) is
+dropped from it; any other failure is retried with a backoff from 100 ms,
+never later than the next tick. After `stop()` the worker starts no more
+records: it hands back the unstarted ones, a nack that spends an attempt. Given `ackTimeoutMs` or `maxDeliver` it creates
 its group with them at start; otherwise its first read creates the group at
 the defaults.
 

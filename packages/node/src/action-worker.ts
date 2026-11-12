@@ -778,31 +778,42 @@ export class ActionWorker {
    * at a half extends it and the two after it can fail before it runs out.
    * Conflict (a stale report: the run moved on), not found or bad request
    * stops touching; any other refusal, an overloaded leader say, or a touch
-   * lost with its connection, is tried again at the next tick. A touch in
-   * flight when this stops is left to finish.
+   * lost with its connection, is tried again with a backoff (100 ms
+   * doubling to 5 s), never later than the next tick. A touch in flight when
+   * this stops is left to finish.
    */
   private keepTouching(task: TaskAssignment, arrivedAt: number): () => void {
     const intervalMs = Math.max(Number(task.leaseMs) / 6, MIN_TOUCH_INTERVAL_MS);
+    const failed = newWorkerBackoff();
     let stopped = false;
     let ticks = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    // The next tick on the schedule from arrival, skipping any a slow touch overran.
-    const schedule = () => {
+    // The next tick on the schedule from arrival, skipping any a slow touch
+    // overran; after a failed touch, `retryMs` from now if sooner.
+    const schedule = (retryMs?: number) => {
       const now = performance.now();
-      ticks = Math.max(ticks + 1, Math.floor((now - arrivedAt) / intervalMs) + 1);
+      const next = Math.floor((now - arrivedAt) / intervalMs) + 1;
+      if (retryMs !== undefined && now + retryMs < arrivedAt + next * intervalMs) {
+        timer = setTimeout(tick, retryMs);
+        return;
+      }
+      ticks = Math.max(ticks + 1, next);
       timer = setTimeout(tick, Math.max(0, arrivedAt + ticks * intervalMs - now));
     };
     const tick = async (): Promise<void> => {
+      let retryMs: number | undefined;
       try {
         await this._touchTask(task);
+        failed.reset();
       } catch (err) {
         if (err instanceof ServerError && TOUCH_FINAL.includes(err.status)) {
           this.logger.warn(`Touch for task ${task.taskId} was refused, stopping: ${err}`);
           return;
         }
-        this.logger.warn(`Touch for task ${task.taskId} failed: ${err}; trying again`);
+        retryMs = failed.next();
+        this.logger.warn(`Touch for task ${task.taskId} failed: ${err}; trying again in ${retryMs}ms`);
       }
-      if (!stopped) schedule();
+      if (!stopped) schedule(retryMs);
     };
     schedule();
     return () => {
