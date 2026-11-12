@@ -1,5 +1,5 @@
 /**
- * A worker's supervision calls (registering, joining its group, polling)
+ * A worker's supervision calls (registering, creating its group, polling)
  * wait out a halted shard and carry on by themselves once it is repaired; a
  * stop or drain ends the wait.
  */
@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { OpCode, OutcomePendingError, Ran, Reason, StatusCode } from "@floruntime/core";
 import { ActionWorker, StreamWorker } from "@floruntime/node";
 import { HALT_MAX_BACKOFF_MS, HaltBackoff } from "../packages/node/src/poll-backoff.js";
-import { fakeServer, oneRecord, oneTask, quiet, refusal, sleep, until } from "./fake_worker_server.js";
+import { fakeServer, oneGroupRecord, oneTask, quiet, refusal, sleep, until } from "./fake_worker_server.js";
 
 const halted = () => refusal(StatusCode.Unavailable, Reason.ShardHalted, "shard 0 halted at entry 12");
 const PENDING_MSG = "committed at 12, where the shard halted: a repair skips it; don't resend it unchanged";
@@ -30,9 +30,9 @@ const workers: [string, number[], number, (endpoint: string) => Started][] = [
     w.action("a", async () => new Uint8Array(0));
     return { stop: () => w.stop(), drain: () => w.drain(), done: w.start(), warned };
   }],
-  ["StreamWorker", [OpCode.StreamGroupJoin, OpCode.WorkerRegister, OpCode.StreamGroupRead], OpCode.StreamGroupRead, (endpoint) => {
+  ["StreamWorker", [OpCode.StreamGroupCreate, OpCode.WorkerRegister, OpCode.StreamGroupRead], OpCode.StreamGroupRead, (endpoint) => {
     const warned: string[] = [];
-    const w = new StreamWorker(endpoint, { stream: "s", blockMs: 30000, logger: logger(warned) }, async () => {});
+    const w = new StreamWorker(endpoint, { stream: "s", ackTimeoutMs: 30000, blockMs: 30000, logger: logger(warned) }, async () => {});
     return { stop: () => w.stop(), drain: () => w.drain(), done: w.start(), warned };
   }],
 ];
@@ -135,7 +135,7 @@ describe.each(results)("%s's result on a halted shard", (_name, poll, result, st
 
   for (const [what, answer] of [["unavailable, shard halted", halted], ["outcome pending", pending]] as const) {
     it(`is sent once when refused ${what}`, async () => {
-      const work = poll === OpCode.ActionAwait ? oneTask() : oneRecord();
+      const work = poll === OpCode.ActionAwait ? oneTask() : oneGroupRecord();
       const srv = await fakeServer((op, nth) => {
         if (op === poll) return nth === 0 ? { data: work } : "park";
         if (op === result) return answer();

@@ -14,7 +14,7 @@ export const VERSION = 0x03;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0x19075df8e1ed5f75n;
+export const TABLE_HASH = 0xc688167b51fcc846n;
 
 /**
  * Why the server refused a request. Mirrors the server's list; the table
@@ -44,8 +44,11 @@ export enum Reason {
   ConditionFailed = 16,
   /** No open transaction has this id here. */
   NoSuchTransaction = 17,
-  /** The routing key (the key, when none is given) isn't the one the transaction was begun with. */
-  WrongRoutingKey = 18,
+  /**
+   * The key routes elsewhere than the key the transaction was begun with:
+   * give every key in a transaction the same {tag}. Not run, not retried.
+   */
+  KeysNotColocated = 18,
   /** The transaction holds as many ops or bytes as it may. */
   TxnTooLarge = 19,
   /** The shard holds as many waiting reads as it may. */
@@ -72,6 +75,14 @@ export enum Reason {
   AdminOnly = 30,
   /** processing.remove of a job that still runs: stop or cancel it first. */
   JobRunning = 31,
+  /** Status limit: the node's memory budget is spent. */
+  MemoryBudget = 32,
+  /** Status limit: the node holds as many actions as it registers. */
+  TooManyActions = 33,
+  /** Status limit: the node holds as many workflow definitions as it keeps. */
+  TooManyWorkflowDefinitions = 34,
+  /** Status limit: the node holds as many workflow runs as it keeps. */
+  TooManyWorkflowRuns = 35,
 }
 
 /** Whether a refused request took effect: retry logic reads this, not the message. */
@@ -101,7 +112,7 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.CasMismatch]: "cas_mismatch",
   [Reason.ConditionFailed]: "condition_failed",
   [Reason.NoSuchTransaction]: "no_such_transaction",
-  [Reason.WrongRoutingKey]: "wrong_routing_key",
+  [Reason.KeysNotColocated]: "keys_not_colocated",
   [Reason.TxnTooLarge]: "txn_too_large",
   [Reason.TooManyWaiters]: "too_many_waiters",
   [Reason.ConflictingFields]: "conflicting_fields",
@@ -115,6 +126,10 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.ShardHalted]: "shard_halted",
   [Reason.AdminOnly]: "admin_only",
   [Reason.JobRunning]: "job_running",
+  [Reason.MemoryBudget]: "memory_budget",
+  [Reason.TooManyActions]: "too_many_actions",
+  [Reason.TooManyWorkflowDefinitions]: "too_many_workflow_definitions",
+  [Reason.TooManyWorkflowRuns]: "too_many_workflow_runs",
 };
 
 /** The server's name for a reason, as it appears in messages. */
@@ -142,7 +157,7 @@ export const MAX_BLOCK_MS = 300_000;
 /** Longest a KV get may wait (waitMs). */
 export const MAX_WAIT_MS = 300_000;
 /** Longest value a KV put takes. */
-export const MAX_KV_VALUE_SIZE = 253_817;
+export const MAX_KV_VALUE_SIZE = 257_916;
 
 /** What a KV get with waitMs waits for. */
 export enum WaitFor {
@@ -215,13 +230,9 @@ export const OpCode = {
 
   // ── Stream Consumer Groups (0x150 – 0x16F) ──
   StreamGroupCreate: 0x150,
-  StreamGroupJoin: 0x151,
-  StreamGroupLeave: 0x152,
   StreamGroupRead: 0x153,
   StreamGroupAck: 0x154,
-  StreamGroupClaim: 0x155,
   StreamGroupPending: 0x156,
-  StreamGroupConfigureSweeper: 0x157,
   StreamGroupNack: 0x159,
   StreamGroupTouch: 0x15a,
   StreamGroupInfo: 0x15b,
@@ -319,6 +330,7 @@ export const StatusCode = {
   Unavailable: 12, // No leader, or the shard isn't taking writes; retryable
   OutcomePending: 13, // Committed but not applied: its shard halted; never resent
   NoNamespace: 14, // The namespace the request names doesn't exist; NotFound is a missing key
+  Limit: 15, // The node is at a limit an operator sets; never run, never retried
 } as const;
 
 export type StatusCode = (typeof StatusCode)[keyof typeof StatusCode];
@@ -358,6 +370,8 @@ export function statusCodeToString(status: StatusCode): string {
       return "Outcome pending: committed, but its shard halted before applying it";
     case StatusCode.NoNamespace:
       return "Namespace not found";
+    case StatusCode.Limit:
+      return "At a limit";
     default:
       // A newer server can send a status this SDK predates.
       return `Unknown status ${status as number}`;
@@ -388,8 +402,10 @@ export const OptionTag = {
   Force: 0x2c, // void: Allow a destructive op, e.g. deleting a non-empty stream
 
   // Consumer Group Options (0x30 - 0x3F)
-  AckTimeoutMS: 0x30, // u32: Time before unacked message auto-redelivers (overrides default)
-  MaxDeliver: 0x31, // u8: Max delivery attempts before DLQ (default: 10, 0=unlimited)
+  AckTimeoutMS: 0x30, // u32: A group's lease: a record not acked this long is redelivered (5 s to 12 h; default 30 s)
+  MaxDeliver: 0x31, // u8: A group's attempts: a record is dead once nacked or expired this many times (1 to 255; default 5)
+  Dead: 0x32, // void: A nack dead-letters its records now
+  ErrorText: 0x33, // string: Why a nack's records failed
 
   // Time-Series Options (0x60 - 0x6F)
   TSFromMS: 0x60, // i64: Start of time range (inclusive, unix ms)
@@ -724,16 +740,21 @@ export interface StreamReadOptions {
   blockMs?: number;
 }
 
+/** The most records one group read takes, and one ack, nack or touch names. */
+export const MAX_GROUP_BATCH = 100;
+/** The longest consumer group name, in bytes. */
+export const MAX_GROUP_NAME = 256;
+
 /**
- * Options for stream consumer group operations.
+ * Options for a consumer group read.
  */
 export interface StreamGroupOptions {
   namespace?: string;
-  /** Consumer group name */
+  /** Consumer group name, at most 256 bytes; a read creates the group, at its defaults, if it doesn't exist. */
   group: string;
-  /** Consumer ID within the group */
+  /** The consumer the records are leased to; the server's "default" when empty. */
   consumer: string;
-  /** Maximum number of records to fetch */
+  /** Most records to take, 1 to 100 (the server's 100 when unset). */
   limit?: number;
   /**
    * Block for up to this many milliseconds waiting for new records.
@@ -744,14 +765,85 @@ export interface StreamGroupOptions {
 }
 
 /**
- * Options for acknowledging stream records in a consumer group.
+ * Options for creating a consumer group. Unset, each takes the server's
+ * default. A group that exists with other settings is refused ConflictError.
  */
-export interface StreamAckOptions {
+export interface StreamGroupCreateOptions {
   namespace?: string;
-  /** Consumer group name */
-  group: string;
-  /** Consumer ID. Sent, but the server doesn't check it: any consumer can ack an entry. */
+  /** The lease: a record not acked or touched this long is delivered again. 5000 to 43200000 (12 h); 30000 by default. */
+  ackTimeoutMs?: number;
+  /** A record nacked or expired this many times is dead. 1 to 255; 5 by default. */
+  maxDeliver?: number;
+}
+
+/**
+ * A record a group read leased: a stream record, and how many times it
+ * has been delivered, this one included.
+ */
+export interface StreamGroupRecord extends StreamRecord {
+  /** More than 1 once a lease ran out or it was nacked. */
+  deliveries: number;
+}
+
+/**
+ * The records an ack, nack or touch names, from one group read: the
+ * consumer that took them, the read's delivery token (term, index), and
+ * each record's id and deliveries. A `StreamGroupReadResult` is one; to
+ * report on some of its records, pass it with `records` narrowed.
+ */
+export interface StreamGroupDelivery {
   consumer: string;
+  term: bigint;
+  index: bigint;
+  records: readonly { id: StreamID; deliveries: number }[];
+}
+
+/**
+ * What a group read took, leased to `consumer` until `expiresAtMs` unless
+ * acked, nacked or touched first. Empty when nothing was ready.
+ */
+export interface StreamGroupReadResult extends StreamGroupDelivery {
+  records: StreamGroupRecord[];
+  /** When the lease runs out without a touch, in ms since the Unix epoch; 0 when nothing was taken. */
+  expiresAtMs: bigint;
+}
+
+/**
+ * Options for a group ack or touch.
+ */
+export interface StreamGroupReportOptions {
+  namespace?: string;
+  /** Consumer group name. */
+  group: string;
+}
+
+/**
+ * Options for a group nack.
+ */
+export interface StreamGroupNackOptions extends StreamGroupReportOptions {
+  /** Ready again after this many ms, at most 86400000 (a day); 0 by default. */
+  delayMs?: number;
+  /** Dead at once, whatever attempts are left. */
+  dead?: boolean;
+  /** Why the records failed, at most 1024 bytes; kept with a dead record. */
+  error?: string;
+}
+
+/**
+ * What a group ack, nack or touch did: how many records it applied to, and
+ * each one it didn't, with why (the same codes as a queue report's). These
+ * come inside an ok answer: a stale report applies nothing and is not an
+ * error.
+ */
+export interface StreamGroupReportResult {
+  applied: number;
+  refused: { id: StreamID; why: QueueRefusal; reason: string }[];
+}
+
+/** A group touch's result, with when the lease now runs out. */
+export interface StreamGroupTouchResult extends StreamGroupReportResult {
+  /** In ms since the Unix epoch; 0 when it applied to none. */
+  expiresAtMs: bigint;
 }
 
 /**
@@ -764,19 +856,9 @@ export interface StreamDeleteOptions {
 }
 
 /**
- * Options for negatively acknowledging stream records in a consumer group.
- */
-export interface StreamNackOptions {
-  namespace?: string;
-  /** Consumer group name */
-  group: string;
-  /** Consumer ID. Sent, but the server doesn't check it: any consumer can nack an entry. */
-  consumer: string;
-}
-
-/**
- * A stream's consumer group, as groupList shows it. Members and pending are
- * the leader's, and a leader change starts them again.
+ * A stream's consumer group, as groupList shows it. Members are the
+ * consumers holding its records now; pending is its records ready or
+ * leased.
  */
 export interface StreamGroupInfo {
   name: string;
@@ -798,8 +880,9 @@ export interface StreamGroupListResult {
 }
 
 /**
- * A consumer group's member, as groupMembers shows it. All of it is the
- * leader's, and a leader change starts it again.
+ * A consumer group's member, as groupMembers shows it: a consumer holding
+ * its records now, how many (`pending`), since when (`joinedAtMs`: its
+ * oldest delivery still out) and its latest delivery (`lastActiveMs`).
  */
 export interface StreamGroupMember {
   id: string;
@@ -829,8 +912,6 @@ export interface GetOptions {
   waitMs?: number;
   /** What a wait waits for: the key to exist (the default) or its next version. */
   waitFor?: WaitFor;
-  /** Routes the request in place of the key. */
-  routingKey?: string;
 }
 
 /**
@@ -844,8 +925,6 @@ export interface PutOptions {
   condition?: Condition;
   /** The key's version the write requires; 0n means it doesn't exist. */
   casVersion?: bigint;
-  /** Routes the request in place of the key. */
-  routingKey?: string;
 }
 
 /**
@@ -858,8 +937,6 @@ export interface DeleteOptions {
    * reason CasMismatch. For race-free "only the owner deletes" (locks, leases).
    */
   casVersion?: bigint;
-  /** Routes the request in place of the key. */
-  routingKey?: string;
 }
 
 /**
@@ -882,8 +959,6 @@ export interface HistoryOptions {
   limit?: number;
   /** Only versions older than this one (exclusive); unset starts from the newest. */
   beforeVersion?: bigint;
-  /** Routes the request in place of the key. */
-  routingKey?: string;
 }
 
 /**
@@ -893,8 +968,6 @@ export interface KVIncrOptions {
   namespace?: string;
   /** Defaults to +1 when omitted. Negative values decrement. */
   delta?: bigint;
-  /** Routes the request in place of the key. */
-  routingKey?: string;
 }
 
 /**
@@ -908,8 +981,6 @@ export interface KVExpireOptions {
    * the TTL").
    */
   casVersion?: bigint;
-  /** Routes the request in place of the key. */
-  routingKey?: string;
 }
 
 /**
@@ -917,8 +988,6 @@ export interface KVExpireOptions {
  */
 export interface KVExistsOptions {
   namespace?: string;
-  /** Routes the request in place of the key. */
-  routingKey?: string;
 }
 
 /**
@@ -926,8 +995,6 @@ export interface KVExistsOptions {
  */
 export interface KVJsonOptions {
   namespace?: string;
-  /** Routes the request in place of the key. */
-  routingKey?: string;
 }
 
 /**
@@ -935,11 +1002,6 @@ export interface KVJsonOptions {
  */
 export interface KVMGetOptions {
   namespace?: string;
-  /**
-   * The routing key every key was written with: all are looked up on its
-   * shard. Unset, each key is looked up on its own shard.
-   */
-  routingKey?: string;
 }
 
 /**

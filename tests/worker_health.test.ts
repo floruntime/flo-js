@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { OpCode, Reason, StatusCode } from "@floruntime/core";
 import { ActionWorker, StreamWorker } from "@floruntime/node";
-import { draining, fakeServer, loadOf, notFound, oneRecord, oneTask, quiet, sleep, unhealthy, until } from "./fake_worker_server.js";
+import { draining, fakeServer, loadOf, notFound, oneGroupRecord, oneTask, quiet, sleep, unhealthy, until } from "./fake_worker_server.js";
 
 
 type Started = { stop: () => void; drain: () => Promise<void>; done: Promise<void> };
@@ -107,7 +107,7 @@ describe("a heartbeat out when the run ends", () => {
     // Still finishing its work, the worker must stay registered.
     const srv = await fakeServer((op, nth) => {
       if (op === OpCode.WorkerHeartbeat && nth === 1) return notFound();
-      if (op === poll) return nth === 0 ? { data: poll === OpCode.ActionAwait ? oneTask() : oneRecord() } : { delayMs: 20 };
+      if (op === poll) return nth === 0 ? { data: poll === OpCode.ActionAwait ? oneTask() : oneGroupRecord() } : { delayMs: 20 };
       return undefined;
     });
     close = srv.close;
@@ -199,7 +199,7 @@ describe.each(workers)("%s heartbeats", (name, poll, start) => {
   it("report the handlers running, not a slot held by the outstanding poll", async () => {
     let release!: () => void;
     const held = new Promise<void>((r) => (release = r));
-    const work = name === "ActionWorker" ? oneTask() : oneRecord();
+    const work = name === "ActionWorker" ? oneTask() : oneGroupRecord();
     const srv = await fakeServer((op, nth) => {
       if (op !== poll) return undefined;
       // The first poll waits 300 ms, then hands out work; later ones park.

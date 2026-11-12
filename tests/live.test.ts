@@ -425,22 +425,75 @@ describe.skipIf(!endpoint)("live", () => {
   it("lists a stream's consumer groups and a group's members, and refuses an unknown group not found", async () => {
     const { client } = await liveClient();
     await client.stream.append("events", encoder.encode("x"));
-    await client.stream.groupJoin("events", "g1", "c1");
-    await client.stream.groupJoin("events", "g1", "c2");
+    // A read creates the group; its members are the consumers holding its records.
     const read = await client.stream.groupRead("events", { group: "g1", consumer: "c1", limit: 10 });
     expect(read.records).toHaveLength(1);
+    expect(await client.stream.groupRead("events", { group: "g1", consumer: "c2", limit: 10 })).toMatchObject({ records: [] });
     const { groups, more } = await client.stream.groupList("events");
     expect(more).toBe(false);
     expect(groups).toHaveLength(1);
-    expect(groups[0]).toMatchObject({ name: "g1", members: 2, pending: 1n });
+    expect(groups[0]).toMatchObject({ name: "g1", members: 1, pending: 1n, ackTimeoutMs: 30000, maxDeliver: 5 });
     expect(groups[0]!.lastDeliveredMs).toBeGreaterThan(0n);
     const members = await client.stream.groupMembers("events", "g1");
     expect(members.more).toBe(false);
-    const byId = Object.fromEntries(members.members.map((m) => [m.id, m]));
-    expect(byId.c1).toMatchObject({ state: "active", pending: 1 });
-    expect(byId.c1!.lastActiveMs).toBeDefined();
-    expect(byId.c2).toMatchObject({ state: "active", pending: 0 });
+    expect(members.members).toHaveLength(1);
+    expect(members.members[0]).toMatchObject({ id: "c1", state: "active", pending: 1 });
+    expect(members.members[0]!.lastActiveMs).toBeDefined();
     await expect(client.stream.groupMembers("events", "nope")).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it("leases a group's records: acked within the lease, gone; let run out, redelivered; nacked past maxDeliver, dead", async () => {
+    const { client } = await liveClient();
+    expect(await client.stream.groupCreate("events", "g1", { ackTimeoutMs: 5000, maxDeliver: 2 })).toBe(true);
+    // The same settings again change nothing; others are refused, as a create can't change them.
+    expect(await client.stream.groupCreate("events", "g1", { ackTimeoutMs: 5000, maxDeliver: 2 })).toBe(false);
+    await expect(client.stream.groupCreate("events", "g1", { ackTimeoutMs: 9000 })).rejects.toBeInstanceOf(ConflictError);
+    await client.stream.append("events", encoder.encode("a"));
+    await client.stream.append("events", encoder.encode("b"));
+    const opts = { group: "g1", consumer: "c1" };
+
+    const first = await client.stream.groupRead("events", { ...opts, limit: 10 });
+    expect(first.records.map((r) => [decoder.decode(r.payload), r.deliveries])).toEqual([["a", 1], ["b", 1]]);
+    expect(first.expiresAtMs).toBeGreaterThan(BigInt(Date.now()));
+    // Ack "a" within the lease; "b" stays leased, so a read gets nothing new.
+    expect(await client.stream.groupAck("events", { ...first, records: [first.records[0]!] }, { group: "g1" })).toEqual({ applied: 1, refused: [] });
+    expect((await client.stream.groupRead("events", { ...opts, limit: 10 })).records).toHaveLength(0);
+    // A touch with more than half the lease left applies but moves nothing.
+    expect(await client.stream.groupTouch("events", { ...first, records: [first.records[1]!] }, { group: "g1" })).toMatchObject({ applied: 1, refused: [] });
+
+    // Left to run out, "b" comes back with deliveries 2.
+    const again = await client.stream.groupRead("events", { ...opts, limit: 10, blockMs: 20000 });
+    expect(again.records.map((r) => [decoder.decode(r.payload), r.deliveries])).toEqual([["b", 2]]);
+    expect([again.term, again.index]).not.toEqual([first.term, first.index]);
+    // The first delivery's report is stale now: it applies nothing, inside an ok answer.
+    const stale = await client.stream.groupAck("events", { ...first, records: [first.records[1]!] }, { group: "g1" });
+    expect(stale.applied).toBe(0);
+    expect(stale.refused.map((r) => [r.id.sequence, r.why])).toEqual([[first.records[1]!.id.sequence, QueueRefusal.DeliveredAgain]]);
+
+    // The expiry was one failure; a nack is the second, and maxDeliver is 2: dead.
+    expect(await client.stream.groupNack("events", again, { group: "g1", error: "boom" })).toEqual({ applied: 1, refused: [] });
+    expect((await client.stream.groupRead("events", { ...opts, limit: 10, blockMs: 300 })).records).toHaveLength(0);
+    const [g] = (await client.stream.groupList("events")).groups;
+    expect(g).toMatchObject({ name: "g1", pending: 0n, ackTimeoutMs: 5000, maxDeliver: 2 });
+  }, 40000);
+
+  it("runs a KV transaction over keys sharing a {tag}, and refuses a key that routes elsewhere", async () => {
+    const { client } = await liveClient();
+    const txn = await client.kv.begin("{t}a");
+    await txn.put("{t}a", encoder.encode("1"));
+    await txn.put("{t}b", encoder.encode("2"));
+    expect(await txn.commit()).toMatchObject({ opCount: 2 });
+    expect(decoder.decode((await client.kv.get("{t}a"))!.value)).toBe("1");
+    expect(decoder.decode((await client.kv.get("{t}b"))!.value)).toBe("2");
+    // mget gathers keys from any shard.
+    expect((await client.kv.mget(["{t}a", "{t}b", "elsewhere"])).map((e) => e.found)).toEqual([true, true, false]);
+
+    const other = await client.kv.begin("{t}a");
+    const err = await other.put("untagged", encoder.encode("3")).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ServerError);
+    expect(err).toMatchObject({ status: StatusCode.BadRequest, reason: Reason.KeysNotColocated, ran: Ran.No });
+    await other.rollback();
+    expect(await client.kv.get("untagged")).toBeNull();
   });
 
   it("runs an invoked action on a worker, and the run's status then carries its output", async () => {

@@ -113,10 +113,45 @@ export function loadOf(payload: Buffer): number {
   return payload.readUInt32LE(off + 4);
 }
 
-/** The answer an OK with no data stands for: no task for an await, an expiry for a touch, else empty. */
+/**
+ * A group ack's or nack's answer, `[applied:u32][refused:u32]` then each
+ * refused `[ms:u64][seq:u64][why:u8]`; a touch's leads with its expiry.
+ */
+export function groupReportAnswer(applied: number, refused: { ms?: bigint; seq?: bigint; why: number }[] = [], expiresAtMs?: bigint): Uint8Array {
+  const out = new Uint8Array((expiresAtMs === undefined ? 0 : 8) + 8 + 17 * refused.length);
+  const view = new DataView(out.buffer);
+  let o = 0;
+  if (expiresAtMs !== undefined) {
+    view.setBigInt64(0, expiresAtMs, true);
+    o = 8;
+  }
+  view.setUint32(o, applied, true);
+  view.setUint32(o + 4, refused.length, true);
+  o += 8;
+  for (const r of refused) {
+    view.setBigUint64(o, r.ms ?? 0n, true);
+    view.setBigUint64(o + 8, r.seq ?? 1n, true);
+    out[o + 16] = r.why;
+    o += 17;
+  }
+  return out;
+}
+
+/** A group read's answer that took nothing. */
+export const noRecords = () => new Uint8Array(28);
+
+/**
+ * The answer an OK with no data stands for: no task for an await, an
+ * expiry for a touch, nothing taken for a group read, a group made for a
+ * create, every record applied for a group report, else empty.
+ */
 export function okAnswer(op: number): Uint8Array {
   if (op === OpCode.ActionAwait) return noTask();
   if (op === OpCode.ActionTouch) return touchAnswer();
+  if (op === OpCode.StreamGroupRead) return noRecords();
+  if (op === OpCode.StreamGroupCreate) return new Uint8Array([1]);
+  if (op === OpCode.StreamGroupAck || op === OpCode.StreamGroupNack) return groupReportAnswer(1);
+  if (op === OpCode.StreamGroupTouch) return groupReportAnswer(1, [], 0n);
   return new Uint8Array(0);
 }
 
@@ -175,7 +210,7 @@ export async function until(cond: () => boolean, ms: number): Promise<void> {
 
 export const quiet = { debug: () => {}, warn: () => {}, error: () => {} };
 
-/** A group read answer holding one record. */
+/** A stream read answer holding one record, payload "x": [count:u32] then the record. */
 export function oneRecord(): Uint8Array {
   const buf = new Uint8Array(4 + 8 + 8 + 1 + 4 + 1 + 4 + 1 + 4);
   const view = new DataView(buf.buffer);
@@ -185,3 +220,38 @@ export function oneRecord(): Uint8Array {
   buf[30] = 0x78;
   return buf;
 }
+
+export interface FakeGroupRead {
+  term?: bigint;
+  index?: bigint;
+  expiresAtMs?: bigint;
+  /** Each record's seq (its ms is 0) and deliveries. */
+  records?: { seq: bigint; deliveries?: number }[];
+}
+
+/**
+ * A group read's answer: [term:u64][index:u64][expires_at_ms:i64][count:u32],
+ * then each record as a stream read gives it (payload "x"), then [deliveries:u32].
+ */
+export function groupRead(r: FakeGroupRead = {}): Uint8Array {
+  const recs = r.records ?? [{ seq: 1n }];
+  const each = 8 + 8 + 1 + 4 + 1 + 4 + 1 + 4 + 4;
+  const buf = new Uint8Array(28 + recs.length * each);
+  const view = new DataView(buf.buffer);
+  view.setBigUint64(0, r.term ?? 1n, true);
+  view.setBigUint64(8, r.index ?? 10n, true);
+  view.setBigInt64(16, r.expiresAtMs ?? BigInt(Date.now() + 30_000), true);
+  view.setUint32(24, recs.length, true);
+  let o = 28;
+  for (const rec of recs) {
+    view.setBigUint64(o, rec.seq, true);
+    view.setUint32(o + 22, 1, true); // payload_len
+    buf[o + 26] = 0x78;
+    view.setUint32(o + 31, rec.deliveries ?? 1, true);
+    o += each;
+  }
+  return buf;
+}
+
+/** A group read answer holding one record. */
+export const oneGroupRecord = () => groupRead();

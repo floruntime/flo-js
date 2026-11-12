@@ -8,7 +8,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { OpCode, Reason, StatusCode, StorageTier, UnavailableError, parseStreamReadResponse } from "@floruntime/core";
 import { FloClient, StreamWorker } from "@floruntime/node";
-import { fakeServer, oneRecord, refusal, until } from "./fake_worker_server.js";
+import { fakeServer, oneGroupRecord, oneRecord, refusal, until } from "./fake_worker_server.js";
 import { NOT_READY_MAX_MS, NOT_READY_WARN_EVERY_MS, NotReadyWarnings, newNotReadyBackoff } from "../packages/node/src/poll-backoff.js";
 
 // The server's texts for a stream read waiting on its disk.
@@ -39,7 +39,7 @@ describe("a group read refused unavailable, not run", () => {
     const srv = await fakeServer((op, nth) => {
       if (op !== OpCode.StreamGroupRead) return undefined;
       if (nth < DISK_TEXTS.length) return refusal(StatusCode.Unavailable, Reason.Unclassified, DISK_TEXTS[nth]!);
-      return nth === DISK_TEXTS.length ? { data: oneRecord() } : "park";
+      return nth === DISK_TEXTS.length ? { data: oneGroupRecord() } : "park";
     });
     close = srv.close;
     const warned: string[] = [];

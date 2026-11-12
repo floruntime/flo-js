@@ -1,4 +1,4 @@
-import { Backoff, type Logger, Ran, Reason, ServerError, StatusCode } from "@floruntime/core";
+import { Backoff, isLimit, type Logger, Ran, Reason, reasonName, ServerError, StatusCode } from "@floruntime/core";
 
 /** The longest delay Node's timers keep; past it they fire after 1 ms. */
 export const MAX_TIMER_MS = 2_147_483_647;
@@ -139,5 +139,47 @@ export class NotReadyWarnings {
 
   reset(): void {
     this.lastWarnAt = null;
+  }
+}
+
+// While a worker's calls are refused at a limit, they wait this way.
+export const LIMIT_INITIAL_BACKOFF_MS = 1000;
+export const LIMIT_MAX_BACKOFF_MS = 30_000;
+
+/**
+ * Pacing for a worker's calls refused with status limit (too many actions
+ * on the node, its memory budget spent). Retrying won't clear it until an
+ * operator deletes something, gives the node room or raises the setting,
+ * so the worker neither spins nor stops: it waits, from 1 s doubling to
+ * 30 s, and logs each distinct reason once at warn (later ones at debug)
+ * until a call goes through.
+ */
+export class LimitBackoff {
+  private readonly backoff = new Backoff(LIMIT_INITIAL_BACKOFF_MS, LIMIT_MAX_BACKOFF_MS);
+  private readonly warned = new Set<Reason>();
+
+  constructor(private readonly logger: Logger) {}
+
+  /**
+   * If err is a limit refusal, log it, wait (less if `signal` aborts) and
+   * return true; otherwise return false at once.
+   */
+  async waitIf(err: unknown, call: string, signal: AbortSignal): Promise<boolean> {
+    if (!isLimit(err)) return false;
+    const d = this.backoff.next();
+    const msg = `${call} refused at a limit (${reasonName(err.reason)}): ${err.serverMessage}; retrying in ${d}ms`;
+    if (this.warned.has(err.reason)) this.logger.debug(msg);
+    else {
+      this.warned.add(err.reason);
+      this.logger.warn(msg);
+    }
+    await pause(d, signal);
+    return true;
+  }
+
+  /** After a call that went through: waits start from the bottom, and a limit warns again. */
+  reset(): void {
+    this.backoff.reset();
+    this.warned.clear();
   }
 }

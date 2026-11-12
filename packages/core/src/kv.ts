@@ -146,14 +146,15 @@ export class KVOperations {
     return kvSet(this.sender, this.sender.getNamespace(opts?.namespace), key, value, opts);
   }
 
-    /**
+  /**
    * MGet looks up many keys and returns one entry per requested key, in the
    * same order. The `found` flag tells a missing key from one whose value is
    * empty. When the server's answer fills up before every key is answered,
    * mget asks again from the first key it didn't answer; keys too many bytes
    * for one request go in several.
    *
-   * Limited to 256 keys per call, each at most 4096 bytes.
+   * Limited to 256 keys per call, each at most 4096 bytes. The keys may
+   * live on any shards: the server gathers them.
    */
   async mget(keys: string[], opts?: KVMGetOptions): Promise<MGetEntry[]> {
     if (keys.length === 0) return [];
@@ -161,10 +162,10 @@ export class KVOperations {
     const encoded = keys.map((k) => textEncoder.encode(k));
     const out: MGetEntry[] = [];
     // Each run of keys fits one request frame; within a run, follow next.
-    for (const end of splitMGetKeys(encoded, opts?.routingKey)) {
+    for (const end of splitMGetKeys(encoded)) {
       while (out.length < end) {
         const from = out.length;
-        const resp = await this.sender.sendRequest(OpCode.KVMGet, namespace, new Uint8Array(0), encodeMGetBody(encoded.slice(from, end), opts?.routingKey), new Uint8Array(0));
+        const resp = await this.sender.sendRequest(OpCode.KVMGet, namespace, new Uint8Array(0), encodeMGetBody(encoded.slice(from, end)), new Uint8Array(0));
         if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
         const page = decodeMGetAnswer(resp.data);
         const asked = end - from;
@@ -245,7 +246,7 @@ export class KVOperations {
    * value.
    */
   async exists(key: string, opts?: KVExistsOptions): Promise<KVExistsResult> {
-    const resp = await this.send(OpCode.KVExists, opts?.namespace, key, encodeExistsBody(opts));
+    const resp = await this.send(OpCode.KVExists, opts?.namespace, key, encodeExistsBody());
     return { ...decodeExistsAnswer(resp.data), stale: resp.stale === true };
   }
 
@@ -258,7 +259,7 @@ export class KVOperations {
    */
   async jsonGet(key: string, path: string = "$", opts?: KVJsonOptions): Promise<JsonGetResult | null> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-    const resp = await this.sender.sendRequest(OpCode.KVJsonGet, namespace, textEncoder.encode(key), encodeJsonPathBody(path, opts), new Uint8Array(0));
+    const resp = await this.sender.sendRequest(OpCode.KVJsonGet, namespace, textEncoder.encode(key), encodeJsonPathBody(path), new Uint8Array(0));
     if (resp.status === StatusCode.NotFound) return absentKey(resp);
     if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
     return decodeJsonGetAnswer(resp.data, resp.stale === true);
@@ -272,7 +273,7 @@ export class KVOperations {
    * with the new document version.
    */
   async jsonSet(key: string, path: string, jsonValue: Uint8Array, opts?: KVJsonOptions): Promise<PutResult> {
-    const resp = await this.send(OpCode.KVJsonSet, opts?.namespace, key, encodeJsonSetBody(path, jsonValue, opts));
+    const resp = await this.send(OpCode.KVJsonSet, opts?.namespace, key, encodeJsonSetBody(path, jsonValue));
     return decodeJsonSetAnswer(resp.data);
   }
 
@@ -283,7 +284,7 @@ export class KVOperations {
    * the key.
    */
   async jsonDel(key: string, path: string = "$", opts?: KVJsonOptions): Promise<bigint | null> {
-    const resp = await this.send(OpCode.KVJsonDel, opts?.namespace, key, encodeJsonPathBody(path, opts));
+    const resp = await this.send(OpCode.KVJsonDel, opts?.namespace, key, encodeJsonPathBody(path));
     return decodeJsonDelAnswer(resp.data);
   }
 
@@ -295,15 +296,17 @@ export class KVOperations {
   }
 
   /**
-   * Open a per-shard KV transaction pinned to `routingKey`'s shard. Every
-   * op inside it is routed by `routingKey`, so its keys share that shard.
+   * Open a per-shard KV transaction pinned to `key`'s `{tag}`, or to the
+   * whole key when it has none. Every key inside it must route with that:
+   * give them all the same `{tag}`. A key that routes elsewhere is refused
+   * with reason KeysNotColocated, not run.
    *
    * Returns a {@link Transaction} handle. Use `try/finally` for safe cleanup:
    *
    * ```ts
-   * const txn = await client.kv.begin("user:123");
+   * const txn = await client.kv.begin("{user:123}");
    * try {
-   *   await txn.put("user:123:name", new TextEncoder().encode("Jane"));
+   *   await txn.put("{user:123}:name", new TextEncoder().encode("Jane"));
    *   await txn.commit();
    * } catch (err) {
    *   await txn.rollback();
@@ -311,8 +314,8 @@ export class KVOperations {
    * }
    * ```
    */
-  async begin(routingKey: string, opts?: { namespace?: string }): Promise<Transaction> {
+  async begin(key: string, opts?: { namespace?: string }): Promise<Transaction> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-    return beginTxn(this.sender, namespace, routingKey);
+    return beginTxn(this.sender, namespace, key);
   }
 }

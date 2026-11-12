@@ -46,7 +46,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff, HaltBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { EmptyPollBackoff, HaltBackoff, LimitBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
 import {
   DRAIN_NOTICE_INTERVAL_MS,
   closedSince,
@@ -529,17 +529,18 @@ export class ActionWorker {
   }
 
   /**
-   * Register, waiting out a halted shard; false if a stop or drain ended
-   * the wait.
+   * Register, waiting out a halted shard or a limit (the node holding as
+   * many actions as it registers); false if a stop or drain ended the wait.
    */
   private async registerThroughHalts(actionNames: string[]): Promise<boolean> {
     const halted = new HaltBackoff(this.logger);
+    const limited = new LimitBackoff(this.logger);
     for (;;) {
       try {
         await this.register(actionNames);
         return true;
       } catch (err) {
-        if (!(await halted.waitIf(err, "Register", this.leave.signal))) throw err;
+        if (!(await halted.waitIf(err, "Register", this.leave.signal)) && !(await limited.waitIf(err, "Register", this.leave.signal))) throw err;
         if (this.leaving()) return false;
       }
     }
@@ -595,6 +596,7 @@ export class ActionWorker {
     const backoff = new EmptyPollBackoff();
     const failed = newWorkerBackoff();
     const halted = new HaltBackoff(this.logger);
+    const limited = new LimitBackoff(this.logger);
     let unproven = false;
     // An await takes a task. Its answer can be lost with the connection, or
     // refused when the node stopped leading after taking it; the next await
@@ -627,6 +629,7 @@ export class ActionWorker {
         requestKey = newRequestKey();
         failed.reset();
         halted.reset();
+        limited.reset();
         unproven = false;
 
         const wait = backoff.next(result.task === null, performance.now() - started, this.config.blockMs);
@@ -663,7 +666,7 @@ export class ActionWorker {
         } else if (err instanceof ServerError && err.reason === Reason.WorkerDraining) {
           this.log("The server drained this worker; finishing its running work");
           this.beginDrain();
-        } else if (await halted.waitIf(err, "Await", this.leave.signal)) {
+        } else if ((await halted.waitIf(err, "Await", this.leave.signal)) || (await limited.waitIf(err, "Await", this.leave.signal))) {
           // Polled again once the wait is over.
         } else {
           if (err instanceof ServerError && err.reason === Reason.WorkerUnhealthy) {

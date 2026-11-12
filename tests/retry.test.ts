@@ -27,7 +27,7 @@ import {
   normalizeRetryPolicy,
 } from "@floruntime/core";
 import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
-import { taskAnswer } from "./fake_worker_server.js";
+import { okAnswer, taskAnswer } from "./fake_worker_server.js";
 
 const enc = new TextEncoder();
 
@@ -268,39 +268,39 @@ describe("Backoff", () => {
   });
 });
 
-describe("StreamWorker group join", () => {
+describe("StreamWorker group create", () => {
   const noRetry = { maxAttempts: 1 };
 
   it("is retried after refusals it wasn't run for, with the client's retries off", async () => {
     const srv = await serve((op, n, id) =>
-      op === OpCode.StreamGroupJoin && n < 3 ? refusal(id, StatusCode.Overloaded, Ran.No) : frame(id, StatusCode.OK)
+      op === OpCode.StreamGroupCreate && n < 3 ? refusal(id, StatusCode.Overloaded, Ran.No) : frame(id, StatusCode.OK, okAnswer(op))
     );
     const c = await connect(srv.endpoint, noRetry);
-    const w = new StreamWorker(c, { stream: "s", blockMs: 30000 }, async () => {});
+    const w = new StreamWorker(c, { stream: "s", ackTimeoutMs: 30000, blockMs: 30000 }, async () => {});
     const done = w.start();
     for (let i = 0; i < 100 && srv.of(OpCode.StreamGroupRead).length === 0; i++) await sleep(20);
     w.stop();
     await done;
-    expect(srv.of(OpCode.StreamGroupJoin).length).toBe(4);
+    expect(srv.of(OpCode.StreamGroupCreate).length).toBe(4);
     expect(srv.of(OpCode.StreamGroupRead).length).toBeGreaterThan(0);
   });
 
   it("is fatal on any other refusal", async () => {
     const srv = await serve((op, _n, id) =>
-      op === OpCode.StreamGroupJoin ? refusal(id, StatusCode.Overloaded, Ran.Unknown) : frame(id, StatusCode.OK)
+      op === OpCode.StreamGroupCreate ? refusal(id, StatusCode.Overloaded, Ran.Unknown) : frame(id, StatusCode.OK, okAnswer(op))
     );
     const c = await connect(srv.endpoint, noRetry);
-    const w = new StreamWorker(c, { stream: "s" }, async () => {});
+    const w = new StreamWorker(c, { stream: "s", ackTimeoutMs: 30000 }, async () => {});
     await expect(w.start()).rejects.toBeInstanceOf(OverloadedError);
-    expect(srv.of(OpCode.StreamGroupJoin).length).toBe(1);
+    expect(srv.of(OpCode.StreamGroupCreate).length).toBe(1);
   });
 
   it("stops at once while waiting to retry", async () => {
     const srv = await serve((op, _n, id) =>
-      op === OpCode.StreamGroupJoin ? refusal(id, StatusCode.Unavailable, Ran.No) : frame(id, StatusCode.OK)
+      op === OpCode.StreamGroupCreate ? refusal(id, StatusCode.Unavailable, Ran.No) : frame(id, StatusCode.OK, okAnswer(op))
     );
     const c = await connect(srv.endpoint, noRetry);
-    const w = new StreamWorker(c, { stream: "s" }, async () => {});
+    const w = new StreamWorker(c, { stream: "s", ackTimeoutMs: 30000 }, async () => {});
     const done = w.start();
     await sleep(1000);
     const stopped = Date.now();
@@ -349,7 +349,7 @@ const failingWorkers: [string, number, (endpoint: string) => { stop: () => void;
 describe.each(failingWorkers)("%s after a failed poll", (_name, pollOp, start) => {
   it("backs off from 100 ms doubling, and stops at once during a wait", async () => {
     const srv = await serve((op, _n, id) =>
-      op === pollOp ? refusal(id, StatusCode.InternalError, Ran.No) : frame(id, StatusCode.OK)
+      op === pollOp ? refusal(id, StatusCode.InternalError, Ran.No) : frame(id, StatusCode.OK, okAnswer(op))
     );
     const w = start(srv.endpoint);
     // The first two waits total at most 300 ms, so a third poll comes well

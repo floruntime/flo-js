@@ -169,7 +169,7 @@ describe("requestBlockMs", () => {
 describe("requestTakesItems", () => {
   it("is true for requests whose reply carries what they took", () => {
     const op = (code: number) => serializeRequest(1n, code as OpCode, enc.encode("ns"), enc.encode("k"), code === OpCode.QueueDequeue ? encodeDequeueBody(1) : new Uint8Array(0), new Uint8Array(0));
-    for (const code of [OpCode.QueueDequeue, OpCode.StreamGroupRead, OpCode.StreamGroupClaim, OpCode.ActionAwait]) {
+    for (const code of [OpCode.QueueDequeue, OpCode.StreamGroupRead, OpCode.ActionAwait]) {
       expect(requestTakesItems(op(code))).toBe(true);
     }
     expect(requestTakesItems(op(OpCode.Get))).toBe(false);

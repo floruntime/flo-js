@@ -20,7 +20,7 @@ import {
   type Logger,
 } from "@floruntime/core";
 import { type ActionContext, ActionWorker, FloClient, NonRetryableError, StreamWorker, TimeoutError as ActionTimeoutError } from "@floruntime/node";
-import { fakeServer as timedServer, okAnswer, taskAnswer, type FakeTask } from "./fake_worker_server.js";
+import { fakeServer as timedServer, oneGroupRecord, okAnswer, taskAnswer, type FakeTask } from "./fake_worker_server.js";
 
 /** The task the fakes hand out, as a report names it; its id is t1:1:1:10:a. */
 const TASK = { runId: "t1", namespace: "default", deliveries: 1, term: 1n, index: 10n, action: "a" };
@@ -36,17 +36,6 @@ function frame(id: bigint, status: number, data: Uint8Array = new Uint8Array(0))
   view.setBigUint64(24, TABLE_HASH, true);
   buf.set(data, HEADER_SIZE);
   view.setUint32(16, computeCRC32C(buf.subarray(0, HEADER_SIZE), buf.subarray(HEADER_SIZE)), true);
-  return buf;
-}
-
-/** A group read answer holding one record, id 0-1. */
-function oneRecord(): Uint8Array {
-  const buf = new Uint8Array(4 + 8 + 8 + 1 + 4 + 1 + 4 + 1 + 4);
-  const view = new DataView(buf.buffer);
-  view.setUint32(0, 1, true);
-  view.setBigUint64(4, 1n, true);
-  view.setUint32(26, 1, true); // payload_len
-  buf[30] = 0x78;
   return buf;
 }
 
@@ -193,7 +182,7 @@ function oneRecordThen(rest: (op: number, conn: number) => Action) {
     if (op === OpCode.StreamGroupRead) {
       if (served) return "park";
       served = true;
-      return oneRecord();
+      return oneGroupRecord();
     }
     return rest(op, conn);
   };

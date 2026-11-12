@@ -73,7 +73,7 @@ interface ClientOptions {
 | `get` | `get(key, opts?) → Promise<GetResult \| null>` | Value and version; null if not found |
 | `put` | `put(key, value, opts?) → Promise<PutResult>` | Set key-value; returns the new version |
 | `delete` | `delete(key, opts?) → Promise<boolean>` | Delete key; whether it existed (a missing key is not an error) |
-| `mget` | `mget(keys, opts?) → Promise<MGetEntry[]>` | Up to 256 keys of at most 4096 bytes; one entry per key, in order. `routingKey` looks every key up on that routing key's shard |
+| `mget` | `mget(keys, opts?) → Promise<MGetEntry[]>` | Up to 256 keys of at most 4096 bytes, from any shards; one entry per key, in order |
 | `scan` | `scan(prefix, opts?) → Promise<ScanResult>` | One page of key names (`keys`) and the next page's `cursor` (null on the last) |
 | `history` | `history(key, opts?) → Promise<HistoryResult>` | A page of `versions`, newest first: `version`, `atMs` (write time), `deleted`, `value`; none for a missing key. `limit` (1 to 65, default 10) and `beforeVersion` (exclusive) pick the page; `more` says older versions follow: pass the page's last version as `beforeVersion` |
 | `incr` | `incr(key, opts?) → Promise<KVIncrResult>` | Add `delta` (default 1) to a counter; its new `value` and `version` |
@@ -82,10 +82,12 @@ interface ClientOptions {
 | `jsonGet` | `jsonGet(key, path = "$", opts?) → Promise<JsonGetResult \| null>` | The JSON at `path`; null if the key or path is missing |
 | `jsonSet` | `jsonSet(key, path, json, opts?) → Promise<PutResult>` | Set the JSON at `path` ("$" replaces the document) |
 | `jsonDel` | `jsonDel(key, path = "$", opts?) → Promise<bigint \| null>` | Remove the JSON at `path`; the new version, or null when "$" deleted the key |
-| `begin` | `begin(routingKey, opts?) → Promise<Transaction>` | Open a transaction on `routingKey`'s shard |
+| `begin` | `begin(key, opts?) → Promise<Transaction>` | Open a transaction pinned to `key`'s `{tag}` |
 
-Every op takes `namespace` in its options; every op but `scan` takes
-`routingKey`, which routes the request in place of the key.
+Every op takes `namespace` in its options. A key routes by its `{tag}`, the
+part between its first `{` and the `}` after it, or by the whole key when it
+has none: keys that belong together, in a transaction say, share a `{tag}`
+(`{user:1}:balance`, `{user:1}:visits`).
 `delete` and `expire` take `casVersion`: the key's version they require.
 The server decides a `casVersion` or `condition` as the write applies, in
 log order, so a refused one still costs a replicated commit. Inside a
@@ -122,7 +124,6 @@ interface GetOptions {
   namespace?: string;      // Override default namespace
   waitMs?: number;         // Wait up to this long (at most 300000; 0 = don't wait)
   waitFor?: WaitFor;       // WaitFor.Exists (default: answers at once if present) or WaitFor.Change (the next version)
-  routingKey?: string;     // Route by this instead of the key
 }
 ```
 
@@ -134,7 +135,6 @@ interface PutOptions {
   ttlMs?: bigint;          // Time-to-live in milliseconds (0 = no expiry)
   condition?: Condition;   // Condition.Always (default), Condition.IfAbsent or Condition.IfPresent
   casVersion?: bigint;     // Only write if this is the key's version (0n = it doesn't exist)
-  routingKey?: string;     // Route by this instead of the key
 }
 ```
 
@@ -153,11 +153,11 @@ interface ScanOptions {
 #### Transactions
 
 ```typescript
-const txn = await client.kv.begin("user:123");
+const txn = await client.kv.begin("{user:123}");
 try {
-  await txn.put("user:123:name", encoder.encode("Jane"));
-  await txn.incr("user:123:visits");
-  await txn.expire("user:123:session", 60_000);
+  await txn.put("{user:123}:name", encoder.encode("Jane"));
+  await txn.incr("{user:123}:visits");
+  await txn.expire("{user:123}:session", 60_000);
   await txn.commit();
 } catch (err) {
   await txn.rollback();
@@ -165,9 +165,12 @@ try {
 }
 ```
 
-Inside a transaction, `get`, `put`, `delete`, `incr`, `expire` and `exists`
-are routed by the transaction's routing key; `delete` and `incr` answer
-nothing until commit. `scan`, `mget`, `history` and the JSON ops throw
+A transaction is pinned to the `{tag}` of the key `begin` was given, or to
+that whole key when it has none. Inside it, `get`, `put`, `delete`, `incr`,
+`expire` and `exists` take keys that route with it; one that routes
+elsewhere is refused `BadRequestError` with reason `KeysNotColocated`, not
+run (the transaction stays open). `delete` and `incr` answer nothing until
+commit. `scan`, `mget`, `history` and the JSON ops throw
 `TxnUnsupportedOpError`.
 A transaction holds at most 64 ops and 256 KiB by default; both are the
 server operator's settings. Past them an op is refused `TxnTooLarge`.
@@ -358,11 +361,45 @@ Streams are append-only logs for event sourcing and real-time data.
 |--------|-----------|-------------|
 | `append` | `append(stream, payload, opts?) → Promise<StreamAppendResult>` | Append to stream |
 | `read` | `read(stream, opts?) → Promise<StreamReadResult>` | Read from stream |
-| `groupJoin` | `groupJoin(stream, group, consumer, opts?) → Promise<void>` | Join consumer group |
-| `groupRead` | `groupRead(stream, opts) → Promise<StreamReadResult>` | Read from group |
-| `groupAck` | `groupAck(stream, ids, opts) → Promise<void>` | Ack in group |
-| `groupList` | `groupList(stream, opts?) → Promise<StreamGroupListResult>` | The stream's consumer groups, with members, pending, settings and last delivery; read on the leader |
-| `groupMembers` | `groupMembers(stream, group, opts?) → Promise<StreamGroupMembersResult>` | A group's members, each `active` or `leaving`, with its pending entries; read on the leader |
+| `groupCreate` | `groupCreate(stream, group, { ackTimeoutMs?, maxDeliver? }?) → Promise<boolean>` | Create a group with its lease and attempts; whether it made it |
+| `groupRead` | `groupRead(stream, { group, consumer, limit?, blockMs? }) → Promise<StreamGroupReadResult>` | Lease up to `limit` (1 to 100) of the group's records to `consumer` |
+| `groupAck` | `groupAck(stream, delivery, { group }) → Promise<StreamGroupReportResult>` | Done with leased records |
+| `groupNack` | `groupNack(stream, delivery, { group, delayMs?, dead?, error? }) → Promise<StreamGroupReportResult>` | Hand leased records back: ready again, or dead |
+| `groupTouch` | `groupTouch(stream, delivery, { group }) → Promise<StreamGroupTouchResult>` | Keep a lease |
+| `groupList` | `groupList(stream, opts?) → Promise<StreamGroupListResult>` | The stream's consumer groups, with members, pending records, settings and last delivery |
+| `groupMembers` | `groupMembers(stream, group, opts?) → Promise<StreamGroupMembersResult>` | A group's members (the consumers holding its records now), each with how many it holds |
+
+A consumer group hands each of its stream's records to one consumer at a
+time, leased: a read takes records whose lease ran out or that were nacked
+first, once they are ready again, then the stream's next ones, each with
+`deliveries` (1 the first time). It doesn't consume them: ack each within the
+group's lease (`ackTimeoutMs`, 5 s to 12 h, 30 s by default), or nack it, or
+it is delivered again once the lease runs out. Touch to keep a lease: with
+half of it or less left it runs a full lease from now, up to 12 h from the
+read. A record nacked or expired `maxDeliver` times (1 to 255, 5 by default)
+is dead and isn't delivered again. Delivery is at least once.
+
+Ack, nack and touch name the read they report on: pass its result, or it
+with `records` narrowed. A report on a delivery that is over (the lease ran
+out, or the record was delivered again since) applies nothing and isn't an
+error: `applied` counts what it did, and `refused` names each record it
+didn't, with a `QueueRefusal` code (`Gone`, `DeliveredAgain`, `OtherHolder`,
+`Expired`, `Released`, `NotHeld`) and a reason. A resent ack whose first
+applied answers `Gone`.
+
+A read creates the group it names, at the defaults; `groupCreate` makes one
+with other settings. Creating a group that exists with the same settings
+changes nothing; with others it throws `ConflictError`, which names the
+group's own: a create can't change them.
+
+A `StreamWorker` reads its group and runs a handler per record: it acks the
+record when the handler returns and nacks it when the handler throws. While
+a handler runs, the worker touches the record's lease every sixth of it (at
+least 100 ms apart, counted from the read's arrival; the lease is the read's
+expiry less that time, by this host's clock), so a handler that outlasts
+the lease keeps its record. Given `ackTimeoutMs` or `maxDeliver` it creates
+its group with them at start; otherwise its first read creates the group at
+the defaults.
 
 #### Stream Example
 
@@ -376,31 +413,24 @@ const result = await client.stream.append(
 console.log(`ID: ${result.id.timestampMs}-${result.id.sequence}`);
 
 // Read from stream (from beginning)
-const records = await client.stream.read("events", {
-  offset: 0n,
-  limit: 10,
-});
+const records = await client.stream.read("events", { limit: 10 });
 
 for (const record of records.records) {
   console.log(decoder.decode(record.payload));
 }
 
-// Read from timestamp
-const recentRecords = await client.stream.read("events", {
-  from: Date.now() - 3600_000,  // last hour
-  limit: 100,
-});
+// The next page: `start` is exclusive, so pass the last id seen
+const last = records.records.at(-1);
+const more = await client.stream.read("events", { start: last?.id, limit: 10 });
 
 // Consumer groups
-await client.stream.groupJoin("events", "processors", "consumer-1");
-const groupRecords = await client.stream.groupRead("events", {
+await client.stream.groupCreate("events", "processors", { ackTimeoutMs: 60_000 });
+const read = await client.stream.groupRead("events", {
   group: "processors",
   consumer: "consumer-1",
   limit: 10,
 });
-await client.stream.groupAck("events", groupRecords.records.map(r => r.id), {
-  group: "processors",
-});
+const { applied, refused } = await client.stream.groupAck("events", read, { group: "processors" });
 ```
 
 ## Error Handling
@@ -448,6 +478,7 @@ try {
 | `UnauthorizedError` | Authentication failed |
 | `OverloadedError` | Server overloaded, and the client's retries ran out |
 | `UnavailableError` | No leader, or the shard isn't taking writes, and the client's retries ran out. With `reason === Reason.ShardHalted` the shard halted, and takes no writes until an operator repairs it; never retried |
+| `LimitError` | The node is at a limit an operator sets: `reason` says which (`MemoryBudget`, `TooManyActions`, `TooManyWorkflowDefinitions`, `TooManyWorkflowRuns`), and the message names it. Terminal: retrying won't clear it until something is deleted, the node is given more room, or the setting is raised (it isn't permanent). Never run, never retried |
 | `OutcomePendingError` | The write committed but hasn't applied: its shard halted at it or before it (`reason` ShardHalted, `ran` Unknown); the message says whether it applies when the shard resumes. Never retried |
 | `InternalError` | Internal server error |
 
@@ -469,11 +500,11 @@ outlast a disk read; a `StreamWorker`'s group read refused so after them is
 read again, the same group and consumer, from 50 ms doubling to 5 s. The
 first refusal of a run is logged at warn with the server's message, which
 says if the shard is damaged or offline, then at most every 30 s while the
-refusals go on. Such a read claimed and delivered nothing, so the same read is
-safe to send again. Your own `stream.read` or `groupRead` throws
+refusals go on. Such a read leased nothing, so the same read is safe to send
+again. Your own `stream.read` or `groupRead` throws
 `UnavailableError` once the client's retries run out: read again.
 
-Workers are different: registering, a `StreamWorker`'s group join and the
+Workers are different: registering, a `StreamWorker`'s group create and the
 poll loops are safe to repeat, so on `unavailable` with reason
 `shard_halted` (not run) a worker keeps trying,
 waiting from 100 ms doubling to 30 s and logging each refusal at warn with
@@ -484,6 +515,11 @@ ends a wait at once. An `outcome_pending` refusal of any of those calls
 is not resent: `start()` throws `OutcomePendingError` with the server's
 message. A handler's result (complete, fail, ack, nack) refused by a halted
 shard is logged and dropped, not resent.
+
+`limit` is never retried by the client either. Workers wait it out: a
+registration, a `StreamWorker`'s group create or a poll refused at a limit
+is tried again from 1 s doubling to 30 s, each distinct reason logged at
+warn once until a call goes through, so a worker neither spins nor stops.
 
 | `retry` field | Default | |
 |---|---|---|
@@ -499,7 +535,7 @@ connection; the server routes it afresh.
 
 `ActionWorker` and `StreamWorker` wait the same way between failed polls, from
 100 ms up to 5 s, starting again from 100 ms after a poll that succeeds; `stop()`
-ends a wait at once. A stream worker retries a group join refused this way
+ends a wait at once. A stream worker retries a group create refused this way
 instead of stopping. `ActionWorker`, and a `StreamWorker` given an endpoint, take a `retry`
 option, with the same fields, for the client they create; a `StreamWorker`
 given a client uses that client's. A worker reconnects its client when the connection drops, but once the client's owner calls `close()` the worker stops, and stays stopped even if the client is connected again.
