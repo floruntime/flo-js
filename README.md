@@ -393,11 +393,13 @@ changes nothing; with others it throws `ConflictError`, which names the
 group's own: a create can't change them.
 
 A `StreamWorker` reads its group and runs a handler per record: it acks the
-record when the handler returns and nacks it when the handler throws. While
-a handler runs, the worker touches the record's lease every sixth of it (at
-least 100 ms apart, counted from the read's arrival; the lease is the read's
-expiry less that time, by this host's clock), so a handler that outlasts
-the lease keeps its record. Given `ackTimeoutMs` or `maxDeliver` it creates
+record when the handler returns and nacks it when the handler throws. From
+a read's arrival until each of its records is acked or nacked, running or
+still waiting for a free handler slot, the worker keeps their leases: one
+touch every sixth of the lease (at least 100 ms apart) names the read and
+every record still open. It reads the lease off the server's expiry against
+this host's clock, the read's and then each touch answer's, so a skewed
+clock is corrected as touches come back. Given `ackTimeoutMs` or `maxDeliver` it creates
 its group with them at start; otherwise its first read creates the group at
 the defaults.
 
@@ -430,7 +432,10 @@ const read = await client.stream.groupRead("events", {
   consumer: "consumer-1",
   limit: 10,
 });
-const { applied, refused } = await client.stream.groupAck("events", read, { group: "processors" });
+if (read.records.length > 0) {
+  // ...handle them, then:
+  const { applied, refused } = await client.stream.groupAck("events", read, { group: "processors" });
+}
 ```
 
 ## Error Handling
@@ -569,7 +574,8 @@ outstanding read can wait up to `blockMs`. `stop()` ends polling, also
 mid-reconnect or mid-drain, once an outstanding poll returns (within
 `blockMs`);
 running handlers still finish, and a `StreamWorker` hands back the records of
-its last batch it hasn't started. Either one before or during `start()` ends
+its last batch it hasn't started. The hand-back is a nack, so it spends one
+of each record's attempts: with `maxDeliver` 1, a stop kills those records. Either one before or during `start()` ends
 that run, and both workers can be started again afterwards.
 
 ```typescript

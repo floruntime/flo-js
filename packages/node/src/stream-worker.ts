@@ -77,6 +77,109 @@ const MAX_LEASE_MS = 43_200_000;
 /** Touch refusals that mean touching again can't help. */
 const TOUCH_FINAL: StatusCode[] = [StatusCode.NotFound, StatusCode.BadRequest];
 
+/** A record's id as logs show it: `ms-seq`. */
+function recordId(r: { id: StreamID }): string {
+  return `${r.id.timestampMs}-${r.id.sequence}`;
+}
+
+/**
+ * Keeps the leases of one group read's records while they are open: from
+ * the read's arrival, whether a record is running or waiting for a free
+ * handler slot, until it is acked or nacked (`done`). One touch names the
+ * read's delivery and every record still open, every sixth of the lease, at
+ * least 100 ms apart. The server extends a lease only with half of it or
+ * less left, so the touch at a half extends it and the two after it can
+ * fail before it runs out.
+ *
+ * The lease and its start are read off the server's expiry against this
+ * host's clock: first the read's, then each touch answer's, so pacing
+ * follows the server's expiry rather than one reading of a skewed clock.
+ * A record a touch didn't apply to (its delivery is over) is touched no
+ * more; a touch refused not found or bad request stops touching; any other
+ * failure is tried again at the next tick.
+ */
+class LeaseKeeper {
+  private readonly open = new Map<string, StreamGroupRecord>();
+  private leaseMs: number;
+  /** When the current lease began, by performance.now(). */
+  private anchor: number;
+  private lastExpiry: bigint;
+  private ticks = 0;
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private stopped = false;
+
+  constructor(
+    private readonly client: FloClient,
+    private readonly stream: string,
+    private readonly group: string,
+    private readonly read: StreamGroupReadResult,
+    arrivedAt: number,
+    private readonly logger: Logger
+  ) {
+    for (const r of read.records) this.open.set(recordId(r), r);
+    const wallAtArrival = Date.now() - (performance.now() - arrivedAt);
+    this.leaseMs = clampLease(Number(read.expiresAtMs) - wallAtArrival);
+    this.anchor = arrivedAt;
+    this.lastExpiry = read.expiresAtMs;
+    this.schedule();
+  }
+
+  /** `record` is acked or nacked: touch it no more. */
+  done(record: StreamGroupRecord): void {
+    this.open.delete(recordId(record));
+    if (this.open.size === 0) this.stop();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    clearTimeout(this.timer);
+  }
+
+  /** The next tick on the schedule from the lease's start, skipping any a slow touch overran. */
+  private schedule(): void {
+    if (this.stopped) return;
+    const interval = Math.max(this.leaseMs / 6, MIN_TOUCH_INTERVAL_MS);
+    const now = performance.now();
+    this.ticks = Math.max(this.ticks + 1, Math.floor((now - this.anchor) / interval) + 1);
+    this.timer = setTimeout(() => void this.tick(), Math.max(0, this.anchor + this.ticks * interval - now));
+  }
+
+  /** Re-read the lease from an expiry the server just gave. */
+  private calibrate(expiresAtMs: bigint): void {
+    if (expiresAtMs <= this.lastExpiry) return;
+    const remaining = Number(expiresAtMs) - Date.now();
+    this.lastExpiry = expiresAtMs;
+    this.leaseMs = clampLease(remaining);
+    this.anchor = performance.now() + remaining - this.leaseMs;
+    this.ticks = 0;
+  }
+
+  private async tick(): Promise<void> {
+    if (this.stopped) return;
+    const records = [...this.open.values()];
+    try {
+      const got = await this.client.stream.groupTouch(this.stream, deliveryOf(this.read, records), { group: this.group });
+      for (const r of got.refused) {
+        const id = `${r.id.timestampMs}-${r.id.sequence}`;
+        if (this.open.delete(id)) this.logger.warn(`Touch for record ${id} applied nothing, no longer touching it: ${r.reason}`);
+      }
+      if (got.applied === 0 || this.open.size === 0) return this.stop();
+      this.calibrate(got.expiresAtMs);
+    } catch (err) {
+      if (err instanceof ServerError && TOUCH_FINAL.includes(err.status)) {
+        this.logger.warn(`Touch for ${records.length} records was refused, stopping: ${err}`);
+        return this.stop();
+      }
+      this.logger.warn(`Touch for ${records.length} records failed: ${err}; trying again`);
+    }
+    this.schedule();
+  }
+}
+
+function clampLease(ms: number): number {
+  return Math.min(Math.max(ms, MIN_LEASE_MS), MAX_LEASE_MS);
+}
+
 /** The delivery a report names: `records` of the read `read`. */
 function deliveryOf(read: StreamGroupReadResult, records: StreamGroupRecord[]): StreamGroupDelivery {
   return { consumer: read.consumer, term: read.term, index: read.index, records };
@@ -550,6 +653,9 @@ export class StreamWorker {
           continue;
         }
 
+        // Every record of the read is leased from now, waiting for a slot or
+        // not: keep each one's lease until it is acked or nacked.
+        const keeper = new LeaseKeeper(this.client, this.config.stream, this.config.group, result, arrivedAt, this.logger);
         // Process each record with concurrency control. A drain handles the
         // whole batch, already delivered here; a stop hands back the rest.
         let dispatched = 0;
@@ -563,14 +669,14 @@ export class StreamWorker {
           if (this.stopRequested) break;
 
           this.activeCount++;
-          const taskPromise = this.processRecord(record, result, arrivedAt).finally(() => {
+          const taskPromise = this.processRecord(record, result, keeper).finally(() => {
             this.activeCount--;
             this.pendingTasks.delete(taskPromise);
           });
           this.pendingTasks.add(taskPromise);
           dispatched++;
         }
-        if (dispatched < result.records.length) await this.handBack(result, result.records.slice(dispatched));
+        if (dispatched < result.records.length) await this.handBack(result, result.records.slice(dispatched), keeper);
       } catch (err) {
         if (this.leaving()) break;
         if (isConnectionError(err)) {
@@ -610,14 +716,15 @@ export class StreamWorker {
    * hands them out again now rather than once their lease runs out. Like
    * the lease running out, the nack counts as one of their attempts.
    */
-  private async handBack(read: StreamGroupReadResult, records: StreamGroupRecord[]): Promise<void> {
+  private async handBack(read: StreamGroupReadResult, records: StreamGroupRecord[], keeper: LeaseKeeper): Promise<void> {
+    for (const r of records) keeper.done(r);
     const delivery = deliveryOf(read, records);
     await sendResult(this.client, this.leave.signal, this.logger, this.clientCloses, `nack of ${records.length} records not started`, async () =>
       this.noteRefused("nack", await this.client.stream.groupNack(this.config.stream, delivery, { group: this.config.group }))
     );
   }
 
-  private async processRecord(record: StreamGroupRecord, read: StreamGroupReadResult, arrivedAt: number): Promise<void> {
+  private async processRecord(record: StreamGroupRecord, read: StreamGroupReadResult, keeper: LeaseKeeper): Promise<void> {
     const client = this.client;
     const ctx = new StreamContext(
       record,
@@ -626,21 +733,20 @@ export class StreamWorker {
       this.config.group,
       this.config.consumer
     );
-    const id = `${record.id.timestampMs}-${record.id.sequence}`;
+    const id = recordId(record);
     const delivery = deliveryOf(read, [record]);
     const opts = { group: this.config.group };
 
     // The handler's outcome alone picks ack or nack; sending it is separate,
     // so a lost ack is resent, never turned into a nack.
     let acked = true;
-    const stopTouching = this.keepTouching(delivery, read.expiresAtMs, arrivedAt, id);
     try {
       await this.withTimeout(this.handler(ctx), this.config.messageTimeoutMs);
     } catch (err) {
       this.log(`Record ${id} failed: ${err}`);
       acked = false;
     } finally {
-      stopTouching();
+      keeper.done(record);
     }
 
     const what = acked ? "ack" : "nack";
@@ -666,57 +772,14 @@ export class StreamWorker {
   }
 
   /**
-   * Touch a record's lease until the returned function is called, every
-   * sixth of the lease (at least 100 ms apart), counted from when the read
-   * arrived. The server extends a lease only with half of it or less left,
-   * so the touch at a half extends it and the two after it can fail before
-   * it runs out. The lease is the read's expiry less the time it arrived,
-   * by this host's clock. A touch that applies to nothing (the delivery is
-   * over), or is refused not found or bad request, stops touching; any
-   * other failure is tried again at the next tick.
-   */
-  private keepTouching(delivery: StreamGroupDelivery, expiresAtMs: bigint, arrivedAt: number, id: string): () => void {
-    const leaseMs = Math.min(Math.max(Number(expiresAtMs) - (Date.now() - (performance.now() - arrivedAt)), MIN_LEASE_MS), MAX_LEASE_MS);
-    const intervalMs = Math.max(leaseMs / 6, MIN_TOUCH_INTERVAL_MS);
-    let stopped = false;
-    let ticks = 0;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    // The next tick on the schedule from arrival, skipping any a slow touch overran.
-    const schedule = () => {
-      const now = performance.now();
-      ticks = Math.max(ticks + 1, Math.floor((now - arrivedAt) / intervalMs) + 1);
-      timer = setTimeout(tick, Math.max(0, arrivedAt + ticks * intervalMs - now));
-    };
-    const tick = async (): Promise<void> => {
-      if (stopped) return;
-      try {
-        const got = await this.client.stream.groupTouch(this.config.stream, delivery, { group: this.config.group });
-        if (got.applied === 0) {
-          this.logger.warn(`Touch for record ${id} applied nothing, stopping: ${got.refused[0]?.reason ?? "no answer"}`);
-          return;
-        }
-      } catch (err) {
-        if (err instanceof ServerError && TOUCH_FINAL.includes(err.status)) {
-          this.logger.warn(`Touch for record ${id} was refused, stopping: ${err}`);
-          return;
-        }
-        this.logger.warn(`Touch for record ${id} failed: ${err}; trying again`);
-      }
-      if (!stopped) schedule();
-    };
-    schedule();
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
-  }
-
-  /**
    * Signal the stream worker to stop: polling ends, also mid-reconnect or
    * mid-drain, once an outstanding read returns (within blockMs), and
    * records of the last batch not yet started are handed back. Running
    * handlers finish and ack before `start()` returns. A stop before
    * `start()` ends that run at once.
+   *
+   * The hand-back is a nack, so it spends one of each record's attempts:
+   * with `maxDeliver` 1, a stop kills the records it hands back.
    */
   stop(): void {
     this.log("Stopping stream worker...");

@@ -18,7 +18,19 @@ import {
   StreamOperations,
 } from "@floruntime/core";
 import { FloClient, StreamWorker } from "@floruntime/node";
-import { fakeServer, groupRead, groupReportAnswer, refusal, until } from "./fake_worker_server.js";
+import { fakeServer, groupRead, groupReportAnswer, quiet, refusal, until } from "./fake_worker_server.js";
+
+/** The record seqs a group report request names: its value is [group][consumer][term][index][count]([ms][seq][deliveries])*. */
+function reportSeqs(payload: Buffer): bigint[] {
+  let o = 2 + payload.readUInt16LE(0); // namespace
+  o += 2 + payload.readUInt16LE(o); // key
+  o += 4; // value length
+  o += 2 + payload.readUInt16LE(o); // group
+  o += 2 + payload.readUInt16LE(o); // consumer
+  o += 16;
+  const n = payload.readUInt32LE(o);
+  return Array.from({ length: n }, (_, i) => payload.readBigUInt64LE(o + 4 + i * 20 + 8));
+}
 
 const enc = new TextEncoder();
 const text = (s: string) => Array.from(enc.encode(s));
@@ -236,6 +248,61 @@ describe("StreamWorker leases", () => {
     expect(Array.from(ack.payload.subarray(-42))).toEqual([...le(2n, 8), ...le(8n, 8), ...le(1n, 4), ...le(0n, 8), ...le(4n, 8), ...le(3n, 4), 0, 0]);
     for (const t of touches) expect(t.payload.subarray(-42).equals(ack.payload.subarray(-42))).toBe(true);
   });
+
+  it("touches records waiting for a free handler slot from the read's arrival, dropping each once acked", async () => {
+    // A 5 s lease and one slot: the third record waits about 4 s for it.
+    let served = false;
+    const srv = await fakeServer((op) => {
+      if (op !== OpCode.StreamGroupRead) return undefined;
+      if (served) return "park";
+      served = true;
+      return { data: groupRead({ expiresAtMs: BigInt(Date.now() + 5000), records: [{ seq: 1n }, { seq: 2n }, { seq: 3n }] }) };
+    });
+    close = srv.close;
+    const w = new StreamWorker(srv.endpoint, { stream: "s", concurrency: 1, blockMs: 30000, logger: quiet }, async () => {
+      await new Promise((r) => setTimeout(r, 2000));
+    });
+    const done = w.start();
+    await until(() => srv.ops().filter((o) => o === OpCode.StreamGroupAck).length === 3, 10_000);
+    w.stop();
+    srv.close();
+    await done;
+    const read = srv.seen.find((s) => s.op === OpCode.StreamGroupRead)!.at;
+    const touches = srv.seen.filter((s) => s.op === OpCode.StreamGroupTouch).map((t) => ({ at: t.at - read, seqs: reportSeqs(t.payload) }));
+    // The first touch, a sixth of the lease in, names all three, though two wait.
+    expect(touches[0]!.at).toBeLessThan(1500);
+    expect(touches[0]!.seqs).toEqual([1n, 2n, 3n]);
+    // Record 3, waiting until about 4 s, is touched more than once before its lease's 5 s.
+    expect(touches.filter((t) => t.at < 5000 && t.seqs.includes(3n)).length).toBeGreaterThanOrEqual(4);
+    // Once acked, a record isn't named again.
+    const acked1 = srv.seen.filter((s) => s.op === OpCode.StreamGroupAck)[0]!.at - read;
+    expect(touches.filter((t) => t.at > acked1 + 50).every((t) => !t.seqs.includes(1n))).toBe(true);
+  }, 15_000);
+
+  it("re-reads its pacing from each touch answer's expiry", async () => {
+    // The read says 5 s (a touch every 833 ms); the first touch answer
+    // extends to 12 s from now, so the next comes 2 s after it, not 833 ms.
+    let served = false;
+    const srv = await fakeServer((op) => {
+      if (op === OpCode.StreamGroupTouch) return { data: groupReportAnswer(1, [], BigInt(Date.now() + 12_000)) };
+      if (op !== OpCode.StreamGroupRead) return undefined;
+      if (served) return "park";
+      served = true;
+      return { data: groupRead({ expiresAtMs: BigInt(Date.now() + 5000) }) };
+    });
+    close = srv.close;
+    const w = new StreamWorker(srv.endpoint, { stream: "s", blockMs: 30000, logger: quiet }, async () => {
+      await new Promise((r) => setTimeout(r, 3500));
+    });
+    const done = w.start();
+    await until(() => srv.ops().includes(OpCode.StreamGroupAck), 10_000);
+    w.stop();
+    srv.close();
+    await done;
+    const touches = srv.seen.filter((s) => s.op === OpCode.StreamGroupTouch).map((t) => t.at);
+    expect(touches).toHaveLength(2);
+    expect(touches[1]! - touches[0]!).toBeGreaterThan(1800);
+  }, 15_000);
 
   it("warns of a stale ack and doesn't resend it or nack", async () => {
     let served = false;

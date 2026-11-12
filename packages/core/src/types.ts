@@ -825,7 +825,7 @@ export interface StreamGroupNackOptions extends StreamGroupReportOptions {
   delayMs?: number;
   /** Dead at once, whatever attempts are left. */
   dead?: boolean;
-  /** Why the records failed, at most 1024 bytes; kept with a dead record. */
+  /** Why the records failed, kept with a dead record. It travels as an option, so it goes cut to 255 bytes. */
   error?: string;
 }
 
