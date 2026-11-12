@@ -516,10 +516,13 @@ is not resent: `start()` throws `OutcomePendingError` with the server's
 message. A handler's result (complete, fail, ack, nack) refused by a halted
 shard is logged and dropped, not resent.
 
-`limit` is never retried by the client either. Workers wait it out: a
-registration, a `StreamWorker`'s group create or a poll refused at a limit
-is tried again from 1 s doubling to 30 s, each distinct reason logged at
-warn once until a call goes through, so a worker neither spins nor stops.
+`limit` is never retried by the client either. For the workers, start()
+fails with the limit error; a limit hit while running is logged and backed
+off. A registration or a `StreamWorker`'s group create refused at a limit
+makes `start()` reject with `LimitError` after that one request, and the
+caller decides. A poll refused at a limit is tried again from 1 s doubling
+to 30 s, each distinct reason logged at warn once until a poll goes
+through, so a running worker neither spins nor stops.
 
 | `retry` field | Default | |
 |---|---|---|

@@ -147,12 +147,12 @@ export const LIMIT_INITIAL_BACKOFF_MS = 1000;
 export const LIMIT_MAX_BACKOFF_MS = 30_000;
 
 /**
- * Pacing for a worker's calls refused with status limit (too many actions
- * on the node, its memory budget spent). Retrying won't clear it until an
- * operator deletes something, gives the node room or raises the setting,
- * so the worker neither spins nor stops: it waits, from 1 s doubling to
- * 30 s, and logs each distinct reason once at warn (later ones at debug)
- * until a call goes through.
+ * Pacing for a running worker's polls refused with status limit (its
+ * memory budget spent, say). Retrying won't clear it until an operator
+ * deletes something, gives the node room or raises the setting, so the
+ * worker neither spins nor stops: it waits, from 1 s doubling to 30 s, and
+ * logs each distinct reason once at warn (later ones at debug) until a
+ * poll goes through. start() doesn't use it: a limit there is thrown.
  */
 export class LimitBackoff {
   private readonly backoff = new Backoff(LIMIT_INITIAL_BACKOFF_MS, LIMIT_MAX_BACKOFF_MS);

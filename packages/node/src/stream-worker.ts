@@ -341,6 +341,9 @@ export class StreamWorker {
    * Start consuming stream records until `stop()`, or a drain once its
    * running handlers finish and ack. Either one before or during startup
    * ends this run. It may be called again afterwards.
+   *
+   * start() fails with the limit error; a limit hit while running is
+   * logged and backed off.
    */
   async start(): Promise<void> {
     this.log(
@@ -411,14 +414,13 @@ export class StreamWorker {
   /**
    * Create the consumer group, when given its settings, and register this
    * worker with the server. A create the server refused without running it
-   * (overloaded or unavailable, past the client's own retries), or at a
-   * limit, is tried again with a backoff; any other error is thrown.
-   * Returns false if a stop or drain came first.
+   * (overloaded or unavailable, past the client's own retries) is tried
+   * again with a backoff; any other error, a limit refusal included, is
+   * thrown. Returns false if a stop or drain came first.
    */
   private async setUp(): Promise<boolean> {
     const failed = newWorkerBackoff();
     const halted = new HaltBackoff(this.logger);
-    const limited = new LimitBackoff(this.logger);
     const create = this.config.ackTimeoutMs !== undefined || this.config.maxDeliver !== undefined;
     while (create) {
       if (this.leaving()) return false;
@@ -430,7 +432,6 @@ export class StreamWorker {
         break;
       } catch (err) {
         if (await halted.waitIf(err, "Group create", this.leave.signal)) continue;
-        if (await limited.waitIf(err, "Group create", this.leave.signal)) continue;
         if (!isRefusedUnrun(err)) throw err;
         const d = failed.next();
         this.log(`Group create refused: ${err}, retrying in ${d}ms...`);
@@ -438,13 +439,12 @@ export class StreamWorker {
       }
     }
     halted.reset();
-    limited.reset();
     for (;;) {
       try {
         await this.registerWorker();
         return true;
       } catch (err) {
-        if (!(await halted.waitIf(err, "Register", this.leave.signal)) && !(await limited.waitIf(err, "Register", this.leave.signal))) throw err;
+        if (!(await halted.waitIf(err, "Register", this.leave.signal))) throw err;
         if (this.leaving()) return false;
       }
     }

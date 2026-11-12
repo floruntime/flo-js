@@ -454,8 +454,12 @@ export class ActionWorker {
    * this run. Running handlers finish and send their results before it
    * returns, and it may be called again afterwards.
    *
+   * start() fails with the limit error; a limit hit while running is
+   * logged and backed off.
+   *
    * @throws Error if no handlers are registered
    * @throws Error if connection to server fails
+   * @throws LimitError if registering is refused at a limit
    */
   async start(): Promise<void> {
     if (this.handlers.size === 0) {
@@ -529,18 +533,18 @@ export class ActionWorker {
   }
 
   /**
-   * Register, waiting out a halted shard or a limit (the node holding as
-   * many actions as it registers); false if a stop or drain ended the wait.
+   * Register, waiting out a halted shard; false if a stop or drain ended
+   * the wait. A limit refusal (the node holding as many actions as it
+   * registers) is thrown, not waited out: the caller decides.
    */
   private async registerThroughHalts(actionNames: string[]): Promise<boolean> {
     const halted = new HaltBackoff(this.logger);
-    const limited = new LimitBackoff(this.logger);
     for (;;) {
       try {
         await this.register(actionNames);
         return true;
       } catch (err) {
-        if (!(await halted.waitIf(err, "Register", this.leave.signal)) && !(await limited.waitIf(err, "Register", this.leave.signal))) throw err;
+        if (!(await halted.waitIf(err, "Register", this.leave.signal))) throw err;
         if (this.leaving()) return false;
       }
     }

@@ -1,7 +1,8 @@
 /**
  * Status limit: the node is at a limit an operator sets. Never run, and
- * terminal: the client never retries it, and a worker neither spins nor
- * stops on it, warning once per distinct reason. And a transaction's key
+ * terminal: the client never retries it. start() fails with the limit
+ * error; a limit hit while running is logged and backed off, warning once
+ * per distinct reason. And a transaction's key
  * that routes elsewhere is refused keys_not_colocated, not run, not retried.
  */
 
@@ -18,7 +19,7 @@ import {
   reasonName,
 } from "@floruntime/core";
 import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
-import { fakeServer, refusal, until } from "./fake_worker_server.js";
+import { fakeServer, quiet, refusal, sleep, until } from "./fake_worker_server.js";
 
 let close: (() => void) | undefined;
 afterEach(() => close?.());
@@ -50,35 +51,37 @@ describe("a limit refusal", () => {
     }
   });
 
-  it("holds an ActionWorker's registration back without spinning or crashing, warning once per reason, until it goes through", async () => {
-    // Refused at a limit twice, then once for another reason, then registered.
-    const srv = await fakeServer((op, nth) => {
-      if (op === OpCode.ActionRegister && nth < 2) return refusal(StatusCode.Limit, Reason.TooManyActions, LIMIT_TEXT);
-      if (op === OpCode.ActionRegister && nth < 3) return refusal(StatusCode.Limit, Reason.MemoryBudget, "limit: memory budget spent");
-      if (op === OpCode.ActionAwait) return "park";
-      return undefined;
-    });
+});
+
+describe("start() refused at a limit", () => {
+  it("rejects an ActionWorker's start with LimitError after exactly one registration", async () => {
+    const srv = await fakeServer((op) => (op === OpCode.ActionRegister ? refusal(StatusCode.Limit, Reason.TooManyActions, LIMIT_TEXT) : undefined));
     close = srv.close;
-    const warned: string[] = [];
-    const errors: string[] = [];
-    const logger = { debug: () => {}, warn: (m: string) => void warned.push(m), error: (m: string) => void errors.push(m) };
-    const w = new ActionWorker({ endpoint: srv.endpoint, blockMs: 30000, logger, retry: { maxAttempts: 1 } });
+    const w = new ActionWorker({ endpoint: srv.endpoint, blockMs: 30000, logger: quiet, retry: { maxAttempts: 4, initialBackoffMs: 1, maxBackoffMs: 2 } });
     w.action("a", async () => new Uint8Array(0));
-    const done = w.start();
-    await until(() => srv.ops().includes(OpCode.ActionAwait), 10_000);
-    w.stop();
-    srv.close();
-    await done;
-    // One register per wait (up to 1, 2 and 4 s): not a spin.
-    expect(srv.ops().filter((o) => o === OpCode.ActionRegister)).toHaveLength(4);
-    expect(srv.ops()).toContain(OpCode.ActionAwait);
-    const limits = warned.filter((m) => m.includes("refused at a limit"));
-    expect(limits).toHaveLength(2);
-    expect(limits[0]).toContain("too_many_actions");
-    expect(limits[0]).toContain(LIMIT_TEXT);
-    expect(limits[1]).toContain("memory_budget");
-    expect(errors).toEqual([]);
-  }, 15_000);
+    const err = await w.start().catch((e: unknown) => e);
+    // The refusal has come back, so the one request reached the fake.
+    expect(err).toBeInstanceOf(LimitError);
+    expect(err).toMatchObject({ reason: Reason.TooManyActions, serverMessage: LIMIT_TEXT });
+    await until(() => srv.ops().includes(OpCode.ActionRegister), 3000);
+    await sleep(100);
+    expect(srv.ops().filter((o) => o === OpCode.ActionRegister)).toHaveLength(1);
+    expect(srv.ops()).not.toContain(OpCode.ActionAwait);
+  });
+
+  it("rejects a StreamWorker's start with LimitError after exactly one group create", async () => {
+    const srv = await fakeServer((op) => (op === OpCode.StreamGroupCreate ? refusal(StatusCode.Limit, Reason.TooManyActions, LIMIT_TEXT) : undefined));
+    close = srv.close;
+    const w = new StreamWorker(srv.endpoint, { stream: "s", ackTimeoutMs: 30000, blockMs: 30000, logger: quiet, retry: { maxAttempts: 4, initialBackoffMs: 1, maxBackoffMs: 2 } }, async () => {});
+    const err = await w.start().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LimitError);
+    expect(err).toMatchObject({ reason: Reason.TooManyActions, serverMessage: LIMIT_TEXT });
+    await until(() => srv.ops().includes(OpCode.StreamGroupCreate), 3000);
+    await sleep(100);
+    expect(srv.ops().filter((o) => o === OpCode.StreamGroupCreate)).toHaveLength(1);
+    expect(srv.ops()).not.toContain(OpCode.WorkerRegister);
+    expect(srv.ops()).not.toContain(OpCode.StreamGroupRead);
+  });
 });
 
 describe("a StreamWorker's group read at a limit", () => {
