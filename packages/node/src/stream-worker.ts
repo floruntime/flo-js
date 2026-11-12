@@ -413,10 +413,11 @@ export class StreamWorker {
 
   /**
    * Create the consumer group, when given its settings, and register this
-   * worker with the server. A create the server refused without running it
-   * (overloaded or unavailable, past the client's own retries) is tried
-   * again with a backoff; any other error, a limit refusal included, is
-   * thrown. Returns false if a stop or drain came first.
+   * worker with the server. Either one refused by a halted shard, or
+   * refused without being run (overloaded or unavailable, past the
+   * client's own retries), is tried again with a backoff; any other
+   * refusal, a limit included, is thrown as its typed error. Returns false
+   * if a stop or drain came first.
    */
   private async setUp(): Promise<boolean> {
     const failed = newWorkerBackoff();
@@ -439,13 +440,18 @@ export class StreamWorker {
       }
     }
     halted.reset();
+    failed.reset();
     for (;;) {
+      if (this.leaving()) return false;
       try {
         await this.registerWorker();
         return true;
       } catch (err) {
-        if (!(await halted.waitIf(err, "Register", this.leave.signal))) throw err;
-        if (this.leaving()) return false;
+        if (await halted.waitIf(err, "Register", this.leave.signal)) continue;
+        if (!isRefusedUnrun(err)) throw err;
+        const d = failed.next();
+        this.log(`Register refused: ${err}, retrying in ${d}ms...`);
+        await pause(d, this.leave.signal);
       }
     }
   }
@@ -482,13 +488,22 @@ export class StreamWorker {
       }
       return;
     }
-    try {
-      await this.setUp();
-    } catch (err) {
-      // Committed but not applied: resending it would write it twice.
-      if (isOutcomePending(err)) throw err;
-      // A connection error here surfaces again on the next read.
-      this.logger.warn(`Set-up after reconnect failed: ${err}`);
+    // A limit here leaves the worker unregistered, serving nothing: it
+    // keeps trying, and says so at error.
+    const limited = new LimitBackoff(this.logger, "error");
+    for (;;) {
+      try {
+        await this.setUp();
+        return;
+      } catch (err) {
+        // Committed but not applied: resending it would write it twice.
+        if (isOutcomePending(err)) throw err;
+        if (this.leaving()) return;
+        if (await limited.waitIf(err, "Set-up after reconnect (the worker is not registered and serves nothing until it is)", this.leave.signal)) continue;
+        // A connection error here surfaces again on the next read.
+        this.logger.warn(`Set-up after reconnect failed: ${err}`);
+        return;
+      }
     }
   }
 

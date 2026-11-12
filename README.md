@@ -522,7 +522,10 @@ off. A registration or a `StreamWorker`'s group create refused at a limit
 makes `start()` reject with `LimitError` after that one request, and the
 caller decides. A poll refused at a limit is tried again from 1 s doubling
 to 30 s, each distinct reason logged at warn once until a poll goes
-through, so a running worker neither spins nor stops.
+through, so a running worker neither spins nor stops. A registration (or
+group create) refused at a limit after a mid-run reconnect is tried again
+the same way, logged at error: until it goes through the worker is not
+registered and serves nothing.
 
 | `retry` field | Default | |
 |---|---|---|
@@ -538,8 +541,10 @@ connection; the server routes it afresh.
 
 `ActionWorker` and `StreamWorker` wait the same way between failed polls, from
 100 ms up to 5 s, starting again from 100 ms after a poll that succeeds; `stop()`
-ends a wait at once. A stream worker retries a group create refused this way
-instead of stopping. `ActionWorker`, and a `StreamWorker` given an endpoint, take a `retry`
+ends a wait at once. At `start()`, a registration (or a `StreamWorker`'s
+group create) refused this way, or by a halted shard, is tried again the
+same way instead of stopping; any other refusal makes `start()` reject with
+its typed error after that one request. `ActionWorker`, and a `StreamWorker` given an endpoint, take a `retry`
 option, with the same fields, for the client they create; a `StreamWorker`
 given a client uses that client's. A worker reconnects its client when the connection drops, but once the client's owner calls `close()` the worker stops, and stays stopped even if the client is connected again.
 

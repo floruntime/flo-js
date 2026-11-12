@@ -158,7 +158,11 @@ export class LimitBackoff {
   private readonly backoff = new Backoff(LIMIT_INITIAL_BACKOFF_MS, LIMIT_MAX_BACKOFF_MS);
   private readonly warned = new Set<Reason>();
 
-  constructor(private readonly logger: Logger) {}
+  /** `level` is where each reason's first refusal is logged: error where the worker serves nothing meanwhile. */
+  constructor(
+    private readonly logger: Logger,
+    private readonly level: "warn" | "error" = "warn"
+  ) {}
 
   /**
    * If err is a limit refusal, log it, wait (less if `signal` aborts) and
@@ -171,7 +175,7 @@ export class LimitBackoff {
     if (this.warned.has(err.reason)) this.logger.debug(msg);
     else {
       this.warned.add(err.reason);
-      this.logger.warn(msg);
+      this.logger[this.level](msg);
     }
     await pause(d, signal);
     return true;

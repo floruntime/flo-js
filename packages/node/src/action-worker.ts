@@ -35,6 +35,7 @@ import {
   Reason,
   ServerError,
   isOutcomePending,
+  isRefusedUnrun,
   StatusCode,
   WorkerStatus,
   WorkerType,
@@ -533,19 +534,25 @@ export class ActionWorker {
   }
 
   /**
-   * Register, waiting out a halted shard; false if a stop or drain ended
-   * the wait. A limit refusal (the node holding as many actions as it
-   * registers) is thrown, not waited out: the caller decides.
+   * Register, waiting out a halted shard or a refusal that wasn't run
+   * (overloaded or unavailable, past the client's own retries); false if a
+   * stop or drain ended the wait. Any other refusal, a limit included, is
+   * thrown as its typed error: the caller decides.
    */
   private async registerThroughHalts(actionNames: string[]): Promise<boolean> {
     const halted = new HaltBackoff(this.logger);
+    const failed = newWorkerBackoff();
     for (;;) {
+      if (this.leaving()) return false;
       try {
         await this.register(actionNames);
         return true;
       } catch (err) {
-        if (!(await halted.waitIf(err, "Register", this.leave.signal))) throw err;
-        if (this.leaving()) return false;
+        if (await halted.waitIf(err, "Register", this.leave.signal)) continue;
+        if (!isRefusedUnrun(err)) throw err;
+        const d = failed.next();
+        this.log(`Register refused: ${err}, retrying in ${d}ms...`);
+        await pause(d, this.leave.signal);
       }
     }
   }
@@ -586,13 +593,22 @@ export class ActionWorker {
       }
       return;
     }
-    try {
-      await this.register(actionNames);
-    } catch (err) {
-      // Committed but not applied: resending it would write it twice.
-      if (isOutcomePending(err)) throw err;
-      // A connection error here surfaces again on the next poll.
-      this.logger.warn(`Re-register after reconnect failed: ${err}`);
+    // A limit here leaves the worker unregistered, serving nothing: it
+    // keeps trying, and says so at error.
+    const limited = new LimitBackoff(this.logger, "error");
+    for (;;) {
+      try {
+        await this.register(actionNames);
+        return;
+      } catch (err) {
+        // Committed but not applied: resending it would write it twice.
+        if (isOutcomePending(err)) throw err;
+        if (this.leaving()) return;
+        if (await limited.waitIf(err, "Re-register after reconnect (the worker is not registered and serves nothing until it is)", this.leave.signal)) continue;
+        // A connection error here surfaces again on the next poll.
+        this.logger.warn(`Re-register after reconnect failed: ${err}`);
+        return;
+      }
     }
   }
 

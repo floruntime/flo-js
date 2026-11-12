@@ -84,6 +84,60 @@ describe("start() refused at a limit", () => {
   });
 });
 
+describe("start() refused for good", () => {
+  const text = "bad request: worker id too long";
+  const cases: [string, number, (endpoint: string) => Promise<void>][] = [
+    ["ActionWorker", OpCode.ActionRegister, (endpoint) => {
+      const w = new ActionWorker({ endpoint, blockMs: 30000, logger: quiet });
+      w.action("a", async () => new Uint8Array(0));
+      return w.start();
+    }],
+    ["StreamWorker", OpCode.WorkerRegister, (endpoint) => new StreamWorker(endpoint, { stream: "s", blockMs: 30000, logger: quiet }, async () => {}).start()],
+  ];
+  for (const [name, op, start] of cases) {
+    it(`rejects a ${name}'s start with a bad_request registration after exactly one request`, async () => {
+      const srv = await fakeServer((o) => (o === op ? refusal(StatusCode.BadRequest, Reason.Unclassified, text) : undefined));
+      close = srv.close;
+      const err = await start(srv.endpoint).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BadRequestError);
+      expect(err).toMatchObject({ serverMessage: text });
+      await until(() => srv.ops().includes(op), 3000);
+      await sleep(100);
+      expect(srv.ops().filter((o) => o === op)).toHaveLength(1);
+      expect(srv.ops()).not.toContain(OpCode.ActionAwait);
+      expect(srv.ops()).not.toContain(OpCode.StreamGroupRead);
+    });
+  }
+});
+
+describe("a re-registration refused at a limit after a mid-run reconnect", () => {
+  it("keeps the ActionWorker running and retrying with back-off, logged at error once, until it registers", async () => {
+    const srv = await fakeServer((op, nth) => {
+      if (op === OpCode.ActionAwait) return nth === 0 ? "drop" : "park";
+      if (op === OpCode.ActionRegister && (nth === 1 || nth === 2)) return refusal(StatusCode.Limit, Reason.TooManyActions, LIMIT_TEXT);
+      return undefined;
+    });
+    close = srv.close;
+    const errors: string[] = [];
+    const warned: string[] = [];
+    const logger = { debug: () => {}, warn: (m: string) => void warned.push(m), error: (m: string) => void errors.push(m) };
+    const w = new ActionWorker({ endpoint: srv.endpoint, blockMs: 30000, logger, retry: { maxAttempts: 1 } });
+    w.action("a", async () => new Uint8Array(0));
+    const done = w.start();
+    await until(() => srv.ops().filter((o) => o === OpCode.ActionAwait).length === 2, 12_000);
+    w.stop();
+    srv.close();
+    await done;
+    expect(srv.ops().filter((o) => o === OpCode.ActionRegister)).toHaveLength(4);
+    expect(srv.ops().filter((o) => o === OpCode.ActionAwait)).toHaveLength(2);
+    const limits = errors.filter((m) => m.includes("refused at a limit"));
+    expect(limits).toHaveLength(1);
+    expect(limits[0]).toContain("not registered");
+    expect(limits[0]).toContain("too_many_actions");
+    expect(warned.filter((m) => m.includes("refused at a limit"))).toEqual([]);
+  }, 15_000);
+});
+
 describe("a StreamWorker's group read at a limit", () => {
   it("waits and reads again, warning once for the reason however often it comes", async () => {
     const srv = await fakeServer((op, nth) => {
