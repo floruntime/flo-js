@@ -145,12 +145,14 @@ class LeaseKeeper {
     if (this.stopped) return;
     const interval = Math.max(this.leaseMs / 6, MIN_TOUCH_INTERVAL_MS);
     const now = performance.now();
-    const next = Math.floor((now - this.anchor) / interval) + 1;
+    // The next tick not yet run. A timer can fire a hair before its time,
+    // so the clock alone can name the tick just run.
+    const next = Math.max(this.ticks + 1, Math.floor((now - this.anchor) / interval) + 1);
     let delay: number;
     if (retryMs !== undefined && now + retryMs < this.anchor + next * interval) {
       delay = retryMs;
     } else {
-      this.ticks = Math.max(this.ticks + 1, next);
+      this.ticks = next;
       delay = Math.max(0, this.anchor + this.ticks * interval - now);
     }
     this.timer = setTimeout(() => void this.tick(), delay);

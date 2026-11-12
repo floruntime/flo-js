@@ -279,38 +279,64 @@ describe("StreamWorker leases", () => {
     expect(touches.filter((t) => t.at > acked1 + 50).every((t) => !t.seqs.includes(1n))).toBe(true);
   }, 15_000);
 
-  for (const [name, status, more] of [
-    ["retries a failed touch with a backoff, sooner than the next tick", StatusCode.Overloaded, true],
-    ["stops touching on a conflict", StatusCode.Conflict, false],
-  ] as const) {
-    it(name, async () => {
-      let served = false;
-      const srv = await fakeServer((op, nth) => {
-        if (op === OpCode.StreamGroupTouch && nth === 0) return refusal(status, Reason.Unclassified, "no");
-        if (op !== OpCode.StreamGroupRead) return undefined;
-        if (served) return "park";
-        served = true;
-        return { data: groupRead({ expiresAtMs: BigInt(Date.now() + 5000) }) };
-      });
-      close = srv.close;
-      const w = new StreamWorker(srv.endpoint, { stream: "s", blockMs: 30000, logger: quiet, retry: { maxAttempts: 1 } }, async () => {
-        await new Promise((r) => setTimeout(r, 1500));
-      });
-      const done = w.start();
-      await until(() => srv.ops().includes(OpCode.StreamGroupAck), 10_000);
-      w.stop();
-      srv.close();
-      await done;
-      const touches = srv.seen.filter((s) => s.op === OpCode.StreamGroupTouch).map((t) => t.at);
-      if (more) {
-        // Refused at ~833 ms, retried within the first backoff (100 ms), not at 1666 ms.
-        expect(touches.length).toBeGreaterThanOrEqual(2);
-        expect(touches[1]! - touches[0]!).toBeLessThan(400);
-      } else {
-        expect(touches).toHaveLength(1);
+  it("retries a failed touch with a backoff, sooner than the next tick", async () => {
+    // A 12 s lease: scheduled touches 2 s apart. The first is refused
+    // overloaded; the retry comes within the first backoff (at most 100 ms).
+    // The handler runs until the fake has seen the second touch, so the
+    // record is still open whenever the retry lands. A tick whose timer fires a
+    // hair early must not make the retry wait for the next tick.
+    let served = false;
+    let secondTouch!: () => void;
+    const seenSecond = new Promise<void>((r) => (secondTouch = r));
+    const srv = await fakeServer((op, nth) => {
+      if (op === OpCode.StreamGroupTouch) {
+        if (nth === 0) return refusal(StatusCode.Overloaded, Reason.Unclassified, "busy");
+        if (nth === 1) secondTouch();
+        return undefined;
       }
-    }, 15_000);
-  }
+      if (op !== OpCode.StreamGroupRead) return undefined;
+      if (served) return "park";
+      served = true;
+      return { data: groupRead({ expiresAtMs: BigInt(Date.now() + 12_000) }) };
+    });
+    close = srv.close;
+    const w = new StreamWorker(srv.endpoint, { stream: "s", blockMs: 30000, logger: quiet, retry: { maxAttempts: 1 } }, async () => {
+      await Promise.race([seenSecond, new Promise((r) => setTimeout(r, 20_000))]);
+    });
+    const done = w.start();
+    await until(() => srv.ops().includes(OpCode.StreamGroupAck), 25_000);
+    w.stop();
+    srv.close();
+    await done;
+    const touches = srv.seen.filter((s) => s.op === OpCode.StreamGroupTouch).map((t) => t.at);
+    expect(touches).toHaveLength(2);
+    // A scheduled second touch would come a whole tick (2 s) after the first.
+    expect(touches[1]! - touches[0]!).toBeLessThan(1000);
+  }, 30_000);
+
+  it("stops touching on a conflict", async () => {
+    // A 5 s lease, a touch every 833 ms; the first is refused conflict, and
+    // the handler runs past where the second and third would come.
+    let served = false;
+    const srv = await fakeServer((op, nth) => {
+      if (op === OpCode.StreamGroupTouch && nth === 0) return refusal(StatusCode.Conflict, Reason.Unclassified, "stale report");
+      if (op !== OpCode.StreamGroupRead) return undefined;
+      if (served) return "park";
+      served = true;
+      return { data: groupRead({ expiresAtMs: BigInt(Date.now() + 5000) }) };
+    });
+    close = srv.close;
+    const w = new StreamWorker(srv.endpoint, { stream: "s", blockMs: 30000, logger: quiet, retry: { maxAttempts: 1 } }, async () => {
+      await until(() => srv.ops().includes(OpCode.StreamGroupTouch), 10_000);
+      await new Promise((r) => setTimeout(r, 2000));
+    });
+    const done = w.start();
+    await until(() => srv.ops().includes(OpCode.StreamGroupAck), 15_000);
+    w.stop();
+    srv.close();
+    await done;
+    expect(srv.ops().filter((o) => o === OpCode.StreamGroupTouch)).toHaveLength(1);
+  }, 20_000);
 
   it("re-reads its pacing from each touch answer's expiry", async () => {
     // The read says 5 s (a touch every 833 ms); the first touch answer

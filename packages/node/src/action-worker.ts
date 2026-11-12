@@ -792,12 +792,14 @@ export class ActionWorker {
     // overran; after a failed touch, `retryMs` from now if sooner.
     const schedule = (retryMs?: number) => {
       const now = performance.now();
-      const next = Math.floor((now - arrivedAt) / intervalMs) + 1;
+      // The next tick not yet run. A timer can fire a hair before its time,
+      // so the clock alone can name the tick just run.
+      const next = Math.max(ticks + 1, Math.floor((now - arrivedAt) / intervalMs) + 1);
       if (retryMs !== undefined && now + retryMs < arrivedAt + next * intervalMs) {
         timer = setTimeout(tick, retryMs);
         return;
       }
-      ticks = Math.max(ticks + 1, next);
+      ticks = next;
       timer = setTimeout(tick, Math.max(0, arrivedAt + ticks * intervalMs - now));
     };
     const tick = async (): Promise<void> => {
