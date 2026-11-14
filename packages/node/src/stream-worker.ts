@@ -729,15 +729,16 @@ export class StreamWorker {
   }
 
   /**
-   * Nack records delivered here that a stop kept from starting, so the group
-   * hands them out again now rather than once their lease runs out. Like
-   * the lease running out, the nack counts as one of their attempts.
+   * Abandon records delivered here that a stop kept from starting, so the
+   * group hands them out again now rather than once their lease runs out.
+   * The delivery counts, but no failure: they never ran, so a stop never
+   * spends their attempts or dead-letters them.
    */
   private async handBack(read: StreamGroupReadResult, records: StreamGroupRecord[], keeper: LeaseKeeper): Promise<void> {
     for (const r of records) keeper.done(r);
     const delivery = deliveryOf(read, records);
-    await sendResult(this.client, this.leave.signal, this.logger, this.clientCloses, `nack of ${records.length} records not started`, async () =>
-      this.noteRefused("nack", await this.client.stream.groupNack(this.config.stream, delivery, { group: this.config.group }))
+    await sendResult(this.client, this.leave.signal, this.logger, this.clientCloses, `abandon of ${records.length} records not started`, async () =>
+      this.noteRefused("abandon", await this.client.stream.groupNack(this.config.stream, delivery, { group: this.config.group, abandon: true }))
     );
   }
 
@@ -795,8 +796,8 @@ export class StreamWorker {
    * handlers finish and ack before `start()` returns. A stop before
    * `start()` ends that run at once.
    *
-   * The hand-back is a nack, so it spends one of each record's attempts:
-   * with `maxDeliver` 1, a stop kills the records it hands back.
+   * The hand-back abandons them: ready again at once, with no failure
+   * counted, so a stop never dead-letters them.
    */
   stop(): void {
     this.log("Stopping stream worker...");

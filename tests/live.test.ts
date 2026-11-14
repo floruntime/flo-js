@@ -18,6 +18,9 @@ import {
   ConflictError,
   NoNamespaceError,
   NotFoundError,
+  OpCode,
+  OptionTag,
+  OptionsBuilder,
   ProcessKind,
   QueueRefusal,
   Ran,
@@ -31,8 +34,9 @@ import {
   WorkerType,
   type TaskAssignment,
   type WorkerInfo,
+  groupNackValue,
 } from "@floruntime/core";
-import { ActionWorker, FloClient } from "@floruntime/node";
+import { ActionWorker, FloClient, StreamWorker } from "@floruntime/node";
 
 const endpoint = process.env.FLO_ENDPOINT ?? "";
 const expiryEndpoint = process.env.FLO_EXPIRY_ENDPOINT ?? "";
@@ -409,7 +413,7 @@ describe.skipIf(!endpoint)("live", () => {
     const seqs: bigint[] = [];
     for (const [p, priority] of [["low", 5], ["high", 1], ["mid", 3]] as const) seqs.push(await client.queue.enqueue("jobs", encoder.encode(p), { priority }));
     const peeked = await client.queue.peek("jobs", 2);
-    expect(peeked.messages.map((m) => [decoder.decode(m.payload), m.priority, m.attempts, m.size])).toEqual([
+    expect(peeked.messages.map((m) => [decoder.decode(m.payload), m.priority, m.deliveries, m.size])).toEqual([
       ["high", 1, 0, 4],
       ["mid", 3, 0, 3],
     ]);
@@ -476,6 +480,92 @@ describe.skipIf(!endpoint)("live", () => {
     const [g] = (await client.stream.groupList("events")).groups;
     expect(g).toMatchObject({ name: "g1", pending: 0n, ackTimeoutMs: 5000, maxDeliver: 2 });
   }, 40000);
+
+  /** A group's records by state, from stream.group.info: [pending:u64][holders:u32][created_at_ns:u64][ready:u64][leased:u64][dead:u64][trimmed_pending:u64]. */
+  async function groupCounts(client: FloClient, namespace: string, stream: string, group: string) {
+    const g = encoder.encode(group);
+    const value = new Uint8Array(2 + g.length);
+    new DataView(value.buffer).setUint16(0, g.length, true);
+    value.set(g, 2);
+    const resp = await client.sendRequest(OpCode.StreamGroupInfo, namespace, encoder.encode(stream), value, new Uint8Array(0));
+    expect(resp.status).toBe(StatusCode.OK);
+    expect(resp.data.length).toBe(52);
+    const v = new DataView(resp.data.buffer, resp.data.byteOffset, resp.data.byteLength);
+    return { ready: v.getBigUint64(20, true), leased: v.getBigUint64(28, true), dead: v.getBigUint64(36, true) };
+  }
+
+  it("a stopped worker abandons its unstarted records: redelivered with deliveries 2, no failure counted, never dead", async () => {
+    const { client, namespace } = await liveClient();
+    for (const p of ["a", "b", "c"]) await client.stream.append("events", encoder.encode(p));
+    // maxDeliver 1: a counted failure would kill a record at once.
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let started = 0;
+    const w = new StreamWorker(client, { stream: "events", group: "g1", consumer: "w1", ackTimeoutMs: 30000, maxDeliver: 1, concurrency: 1, batchSize: 3, blockMs: 1000 }, async () => {
+      started++;
+      await held;
+    });
+    const done = w.start();
+    const deadline = Date.now() + 10000;
+    while (started === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    expect(started).toBe(1);
+    // "b" and "c" wait for the one slot: the stop hands them back, then "a" finishes and is acked.
+    w.stop();
+    release();
+    await done;
+
+    const opts = { group: "g1", consumer: "c2", limit: 10 };
+    let again = await client.stream.groupRead("events", opts);
+    expect(again.records.map((r) => [decoder.decode(r.payload), r.deliveries])).toEqual([["b", 2], ["c", 2]]);
+    expect(await groupCounts(client, namespace, "events", "g1")).toEqual({ ready: 0n, leased: 2n, dead: 0n });
+
+    // Abandoned again and again, past maxDeliver: each comes back, none dies.
+    for (let n = 3; n <= 5; n++) {
+      expect(await client.stream.groupNack("events", again, { group: "g1", abandon: true })).toEqual({ applied: 2, refused: [] });
+      again = await client.stream.groupRead("events", opts);
+      expect(again.records.map((r) => r.deliveries)).toEqual([n, n]);
+    }
+    expect(await groupCounts(client, namespace, "events", "g1")).toEqual({ ready: 0n, leased: 2n, dead: 0n });
+    // Abandon takes no failure's options: the server refuses them too.
+    const raw = await client.sendRequest(OpCode.StreamGroupNack, namespace, encoder.encode("events"), groupNackValue("g1", again, new Uint8Array(0)), new OptionsBuilder().addFlag(OptionTag.Abandon).addFlag(OptionTag.Dead).build());
+    expect(raw.status).toBe(StatusCode.BadRequest);
+    // A nack, though, counts a failure: past maxDeliver 1, they're dead.
+    expect(await client.stream.groupNack("events", again, { group: "g1" })).toEqual({ applied: 2, refused: [] });
+    expect(await groupCounts(client, namespace, "events", "g1")).toEqual({ ready: 0n, leased: 0n, dead: 2n });
+  }, 30000);
+
+  it("dead-letters a record with a 1024-byte nack error; the server refuses 1025", async () => {
+    const { client, namespace } = await liveClient();
+    await client.stream.append("events", encoder.encode("a"));
+    const read = await client.stream.groupRead("events", { group: "g1", consumer: "c1", limit: 10 });
+    expect(read.records).toHaveLength(1);
+    // Past the client's own check, the server refuses a longer one as a bad request.
+    const tooLong = await client.sendRequest(OpCode.StreamGroupNack, namespace, encoder.encode("events"), groupNackValue("g1", read, new Uint8Array(1025).fill(0x78)), new Uint8Array(0));
+    expect(tooLong.status).toBe(StatusCode.BadRequest);
+    await expect(client.stream.groupNack("events", read, { group: "g1", error: "x".repeat(1025) })).rejects.toThrow(/at most 1024 bytes/);
+    expect(await client.stream.groupNack("events", read, { group: "g1", dead: true, error: "é".repeat(512) })).toEqual({ applied: 1, refused: [] });
+    expect(await groupCounts(client, namespace, "events", "g1")).toEqual({ ready: 0n, leased: 0n, dead: 1n });
+  });
+
+  it("refuses a report to a deleted group not found, not as its records gone", async () => {
+    const { client, namespace } = await liveClient();
+    await client.stream.append("events", encoder.encode("a"));
+    const read = await client.stream.groupRead("events", { group: "g1", consumer: "c1", limit: 10 });
+    expect(read.records).toHaveLength(1);
+    const g = encoder.encode("g1");
+    const value = new Uint8Array([g.length, 0, ...g]);
+    expect((await client.sendRequest(OpCode.StreamGroupDelete, namespace, encoder.encode("events"), value, new Uint8Array(0))).status).toBe(StatusCode.OK);
+    for (const report of [
+      () => client.stream.groupAck("events", read, { group: "g1" }),
+      () => client.stream.groupNack("events", read, { group: "g1" }),
+      () => client.stream.groupNack("events", read, { group: "g1", abandon: true }),
+      () => client.stream.groupTouch("events", read, { group: "g1" }),
+    ]) {
+      const err = await report().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(NotFoundError);
+      expect(err).toMatchObject({ reason: Reason.NotFound });
+    }
+  });
 
   it("runs a KV transaction over keys sharing a {tag}, and refuses a key that routes elsewhere", async () => {
     const { client } = await liveClient();

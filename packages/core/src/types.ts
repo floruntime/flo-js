@@ -14,11 +14,12 @@ export const VERSION = 0x03;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0xc688167b51fcc846n;
+export const TABLE_HASH = 0xc1f93eb0ed86a281n;
 
 /**
- * Why the server refused a request. Mirrors the server's list; the table
- * hash covers it, so a server can't send one this SDK doesn't know.
+ * Why the server refused a request. Mirrors the server's list. A code this
+ * SDK doesn't know still decodes: `ServerError.reason` keeps its number and
+ * `reasonName` names it `unknown_reason_<n>`.
  */
 export enum Reason {
   UnknownOp = 1,
@@ -77,12 +78,25 @@ export enum Reason {
   JobRunning = 31,
   /** Status limit: the node's memory budget is spent. */
   MemoryBudget = 32,
-  /** Status limit: the node holds as many actions as it registers. */
+  /** Status limit: the action's shard holds as many actions as it registers; delete one first. */
   TooManyActions = 33,
   /** Status limit: the node holds as many workflow definitions as it keeps. */
   TooManyWorkflowDefinitions = 34,
   /** Status limit: the node holds as many workflow runs as it keeps. */
   TooManyWorkflowRuns = 35,
+  /**
+   * Status overloaded: the queue holds as many messages or bytes as its caps
+   * allow, or the shard's queues and groups together do. It drains as
+   * messages are acked, so the client retries it like any refusal not run.
+   */
+  QueueFull = 36,
+  /**
+   * Status overloaded: a group read took nothing new, because the group's
+   * consumers hold too many records they haven't acked (or it holds dead
+   * ones). Reading again won't help until they ack or nack, so the client
+   * doesn't retry it; a worker backs off.
+   */
+  GroupHeldFull = 37,
 }
 
 /** Whether a refused request took effect: retry logic reads this, not the message. */
@@ -130,11 +144,13 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.TooManyActions]: "too_many_actions",
   [Reason.TooManyWorkflowDefinitions]: "too_many_workflow_definitions",
   [Reason.TooManyWorkflowRuns]: "too_many_workflow_runs",
+  [Reason.QueueFull]: "queue_full",
+  [Reason.GroupHeldFull]: "group_held_full",
 };
 
-/** The server's name for a reason, as it appears in messages. */
+/** The server's name for a reason, as it appears in messages; `unknown_reason_<n>` for one this SDK doesn't know. */
 export function reasonName(r: Reason): string {
-  return REASON_NAMES[r];
+  return REASON_NAMES[r] ?? `unknown_reason_${r as number}`;
 }
 export const HEADER_SIZE = 32;
 
@@ -330,7 +346,7 @@ export const StatusCode = {
   Unavailable: 12, // No leader, or the shard isn't taking writes; retryable
   OutcomePending: 13, // Committed but not applied: its shard halted; never resent
   NoNamespace: 14, // The namespace the request names doesn't exist; NotFound is a missing key
-  Limit: 15, // The node is at a limit an operator sets; never run, never retried
+  Limit: 15, // The node holds as much of something as the server is built to keep; never run, never retried
 } as const;
 
 export type StatusCode = (typeof StatusCode)[keyof typeof StatusCode];
@@ -405,7 +421,7 @@ export const OptionTag = {
   AckTimeoutMS: 0x30, // u32: A group's lease: a record not acked this long is redelivered (5 s to 12 h; default 30 s)
   MaxDeliver: 0x31, // u8: A group's attempts: a record is dead once nacked or expired this many times (1 to 255; default 5)
   Dead: 0x32, // void: A nack dead-letters its records now
-  ErrorText: 0x33, // string: Why a nack's records failed
+  Abandon: 0x34, // void: A nack hands its records back unstarted: ready at once, the delivery counted, no failure
 
   // Time-Series Options (0x60 - 0x6F)
   TSFromMS: 0x60, // i64: Start of time range (inclusive, unix ms)
@@ -825,8 +841,16 @@ export interface StreamGroupNackOptions extends StreamGroupReportOptions {
   delayMs?: number;
   /** Dead at once, whatever attempts are left. */
   dead?: boolean;
-  /** Why the records failed, kept with a dead record. It travels as an option, so it goes cut to 255 bytes. */
+  /** Why the records failed, kept with a dead record: at most 1024 bytes, longer throws before a round trip. */
   error?: string;
+  /**
+   * Hand the records back unstarted: ready again at once, the delivery
+   * counted but no failure. Only for records the consumer never started
+   * (it is stopping); it takes no `delayMs`, `dead` or `error`. An
+   * abandoned record is never dead-lettered, so abandoning on errors
+   * would hand a poison record out forever: nack those.
+   */
+  abandon?: boolean;
 }
 
 /**
@@ -1074,7 +1098,8 @@ export interface DeadLetter {
   size: number;
   payload: Uint8Array;
   enqueuedAtMs: bigint;
-  attempts: number;
+  /** Times it was delivered. */
+  deliveries: number;
   priority: number;
   /** When it was moved to the dead letter queue, in ms since the Unix epoch. */
   movedAtMs: bigint;
@@ -1107,7 +1132,8 @@ export interface PeekOptions {
 export interface PeekedMessage {
   seq: bigint;
   priority: number;
-  attempts: number;
+  /** Times it was delivered; more than 0 once a lease ran out or it failed. */
+  deliveries: number;
   enqueuedAtMs: bigint;
   /** The payload's whole length; `payload` holds at most its first 4 KiB. */
   size: number;
@@ -1711,6 +1737,11 @@ export interface WorkflowHistoryOptions {
  * A single workflow history event.
  */
 export interface WorkflowHistoryEvent {
+  /**
+   * The event's kind, as the server names it: `step_waiting_for_room`, say,
+   * once per wait when a step couldn't start because the log was full (it
+   * runs again). Expect kinds this SDK doesn't list.
+   */
   type: string;
   detail: string;
   timestamp: number;

@@ -291,7 +291,12 @@ export class UnauthorizedError extends ServerError {
 }
 
 /**
- * Error thrown when the server is overloaded.
+ * Error thrown when the server is overloaded: with `ran` No, the client
+ * retries it first. `reason` QueueFull (the queue, or the shard's queues and
+ * groups, at their caps) drains as messages are acked: back off and send
+ * again. GroupHeldFull (a group read took nothing new: its consumers hold
+ * too many unacked or dead records) is not retried: reading again won't
+ * help until they ack or nack.
  */
 export class OverloadedError extends ServerError {
   constructor(message?: string) {
@@ -329,12 +334,12 @@ export class OutcomePendingError extends ServerError {
 }
 
 /**
- * Error thrown when the node is at a limit an operator sets: `reason` says
- * which (MemoryBudget, TooManyActions, TooManyWorkflowDefinitions,
- * TooManyWorkflowRuns) and the message names it. It never ran. Terminal:
- * retrying won't clear it until something is deleted, the node is given
- * more room, or the setting is raised, so the client never retries it.
- * It doesn't mean permanent.
+ * Error thrown when the server holds as much of something as it is built to
+ * keep: `reason` says which (today TooManyActions, past 10,000 actions on
+ * the action's shard) and the message names it. It never ran. The limits
+ * are fixed in the server's build, not settings, so retrying won't clear it
+ * until something is deleted; the client never retries it. It doesn't mean
+ * permanent.
  */
 export class LimitError extends ServerError {
   constructor(message?: string) {
@@ -366,11 +371,10 @@ export function createServerError(
   if (!data || data.length < 3) {
     return new IncompleteResponseError(`a refusal body of ${data?.length ?? 0} bytes`);
   }
+  // A reason this SDK doesn't know keeps its number (reasonName names it);
+  // a ran it doesn't know may have taken effect.
   const reason = data[0]! | (data[1]! << 8);
-  const ran = data[2]!;
-  if (!(reason in Reason) || !(ran in Ran)) {
-    return new IncompleteResponseError(`a refusal with reason ${reason} and ran ${ran}`);
-  }
+  const ran = data[2]! in Ran ? data[2]! : Ran.Unknown;
   const message = new TextDecoder().decode(data.subarray(3));
   const err = status === StatusCode.Conflict && reason === Reason.StaleReport ? new StaleReportError(message) : serverErrorFor(status, message);
   err.reason = reason as Reason;
@@ -456,6 +460,22 @@ export function isUnauthorized(err: unknown): err is UnauthorizedError {
  */
 export function isOverloaded(err: unknown): err is OverloadedError {
   return err instanceof ServerError && err.status === StatusCode.Overloaded;
+}
+
+/**
+ * Check if an error is a group read refused because the group's consumers
+ * hold too many unacked or dead records (overloaded, reason GroupHeldFull).
+ */
+export function isGroupHeldFull(err: unknown): err is OverloadedError {
+  return err instanceof ServerError && err.status === StatusCode.Overloaded && err.reason === Reason.GroupHeldFull;
+}
+
+/**
+ * Check if an error is a queue at its caps (overloaded, reason QueueFull):
+ * retried by the client, and thrown once its retries run out.
+ */
+export function isQueueFull(err: unknown): err is OverloadedError {
+  return err instanceof ServerError && err.status === StatusCode.Overloaded && err.reason === Reason.QueueFull;
 }
 
 /**

@@ -186,10 +186,65 @@ describe("a refusal's reason and ran", () => {
     expect(plain.message).not.toContain("unclassified");
   });
 
-  it("a body that isn't a refusal is refused, not guessed at", () => {
-    // [0x01, 0x01] is reason 257: read as a byte it would pass as unknown_op.
-    for (const body of [new Uint8Array([1, 0]), new Uint8Array([0xff, 0xff, 0]), new Uint8Array([1, 0, 9]), new Uint8Array([1, 1, 0])]) {
+  it("a body too short to hold a reason and ran is refused, not guessed at", () => {
+    for (const body of [new Uint8Array(0), new Uint8Array([1, 0])]) {
       expect(createServerError(StatusCode.BadRequest, body)).not.toBeInstanceOf(ServerError);
     }
+  });
+
+  it("a reason this SDK doesn't know decodes, keeping its number and the server's message", () => {
+    // [0x01, 0x01] is reason 257, read as a u16, not unknown_op.
+    for (const [body, reason] of [[refusal("from the future", 257 as Reason), 257], [refusal("later still", 0xffff as Reason), 0xffff]] as const) {
+      const err = createServerError(StatusCode.Overloaded, body) as ServerError;
+      expect(err).toBeInstanceOf(OverloadedError);
+      expect(err.reason).toBe(reason);
+      expect(err.ran).toBe(Ran.No);
+      expect(reasonName(err.reason)).toBe(`unknown_reason_${reason}`);
+      expect(err.message).toContain(`unknown_reason_${reason}`);
+      expect(err.serverMessage).toBe(new TextDecoder().decode(body.subarray(3)));
+    }
+  });
+
+  it("a ran this SDK doesn't know reads as Unknown: it may have taken effect", () => {
+    const err = createServerError(StatusCode.Unavailable, new Uint8Array([1, 0, 9])) as ServerError;
+    expect(err).toBeInstanceOf(UnavailableError);
+    expect(err.ran).toBe(Ran.Unknown);
+  });
+});
+
+describe("an unknown reason over TCP", () => {
+  let server: net.Server | undefined;
+  let client: FloClient | undefined;
+  afterEach(async () => {
+    await client?.close();
+    server?.close();
+  });
+
+  it("reaches the caller as a ServerError, not retried as one it can't name, and the connection reads on", async () => {
+    let requests = 0;
+    server = net.createServer((sock) => {
+      let buf = Buffer.alloc(0);
+      sock.on("data", (chunk) => {
+        buf = Buffer.concat([buf, chunk]);
+        while (buf.length >= HEADER_SIZE) {
+          const total = HEADER_SIZE + buf.readUInt32LE(4);
+          if (buf.length < total) return;
+          const id = buf.readBigUInt64LE(8);
+          buf = buf.subarray(total);
+          requests++;
+          sock.write(requests === 1 ? response(id, refusal("a newer reason", 99 as Reason, Ran.Yes), StatusCode.Conflict) : response(id, getBody(3n, "v")));
+        }
+      });
+    });
+    await new Promise<void>((r) => server!.listen(0, "127.0.0.1", r));
+    const { port } = server.address() as net.AddressInfo;
+    client = new FloClient(`127.0.0.1:${port}`, { timeoutMs: 2000 });
+    await client.connect();
+    const err = await client.kv.get("a").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ServerError);
+    expect(err).toMatchObject({ status: StatusCode.Conflict, reason: 99, ran: Ran.Yes, serverMessage: "a newer reason" });
+    expect((err as Error).message).toContain("unknown_reason_99");
+    expect((await client.kv.get("b"))?.version).toBe(3n);
+    expect(requests).toBe(2);
   });
 });

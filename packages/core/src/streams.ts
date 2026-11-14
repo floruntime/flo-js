@@ -35,7 +35,7 @@ import {
   type StreamGroupListResult,
   type StreamGroupMembersResult,
 } from "./types.js";
-import { decodeGroupListAnswer, decodeGroupMembersAnswer, encodeGroupMembersBody, MAX_CONSUMER, MAX_DELAY_MS, truncateUtf8 } from "./kv_body.js";
+import { decodeGroupListAnswer, decodeGroupMembersAnswer, encodeGroupMembersBody, MAX_CONSUMER, MAX_DELAY_MS } from "./kv_body.js";
 import { kvGet, kvScan } from "./kv.js";
 import { OptionsBuilder, serializeStreamAppendValue } from "./wire.js";
 
@@ -421,7 +421,8 @@ export class StreamOperations {
    * Ack records a group read leased: the group is done with them. Pass the
    * read's result, or it with `records` narrowed. Records it didn't apply
    * to come back in `refused`, inside an ok answer: a stale ack (the lease
-   * ran out, or the record was delivered again since) applies nothing.
+   * ran out, or the record was delivered again since) applies nothing. A
+   * group that isn't there throws NotFoundError.
    */
   async groupAck(stream: string, delivery: StreamGroupDelivery, opts: StreamGroupReportOptions): Promise<StreamGroupReportResult> {
     const namespace = this.sender.getNamespace(opts.namespace);
@@ -435,8 +436,11 @@ export class StreamOperations {
   /**
    * Nack records a group read leased: ready again after `delayMs`, or dead
    * once nacked or expired `maxDeliver` times, or at once with `dead`. A
-   * nack counts as a failed attempt. Records it didn't apply to come back
-   * in `refused`.
+   * nack counts as a failed attempt. With `abandon` they go back unstarted
+   * instead: ready at once, the delivery counted but no failure, and never
+   * dead-lettered, so abandon only records never started (a stopping
+   * consumer); nack the ones that failed. Records it didn't apply to come
+   * back in `refused`. A group that isn't there throws NotFoundError.
    */
   async groupNack(stream: string, delivery: StreamGroupDelivery, opts: StreamGroupNackOptions): Promise<StreamGroupReportResult> {
     const namespace = this.sender.getNamespace(opts.namespace);
@@ -445,11 +449,17 @@ export class StreamOperations {
     if (!Number.isInteger(delayMs) || delayMs < 0 || delayMs > MAX_DELAY_MS) {
       throw new FloError(`flo: delayMs must be a whole number of ms from 0 to ${MAX_DELAY_MS}, got ${delayMs}`);
     }
+    const error = textEncoder.encode(opts.error ?? "");
+    if (error.length > MAX_GROUP_NACK_ERROR) {
+      throw new FloError(`flo: a nack's error is at most ${MAX_GROUP_NACK_ERROR} bytes, got ${error.length}`);
+    }
+    if (opts.abandon && (opts.dead || delayMs > 0 || error.length > 0)) {
+      throw new FloError("flo: abandon hands records back unstarted, so it takes no dead, delayMs or error");
+    }
     if (delayMs > 0) builder.addU64(OptionTag.DelayMS, BigInt(delayMs));
     if (opts.dead) builder.addFlag(OptionTag.Dead);
-    // An option's length is a u8, so the error goes cut to 255 bytes.
-    if (opts.error) builder.addBytes(OptionTag.ErrorText, truncateUtf8(textEncoder.encode(opts.error), MAX_OPTION_BYTES));
-    const resp = await this.sender.sendRequest(OpCode.StreamGroupNack, namespace, textEncoder.encode(stream), groupReportValue(opts.group, delivery), builder.build());
+    if (opts.abandon) builder.addFlag(OptionTag.Abandon);
+    const resp = await this.sender.sendRequest(OpCode.StreamGroupNack, namespace, textEncoder.encode(stream), groupNackValue(opts.group, delivery, error), builder.build());
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
@@ -501,8 +511,8 @@ export class StreamOperations {
 /** A group's lease bounds, in ms. */
 export const MIN_GROUP_LEASE_MS = 5000;
 export const MAX_GROUP_LEASE_MS = 43_200_000;
-/** The longest option value: its length is a u8. */
-const MAX_OPTION_BYTES = 255;
+/** The longest error a group nack carries, in bytes. */
+export const MAX_GROUP_NACK_ERROR = 1024;
 
 /** A group op's value: `[group_len:u16][group]`, then `[consumer_len:u16][consumer]` when given. */
 function groupValue(group: string, consumer?: string): Uint8Array {
@@ -545,6 +555,16 @@ export function groupReportValue(group: string, d: StreamGroupDelivery): Uint8Ar
     view.setUint32(o + 16, r.deliveries, true);
     o += 20;
   }
+  return out;
+}
+
+/** A nack's value: a report's, then `[error_len:u16][error]`, 0 for none. */
+export function groupNackValue(group: string, d: StreamGroupDelivery, error: Uint8Array): Uint8Array {
+  const report = groupReportValue(group, d);
+  const out = new Uint8Array(report.length + 2 + error.length);
+  out.set(report, 0);
+  new DataView(out.buffer).setUint16(report.length, error.length, true);
+  out.set(error, report.length + 2);
   return out;
 }
 
