@@ -91,7 +91,7 @@ describe("group_held_full", () => {
     // worker backed off as for a limit, not as for a read not ready.
     expect(srv.ops().filter((o) => o === OpCode.StreamGroupRead)).toHaveLength(3);
     const full = warned.filter((m) => m.includes("group_held_full"));
-    expect(full).toEqual([expect.stringContaining("GroupRead refused with its group full (group_held_full)")]);
+    expect(full).toEqual([expect.stringContaining("GroupRead refused full (the group's records, dead ones included, or the shard's queues and groups) (group_held_full)")]);
     expect(warned.filter((m) => m.includes("not ready"))).toEqual([]);
   }, 15_000);
 });

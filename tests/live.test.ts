@@ -494,44 +494,65 @@ describe.skipIf(!endpoint)("live", () => {
     return { ready: v.getBigUint64(20, true), leased: v.getBigUint64(28, true), dead: v.getBigUint64(36, true) };
   }
 
-  it("a stopped worker abandons its unstarted records: redelivered with deliveries 2, no failure counted, never dead", async () => {
+  it("a stopped worker abandons its records: unstarted, or cut short by the stop; redelivered with deliveries 2, never dead", async () => {
     const { client, namespace } = await liveClient();
     for (const p of ["a", "b", "c"]) await client.stream.append("events", encoder.encode(p));
     // maxDeliver 1: a counted failure would kill a record at once.
-    let release!: () => void;
-    const held = new Promise<void>((r) => (release = r));
     let started = 0;
-    const w = new StreamWorker(client, { stream: "events", group: "g1", consumer: "w1", ackTimeoutMs: 30000, maxDeliver: 1, concurrency: 1, batchSize: 3, blockMs: 1000 }, async () => {
+    const w = new StreamWorker(client, { stream: "events", group: "g1", consumer: "w1", ackTimeoutMs: 30000, maxDeliver: 1, concurrency: 1, batchSize: 3, blockMs: 1000 }, async (ctx) => {
       started++;
-      await held;
+      // A handler the stop cuts short: it ends on the worker's signal, throwing.
+      await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve(), { once: true }));
+      throw new Error("stopped");
     });
     const done = w.start();
     const deadline = Date.now() + 10000;
     while (started === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
     expect(started).toBe(1);
-    // "b" and "c" wait for the one slot: the stop hands them back, then "a" finishes and is acked.
+    // "b" and "c" wait for the one slot; the stop hands them back, and "a" too.
     w.stop();
-    release();
     await done;
 
     const opts = { group: "g1", consumer: "c2", limit: 10 };
     let again = await client.stream.groupRead("events", opts);
-    expect(again.records.map((r) => [decoder.decode(r.payload), r.deliveries])).toEqual([["b", 2], ["c", 2]]);
-    expect(await groupCounts(client, namespace, "events", "g1")).toEqual({ ready: 0n, leased: 2n, dead: 0n });
+    expect(again.records.map((r) => [decoder.decode(r.payload), r.deliveries])).toEqual([["a", 2], ["b", 2], ["c", 2]]);
+    expect(await groupCounts(client, namespace, "events", "g1")).toEqual({ ready: 0n, leased: 3n, dead: 0n });
 
     // Abandoned again and again, past maxDeliver: each comes back, none dies.
     for (let n = 3; n <= 5; n++) {
-      expect(await client.stream.groupNack("events", again, { group: "g1", abandon: true })).toEqual({ applied: 2, refused: [] });
+      expect(await client.stream.groupNack("events", again, { group: "g1", abandon: true })).toEqual({ applied: 3, refused: [] });
       again = await client.stream.groupRead("events", opts);
-      expect(again.records.map((r) => r.deliveries)).toEqual([n, n]);
+      expect(again.records.map((r) => r.deliveries)).toEqual([n, n, n]);
     }
-    expect(await groupCounts(client, namespace, "events", "g1")).toEqual({ ready: 0n, leased: 2n, dead: 0n });
+    expect(await groupCounts(client, namespace, "events", "g1")).toEqual({ ready: 0n, leased: 3n, dead: 0n });
     // Abandon takes no failure's options: the server refuses them too.
     const raw = await client.sendRequest(OpCode.StreamGroupNack, namespace, encoder.encode("events"), groupNackValue("g1", again, new Uint8Array(0)), new OptionsBuilder().addFlag(OptionTag.Abandon).addFlag(OptionTag.Dead).build());
     expect(raw.status).toBe(StatusCode.BadRequest);
     // A nack, though, counts a failure: past maxDeliver 1, they're dead.
-    expect(await client.stream.groupNack("events", again, { group: "g1" })).toEqual({ applied: 2, refused: [] });
-    expect(await groupCounts(client, namespace, "events", "g1")).toEqual({ ready: 0n, leased: 0n, dead: 2n });
+    expect(await client.stream.groupNack("events", again, { group: "g1" })).toEqual({ applied: 3, refused: [] });
+    expect(await groupCounts(client, namespace, "events", "g1")).toEqual({ ready: 0n, leased: 0n, dead: 3n });
+  }, 30000);
+
+  it("close() on a worker with its own client acks the running record and abandons the rest before closing", async () => {
+    // A worker given an endpoint owns its client, in namespace "default".
+    const { client } = await liveClient();
+    const stream = `close-${randomBytes(4).toString("hex")}`;
+    for (const p of ["a", "b", "c"]) await client.stream.append(stream, encoder.encode(p), { namespace: "default" });
+    let started = 0;
+    const w = new StreamWorker(endpoint, { stream, group: "g1", consumer: "w1", ackTimeoutMs: 30000, maxDeliver: 1, concurrency: 1, batchSize: 3, blockMs: 1000 }, async () => {
+      started++;
+      await new Promise((r) => setTimeout(r, 300));
+    });
+    const done = w.start();
+    const deadline = Date.now() + 10000;
+    while (started === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    expect(started).toBe(1);
+    await w.close();
+    await done;
+    // "a" was acked; "b" and "c" come back at once, not dead.
+    const again = await client.stream.groupRead(stream, { namespace: "default", group: "g1", consumer: "c2", limit: 10 });
+    expect(again.records.map((r) => [decoder.decode(r.payload), r.deliveries])).toEqual([["b", 2], ["c", 2]]);
+    expect(await groupCounts(client, "default", stream, "g1")).toEqual({ ready: 0n, leased: 2n, dead: 0n });
   }, 30000);
 
   it("dead-letters a record with a 1024-byte nack error; the server refuses 1025", async () => {

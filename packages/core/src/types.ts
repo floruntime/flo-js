@@ -91,10 +91,14 @@ export enum Reason {
    */
   QueueFull = 36,
   /**
-   * Status overloaded: a group read took nothing new, because the group's
-   * consumers hold too many records they haven't acked (or it holds dead
-   * ones). Reading again won't help until they ack or nack, so the client
-   * doesn't retry it; a worker backs off.
+   * Status overloaded: a group read took nothing new. Either the group holds
+   * as many records or bytes as its caps allow, counting leased, ready and
+   * dead ones, or the shard's queues and groups together hold as many bytes
+   * as they may; the message says which. Leased records clear as their
+   * consumers ack or nack; dead ones stay until the stream is trimmed past
+   * them or the group is deleted; the shard's cap clears as its other
+   * groups and queues drain. Reading again at once won't help, so the
+   * client doesn't retry it; a worker backs off.
    */
   GroupHeldFull = 37,
 }

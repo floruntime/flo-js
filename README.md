@@ -399,10 +399,14 @@ is never dead-lettered, so a consumer that abandons on errors hands a
 poison record out forever: abandon only records you never started (you are
 stopping), and nack the ones that failed.
 
-A group read that takes nothing new because the group's consumers hold too
-many records they haven't acked (or it holds dead ones) is refused
-overloaded with reason `GroupHeldFull` (`isGroupHeldFull`). Reading again
-won't help until they ack or nack, so the client doesn't retry it.
+A group read that takes nothing new because the group is at its caps is
+refused overloaded with reason `GroupHeldFull` (`isGroupHeldFull`). The caps
+count every record the group holds, leased, ready and dead; the refusal also
+comes when the shard's queues and groups together hold as many bytes as
+they may, and the message says which. Leased records clear as consumers ack
+or nack; dead ones stay until the stream is trimmed past them or the group
+is deleted; the shard's cap clears as its other groups and queues drain.
+Reading again at once won't help, so the client doesn't retry it.
 
 A read creates the group it names, at the defaults; `groupCreate` makes one
 with other settings. Creating a group that exists with the same settings
@@ -421,7 +425,12 @@ stops touching; a record a touch didn't apply to (a stale report) is
 dropped from it; any other failure is retried with a backoff from 100 ms,
 never later than the next tick. After `stop()` (or `close()`) the worker
 starts no more records: it abandons the unstarted ones, so they are ready
-again at once with no failure counted. A read refused `GroupHeldFull` is
+again at once with no failure counted. A stop also aborts each running
+handler's `ctx.signal`; a handler that throws once it has aborted is cut
+short by the stop, so its record is abandoned too, while one that throws
+while the worker runs is nacked. `close()` waits for all of it (running
+handlers acked, the rest handed back) before closing a client the worker
+created; don't call it from a handler. A read refused `GroupHeldFull` is
 tried again from 1 s doubling to 30 s, logged at warn once, as for `limit`;
 a report refused not found (the group was deleted) is logged at error. Given `ackTimeoutMs` or `maxDeliver` it creates
 its group with them at start; otherwise its first read creates the group at
@@ -505,7 +514,7 @@ try {
 | `StaleReportError` | A `ConflictError` (reason `StaleReport`) for an action complete, fail or touch whose delivery the run has moved on from; the message says how |
 | `BadRequestError` | Invalid request |
 | `UnauthorizedError` | Authentication failed |
-| `OverloadedError` | Server overloaded, and the client's retries ran out. `reason` `QueueFull`: the queue is at its caps (retried); `GroupHeldFull`: a group read's consumers hold too many unacked records (not retried) |
+| `OverloadedError` | Server overloaded, and the client's retries ran out. `reason` `QueueFull`: the queue is at its caps (retried); `GroupHeldFull`: the group (dead records included) or the shard's queues and groups are at their caps (not retried) |
 | `UnavailableError` | No leader, or the shard isn't taking writes, and the client's retries ran out. With `reason === Reason.ShardHalted` the shard halted, and takes no writes until an operator repairs it; never retried |
 | `LimitError` | The server holds as much of something as it is built to keep: `reason` says which (today `TooManyActions`, past 10,000 actions on the action's shard), and the message names it. The limits are fixed in the server's build, not settings: retrying won't clear it until something is deleted (it isn't permanent). Never run, never retried |
 | `OutcomePendingError` | The write committed but hasn't applied: its shard halted at it or before it (`reason` ShardHalted, `ran` Unknown); the message says whether it applies when the shard resumes. Never retried |
@@ -523,8 +532,8 @@ new request, after a jittered wait. Because the server never ran it, this is
 safe for writes too. Any other refusal, or one that may have run, comes
 straight back. Three are never retried: `unavailable` with reason
 `shard_halted` (an operator has to repair the shard, so resending is no
-use), `overloaded` with reason `group_held_full` (the group's consumers
-must ack or nack first), and `outcome_pending` (the write is committed; resending it would
+use), `overloaded` with reason `group_held_full` (the group, or the shard, stays
+at its caps until records are acked, nacked, trimmed or deleted), and `outcome_pending` (the write is committed; resending it would
 write it twice, or halt the shard again).
 
 `unavailable` (not run) is routine: a stream read whose records are being

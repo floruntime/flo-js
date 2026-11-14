@@ -148,9 +148,11 @@ export const LIMIT_MAX_BACKOFF_MS = 30_000;
 
 /**
  * Pacing for a running worker's polls refused with status limit, or a
- * group read refused overloaded with reason GroupHeldFull (the group's
- * consumers hold too many unacked or dead records). Retrying won't clear
- * either until something is deleted, or acked or nacked, so the worker
+ * group read refused overloaded with reason GroupHeldFull (the group is at
+ * its caps, dead records included, or the shard's queues and groups are at
+ * theirs). Retrying at once won't clear either: a limit needs a delete, a
+ * full group its consumers to ack or nack, its dead records trimmed or the
+ * group deleted, or the shard's other groups and queues to drain. The worker
  * neither spins nor stops: it waits, from 1 s doubling to 30 s, and logs
  * each distinct reason once at warn (later ones at debug) until a poll
  * goes through. start() doesn't use it: a limit there is thrown.
@@ -172,7 +174,7 @@ export class LimitBackoff {
   async waitIf(err: unknown, call: string, signal: AbortSignal): Promise<boolean> {
     if (!isLimit(err) && !isGroupHeldFull(err)) return false;
     const d = this.backoff.next();
-    const what = isLimit(err) ? "at a limit" : "with its group full";
+    const what = isLimit(err) ? "at a limit" : "full (the group's records, dead ones included, or the shard's queues and groups)";
     const msg = `${call} refused ${what} (${reasonName(err.reason)}): ${err.serverMessage}; retrying in ${d}ms`;
     if (this.warned.has(err.reason)) this.logger.debug(msg);
     else {

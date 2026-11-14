@@ -11,8 +11,8 @@ import { Ran, type RawResponse, Reason, StatusCode } from "./types.js";
  * is `Ran.No` is retried: the server says it never ran, so resending is safe
  * for any operation, writes included. Unavailable with reason ShardHalted
  * is not retried (an operator has to repair the shard), nor is overloaded
- * with reason GroupHeldFull (reading again won't help until the group's
- * consumers ack or nack), nor is outcome pending (the write committed;
+ * with reason GroupHeldFull (the group, or the shard, is at its caps, and
+ * reading again at once won't help), nor is outcome pending (the write committed;
  * resending it would write it twice). Overloaded with reason QueueFull is
  * retried: the queue drains as messages are acked. Each retry is a new
  * request with a new id; the server routes it afresh.
@@ -78,7 +78,8 @@ export function refusedUnrun(resp: RawResponse): boolean {
  * Whether err is a refusal the server says it didn't run, worth trying
  * again later. A halted shard (reason ShardHalted) isn't: it takes no
  * writes until an operator repairs it. Nor is a full group (reason
- * GroupHeldFull): it stays full until its consumers ack or nack.
+ * GroupHeldFull): it stays full until records are acked, nacked, trimmed
+ * or deleted.
  */
 export function isRefusedUnrun(err: unknown): boolean {
   return (

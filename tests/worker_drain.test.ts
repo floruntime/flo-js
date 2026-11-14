@@ -287,3 +287,67 @@ describe("StreamWorker", () => {
     expect(Array.from(p.subarray(p.length - 4))).toEqual([2, 0, OptionTag.Abandon, 0]);
   });
 });
+
+/** A nack request's options, the payload's tail after the value: [len:u16][options]. */
+function optionsOf(payload: Buffer): number[] {
+  let at = 2 + payload.readUInt16LE(0);
+  at += 2 + payload.readUInt16LE(at);
+  at += 4 + payload.readUInt32LE(at);
+  return Array.from(payload.subarray(at + 2, at + 2 + payload.readUInt16LE(at)));
+}
+
+/** The record seqs a group report names. */
+function seqsOf(payload: Buffer): bigint[] {
+  const v = valueOf(payload);
+  let at = 2 + v.readUInt16LE(0);
+  at += 2 + v.readUInt16LE(at);
+  at += 16;
+  return Array.from({ length: v.readUInt32LE(at) }, (_, i) => v.readBigUInt64LE(at + 4 + i * 20 + 8));
+}
+
+describe("StreamWorker stop and close", () => {
+  let close: (() => void) | undefined;
+  afterEach(() => close?.());
+
+  it("close() waits for the run: the running record is acked and the unstarted ones abandoned before the client closes", async () => {
+    const srv = await fakeServer(workThenEmpty(OpCode.StreamGroupRead, records(3)));
+    close = srv.close;
+    let started = false;
+    const w = new StreamWorker(srv.endpoint, { stream: "s", blockMs: BLOCK_MS, concurrency: 1, logger: quiet }, async () => {
+      started = true;
+      await sleep(300);
+    });
+    const done = w.start();
+    await until(() => started, 3000);
+    await w.close();
+    await done;
+    const acks = srv.seen.filter((s) => s.op === OpCode.StreamGroupAck);
+    const nacks = srv.seen.filter((s) => s.op === OpCode.StreamGroupNack);
+    expect(acks.map((a) => seqsOf(a.payload))).toEqual([[1n]]);
+    expect(nacks.map((n) => [seqsOf(n.payload), optionsOf(n.payload)])).toEqual([[[2n, 3n], [OptionTag.Abandon, 0]]]);
+  });
+
+  it("abandons a record whose handler failed once the worker stopped, and still nacks one that failed while it ran", async () => {
+    let n = 0;
+    const srv = await fakeServer(workThenEmpty(OpCode.StreamGroupRead, records(2)));
+    close = srv.close;
+    let stopping = false;
+    const w = new StreamWorker(srv.endpoint, { stream: "s", blockMs: BLOCK_MS, concurrency: 2, logger: quiet }, async (ctx) => {
+      if (n++ === 0) throw new Error("a genuine failure");
+      // Cut short by the stop: it ends on the worker's signal.
+      stopping = true;
+      await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve(), { once: true }));
+      throw new Error("stopped");
+    });
+    const done = w.start();
+    await until(() => stopping && srv.ops().includes(OpCode.StreamGroupNack), 3000);
+    w.stop();
+    await done;
+    const nacks = srv.seen.filter((s) => s.op === OpCode.StreamGroupNack).map((s) => [seqsOf(s.payload), optionsOf(s.payload)]);
+    expect(nacks).toEqual([
+      [[1n], []],
+      [[2n], [OptionTag.Abandon, 0]],
+    ]);
+    expect(srv.ops()).not.toContain(OpCode.StreamGroupAck);
+  });
+});

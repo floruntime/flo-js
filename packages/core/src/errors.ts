@@ -294,9 +294,9 @@ export class UnauthorizedError extends ServerError {
  * Error thrown when the server is overloaded: with `ran` No, the client
  * retries it first. `reason` QueueFull (the queue, or the shard's queues and
  * groups, at their caps) drains as messages are acked: back off and send
- * again. GroupHeldFull (a group read took nothing new: its consumers hold
- * too many unacked or dead records) is not retried: reading again won't
- * help until they ack or nack.
+ * again. GroupHeldFull (a group read took nothing new: the group is at its
+ * caps, dead records included, or the shard's queues and groups are at
+ * theirs) is not retried: see `Reason.GroupHeldFull` for what clears it.
  */
 export class OverloadedError extends ServerError {
   constructor(message?: string) {
@@ -463,8 +463,9 @@ export function isOverloaded(err: unknown): err is OverloadedError {
 }
 
 /**
- * Check if an error is a group read refused because the group's consumers
- * hold too many unacked or dead records (overloaded, reason GroupHeldFull).
+ * Check if an error is a group read refused because the group, or the
+ * shard's queues and groups together, are at their caps (overloaded, reason
+ * GroupHeldFull; see `Reason.GroupHeldFull` for what clears it).
  */
 export function isGroupHeldFull(err: unknown): err is OverloadedError {
   return err instanceof ServerError && err.status === StatusCode.Overloaded && err.reason === Reason.GroupHeldFull;
