@@ -7,7 +7,7 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { OpCode } from "@floruntime/core";
+import { OpCode, OptionTag } from "@floruntime/core";
 import { ActionWorker, StreamWorker } from "@floruntime/node";
 import { type Answer, fakeServer, groupRead, notFound, oneTask, quiet, sleep, until } from "./fake_worker_server.js";
 
@@ -259,7 +259,7 @@ describe("StreamWorker", () => {
     expect(srv.ops().filter((o) => o === OpCode.StreamGroupCreate).length).toBe(2);
   });
 
-  it("a stop hands back the records of its last batch it hasn't started", async () => {
+  it("a stop abandons the records of its last batch it hasn't started", async () => {
     const srv = await fakeServer((op, nth) => (op === OpCode.StreamGroupRead ? (nth === 0 ? { data: records(3) } : { delayMs: BLOCK_MS, data: records(0) }) : undefined));
     close = srv.close;
     let started = false;
@@ -280,5 +280,74 @@ describe("StreamWorker", () => {
     const count = v.readUInt32LE(at);
     const sent = Array.from({ length: count }, (_, i) => [v.readBigUInt64LE(at + 4 + i * 20 + 8), v.readUInt32LE(at + 4 + i * 20 + 16)]);
     expect(sent).toEqual([[2n, 2], [3n, 2]]); // the two it never started, with their deliveries
+    expect(v.length).toBe(at + 4 + count * 20 + 2); // then no error: [error_len:u16] 0
+    expect(v.readUInt16LE(at + 4 + count * 20)).toBe(0);
+    // Abandoned, not nacked: the options are the abandon flag alone.
+    const p = nacks[0]!.payload;
+    expect(Array.from(p.subarray(p.length - 4))).toEqual([2, 0, OptionTag.Abandon, 0]);
+  });
+});
+
+/** A nack request's options, the payload's tail after the value: [len:u16][options]. */
+function optionsOf(payload: Buffer): number[] {
+  let at = 2 + payload.readUInt16LE(0);
+  at += 2 + payload.readUInt16LE(at);
+  at += 4 + payload.readUInt32LE(at);
+  return Array.from(payload.subarray(at + 2, at + 2 + payload.readUInt16LE(at)));
+}
+
+/** The record seqs a group report names. */
+function seqsOf(payload: Buffer): bigint[] {
+  const v = valueOf(payload);
+  let at = 2 + v.readUInt16LE(0);
+  at += 2 + v.readUInt16LE(at);
+  at += 16;
+  return Array.from({ length: v.readUInt32LE(at) }, (_, i) => v.readBigUInt64LE(at + 4 + i * 20 + 8));
+}
+
+describe("StreamWorker stop and close", () => {
+  let close: (() => void) | undefined;
+  afterEach(() => close?.());
+
+  it("close() waits for the run: the running record is acked and the unstarted ones abandoned before the client closes", async () => {
+    const srv = await fakeServer(workThenEmpty(OpCode.StreamGroupRead, records(3)));
+    close = srv.close;
+    let started = false;
+    const w = new StreamWorker(srv.endpoint, { stream: "s", blockMs: BLOCK_MS, concurrency: 1, logger: quiet }, async () => {
+      started = true;
+      await sleep(300);
+    });
+    const done = w.start();
+    await until(() => started, 3000);
+    await w.close();
+    await done;
+    const acks = srv.seen.filter((s) => s.op === OpCode.StreamGroupAck);
+    const nacks = srv.seen.filter((s) => s.op === OpCode.StreamGroupNack);
+    expect(acks.map((a) => seqsOf(a.payload))).toEqual([[1n]]);
+    expect(nacks.map((n) => [seqsOf(n.payload), optionsOf(n.payload)])).toEqual([[[2n, 3n], [OptionTag.Abandon, 0]]]);
+  });
+
+  it("abandons a record whose handler failed once the worker stopped, and still nacks one that failed while it ran", async () => {
+    let n = 0;
+    const srv = await fakeServer(workThenEmpty(OpCode.StreamGroupRead, records(2)));
+    close = srv.close;
+    let stopping = false;
+    const w = new StreamWorker(srv.endpoint, { stream: "s", blockMs: BLOCK_MS, concurrency: 2, logger: quiet }, async (ctx) => {
+      if (n++ === 0) throw new Error("a genuine failure");
+      // Cut short by the stop: it ends on the worker's signal.
+      stopping = true;
+      await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve(), { once: true }));
+      throw new Error("stopped");
+    });
+    const done = w.start();
+    await until(() => stopping && srv.ops().includes(OpCode.StreamGroupNack), 3000);
+    w.stop();
+    await done;
+    const nacks = srv.seen.filter((s) => s.op === OpCode.StreamGroupNack).map((s) => [seqsOf(s.payload), optionsOf(s.payload)]);
+    expect(nacks).toEqual([
+      [[1n], []],
+      [[2n], [OptionTag.Abandon, 0]],
+    ]);
+    expect(srv.ops()).not.toContain(OpCode.StreamGroupAck);
   });
 });

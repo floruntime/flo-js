@@ -201,10 +201,11 @@ interface EnqueueOptions {
 ```
 
 A queue past its cap (messages or held bytes, counting ready, leased and
-dead), or a shard whose queues hold as many bytes as it may, refuses an
-enqueue as overloaded, not run. The client retries it as it does any such
-refusal (see Retries), then throws `OverloadedError`; consume or purge the
-queue.
+dead), or a shard whose queues and groups together hold as many bytes as
+they may, refuses an enqueue as overloaded with reason `QueueFull`, not run.
+It drains as messages are acked, so the client retries it as it does any
+such refusal (see Retries), then throws `OverloadedError` (`isQueueFull`):
+back off and send again, or consume or purge the queue.
 
 #### Dequeue Options
 
@@ -366,7 +367,7 @@ Streams are append-only logs for event sourcing and real-time data.
 | `groupCreate` | `groupCreate(stream, group, { ackTimeoutMs?, maxDeliver? }?) → Promise<boolean>` | Create a group with its lease and attempts; whether it made it |
 | `groupRead` | `groupRead(stream, { group, consumer, limit?, blockMs? }) → Promise<StreamGroupReadResult>` | Lease up to `limit` (1 to 100) of the group's records to `consumer` |
 | `groupAck` | `groupAck(stream, delivery, { group }) → Promise<StreamGroupReportResult>` | Done with leased records |
-| `groupNack` | `groupNack(stream, delivery, { group, delayMs?, dead?, error? }) → Promise<StreamGroupReportResult>` | Hand leased records back: ready again, or dead |
+| `groupNack` | `groupNack(stream, delivery, { group, delayMs?, dead?, error?, abandon? }) → Promise<StreamGroupReportResult>` | Hand leased records back: ready again, or dead; `abandon` hands back records never started |
 | `groupTouch` | `groupTouch(stream, delivery, { group }) → Promise<StreamGroupTouchResult>` | Keep a lease |
 | `groupList` | `groupList(stream, opts?) → Promise<StreamGroupListResult>` | The stream's consumer groups, with members, pending records, settings and last delivery |
 | `groupMembers` | `groupMembers(stream, group, opts?) → Promise<StreamGroupMembersResult>` | A group's members (the consumers holding its records now), each with how many it holds |
@@ -387,7 +388,25 @@ out, or the record was delivered again since) applies nothing and isn't an
 error: `applied` counts what it did, and `refused` names each record it
 didn't, with a `QueueRefusal` code (`Gone`, `DeliveredAgain`, `OtherHolder`,
 `Expired`, `Released`, `NotHeld`) and a reason. A resent ack whose first
-applied answers `Gone`.
+applied answers `Gone`. A report to a group that isn't there (deleted, say)
+throws `NotFoundError`.
+
+A nack counts a failure; its `error` (at most 1024 bytes, longer throws
+before a round trip) is kept with a dead record. `abandon: true` hands
+records back unstarted instead: ready at once, the delivery counted but no
+failure, and it takes no `delayMs`, `dead` or `error`. An abandoned record
+is never dead-lettered, so a consumer that abandons on errors hands a
+poison record out forever: abandon only records you never started (you are
+stopping), and nack the ones that failed.
+
+A group read that takes nothing new because the group is at its caps is
+refused overloaded with reason `GroupHeldFull` (`isGroupHeldFull`). The caps
+count every record the group holds, leased, ready and dead; the refusal also
+comes when the shard's queues and groups together hold as many bytes as
+they may, and the message says which. Leased records clear as consumers ack
+or nack; dead ones stay until the stream is trimmed past them or the group
+is deleted; the shard's cap clears as its other groups and queues drain.
+Reading again at once won't help, so the client doesn't retry it.
 
 A read creates the group it names, at the defaults; `groupCreate` makes one
 with other settings. Creating a group that exists with the same settings
@@ -404,8 +423,16 @@ this host's clock, the read's and then each touch answer's, so a skewed
 clock is corrected as touches come back. A touch refused conflict, not found or bad request
 stops touching; a record a touch didn't apply to (a stale report) is
 dropped from it; any other failure is retried with a backoff from 100 ms,
-never later than the next tick. After `stop()` the worker starts no more
-records: it hands back the unstarted ones, a nack that spends an attempt. Given `ackTimeoutMs` or `maxDeliver` it creates
+never later than the next tick. After `stop()` (or `close()`) the worker
+starts no more records: it abandons the unstarted ones, so they are ready
+again at once with no failure counted. A stop also aborts each running
+handler's `ctx.signal`; a handler that throws once it has aborted is cut
+short by the stop, so its record is abandoned too, while one that throws
+while the worker runs is nacked. `close()` waits for all of it (running
+handlers acked, the rest handed back) before closing a client the worker
+created; don't call it from a handler. A read refused `GroupHeldFull` is
+tried again from 1 s doubling to 30 s, logged at warn once, as for `limit`;
+a report refused not found (the group was deleted) is logged at error. Given `ackTimeoutMs` or `maxDeliver` it creates
 its group with them at start; otherwise its first read creates the group at
 the defaults.
 
@@ -487,21 +514,26 @@ try {
 | `StaleReportError` | A `ConflictError` (reason `StaleReport`) for an action complete, fail or touch whose delivery the run has moved on from; the message says how |
 | `BadRequestError` | Invalid request |
 | `UnauthorizedError` | Authentication failed |
-| `OverloadedError` | Server overloaded, and the client's retries ran out |
+| `OverloadedError` | Server overloaded, and the client's retries ran out. `reason` `QueueFull`: the queue is at its caps (retried); `GroupHeldFull`: the group (dead records included) or the shard's queues and groups are at their caps (not retried) |
 | `UnavailableError` | No leader, or the shard isn't taking writes, and the client's retries ran out. With `reason === Reason.ShardHalted` the shard halted, and takes no writes until an operator repairs it; never retried |
-| `LimitError` | The node is at a limit an operator sets: `reason` says which (`MemoryBudget`, `TooManyActions`, `TooManyWorkflowDefinitions`, `TooManyWorkflowRuns`), and the message names it. Terminal: retrying won't clear it until something is deleted, the node is given more room, or the setting is raised (it isn't permanent). Never run, never retried |
+| `LimitError` | The server holds as much of something as it is built to keep: `reason` says which (today `TooManyActions`, past 10,000 actions on the action's shard), and the message names it. The limits are fixed in the server's build, not settings: retrying won't clear it until something is deleted (it isn't permanent). Never run, never retried |
 | `OutcomePendingError` | The write committed but hasn't applied: its shard halted at it or before it (`reason` ShardHalted, `ran` Unknown); the message says whether it applies when the shard resumes. Never retried |
 | `InternalError` | Internal server error |
 
 ### Retries
 
+A refusal whose reason or status this SDK doesn't know still decodes: a
+`ServerError` with the number in `reason` (or `status`) and the server's
+message; `reasonName` names it `unknown_reason_<n>`.
+
 When the server refuses a request as `overloaded` or `unavailable` and says it
 didn't run it (`err.ran === Ran.No`), the client sends it again itself, as a
 new request, after a jittered wait. Because the server never ran it, this is
 safe for writes too. Any other refusal, or one that may have run, comes
-straight back. Two never come back to be retried: `unavailable` with reason
+straight back. Three are never retried: `unavailable` with reason
 `shard_halted` (an operator has to repair the shard, so resending is no
-use), and `outcome_pending` (the write is committed; resending it would
+use), `overloaded` with reason `group_held_full` (the group, or the shard, stays
+at its caps until records are acked, nacked, trimmed or deleted), and `outcome_pending` (the write is committed; resending it would
 write it twice, or halt the shard again).
 
 `unavailable` (not run) is routine: a stream read whose records are being
@@ -580,8 +612,8 @@ outstanding read can wait up to `blockMs`. `stop()` ends polling, also
 mid-reconnect or mid-drain, once an outstanding poll returns (within
 `blockMs`);
 running handlers still finish, and a `StreamWorker` hands back the records of
-its last batch it hasn't started. The hand-back is a nack, so it spends one
-of each record's attempts: with `maxDeliver` 1, a stop kills those records. Either one before or during `start()` ends
+its last batch it hasn't started. The hand-back abandons them: ready again
+at once, with no failure counted, so a stop never dead-letters them. Either one before or during `start()` ends
 that run, and both workers can be started again afterwards.
 
 ```typescript

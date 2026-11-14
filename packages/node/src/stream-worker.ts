@@ -276,7 +276,8 @@ export interface StreamWorkerConfig {
  * Handler function for processing stream records.
  * Return normally for success (auto-ack).
  * Throw an error to nack: the record is delivered again, and is dead once
- * nacked or expired the group's `maxDeliver` times.
+ * nacked or expired the group's `maxDeliver` times. An error thrown after
+ * the worker stopped (`ctx.signal` aborted) abandons the record instead.
  */
 export type StreamRecordHandler = (ctx: StreamContext) => Promise<void>;
 
@@ -302,18 +303,28 @@ export class StreamContext {
   /** Consumer name */
   readonly consumer: string;
 
+  /**
+   * Aborted when the worker stops (`stop()` or `close()`, not a drain). A
+   * handler may end early on it: an error thrown once it has aborted hands
+   * the record back with abandon (ready at once, no failure counted), so a
+   * restart doesn't spend the record's attempts or dead-letter it.
+   */
+  readonly signal: AbortSignal;
+
   constructor(
     record: StreamGroupRecord,
     namespace: string,
     stream: string,
     group: string,
-    consumer: string
+    consumer: string,
+    signal: AbortSignal = new AbortController().signal
   ) {
     this.record = record;
     this.namespace = namespace;
     this.stream = stream;
     this.group = group;
     this.consumer = consumer;
+    this.signal = signal;
   }
 
   /** Get the record's StreamID. */
@@ -387,6 +398,8 @@ export class StreamWorker {
   private noticeDue = false;
   private readonly pendingTasks: Set<Promise<void>> = new Set();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** The run start() is in, for close() to wait on. */
+  private run: Promise<void> | null = null;
 
   /**
    * Create a stream worker.
@@ -466,6 +479,16 @@ export class StreamWorker {
    * logged and backed off.
    */
   async start(): Promise<void> {
+    const run = this.runOnce();
+    this.run = run;
+    try {
+      await run;
+    } finally {
+      if (this.run === run) this.run = null;
+    }
+  }
+
+  private async runOnce(): Promise<void> {
     this.log(
       `Starting stream worker (id=${this.config.workerId}, stream=${this.config.stream}, ` +
         `group=${this.config.group}, consumer=${this.config.consumer})`
@@ -729,48 +752,55 @@ export class StreamWorker {
   }
 
   /**
-   * Nack records delivered here that a stop kept from starting, so the group
-   * hands them out again now rather than once their lease runs out. Like
-   * the lease running out, the nack counts as one of their attempts.
+   * Abandon records delivered here that a stop kept from starting, so the
+   * group hands them out again now rather than once their lease runs out.
+   * The delivery counts, but no failure: they never ran, so a stop never
+   * spends their attempts or dead-letters them.
    */
   private async handBack(read: StreamGroupReadResult, records: StreamGroupRecord[], keeper: LeaseKeeper): Promise<void> {
     for (const r of records) keeper.done(r);
     const delivery = deliveryOf(read, records);
-    await sendResult(this.client, this.leave.signal, this.logger, this.clientCloses, `nack of ${records.length} records not started`, async () =>
-      this.noteRefused("nack", await this.client.stream.groupNack(this.config.stream, delivery, { group: this.config.group }))
+    await sendResult(this.client, this.leave.signal, this.logger, this.clientCloses, `abandon of ${records.length} records not started`, async () =>
+      this.noteRefused("abandon", await this.client.stream.groupNack(this.config.stream, delivery, { group: this.config.group, abandon: true }))
     );
   }
 
   private async processRecord(record: StreamGroupRecord, read: StreamGroupReadResult, keeper: LeaseKeeper): Promise<void> {
     const client = this.client;
+    // This run's stop signal: endRun replaces it before a later run.
+    const stopped = this.stopSignal.signal;
     const ctx = new StreamContext(
       record,
       client.namespace(),
       this.config.stream,
       this.config.group,
-      this.config.consumer
+      this.config.consumer,
+      stopped
     );
     const id = recordId(record);
     const delivery = deliveryOf(read, [record]);
     const opts = { group: this.config.group };
 
-    // The handler's outcome alone picks ack or nack; sending it is separate,
-    // so a lost ack is resent, never turned into a nack.
-    let acked = true;
+    // The handler's outcome alone picks the report; sending it is separate,
+    // so a lost ack is resent, never turned into a nack. A handler that
+    // failed once this worker was stopping was cut short by the stop, not by
+    // the record: it goes back abandoned, so a restart spends no attempt.
+    let outcome: "ack" | "nack" | "abandon" = "ack";
     try {
       await this.withTimeout(this.handler(ctx), this.config.messageTimeoutMs);
     } catch (err) {
-      this.log(`Record ${id} failed: ${err}`);
-      acked = false;
+      outcome = stopped.aborted ? "abandon" : "nack";
+      this.log(`Record ${id} failed${stopped.aborted ? " after the worker stopped" : ""}: ${err}`);
     } finally {
       keeper.done(record);
     }
 
-    const what = acked ? "ack" : "nack";
-    await sendResult(client, this.leave.signal, this.logger, this.clientCloses, `${what} for record ${id}`, async () =>
+    await sendResult(client, this.leave.signal, this.logger, this.clientCloses, `${outcome} for record ${id}`, async () =>
       this.noteRefused(
-        what,
-        acked ? await client.stream.groupAck(this.config.stream, delivery, opts) : await client.stream.groupNack(this.config.stream, delivery, opts)
+        outcome,
+        outcome === "ack"
+          ? await client.stream.groupAck(this.config.stream, delivery, opts)
+          : await client.stream.groupNack(this.config.stream, delivery, outcome === "abandon" ? { ...opts, abandon: true } : opts)
       )
     );
   }
@@ -792,11 +822,13 @@ export class StreamWorker {
    * Signal the stream worker to stop: polling ends, also mid-reconnect or
    * mid-drain, once an outstanding read returns (within blockMs), and
    * records of the last batch not yet started are handed back. Running
-   * handlers finish and ack before `start()` returns. A stop before
-   * `start()` ends that run at once.
+   * handlers finish and ack before `start()` returns; their `ctx.signal`
+   * aborts, and one that throws from now on hands its record back too. A
+   * stop before `start()` ends that run at once.
    *
-   * The hand-back is a nack, so it spends one of each record's attempts:
-   * with `maxDeliver` 1, a stop kills the records it hands back.
+   * The hand-back abandons them: ready again at once, with no failure
+   * counted, so a stop never dead-letters them. A handler error while the
+   * worker isn't stopping is still a nack.
    */
   stop(): void {
     this.log("Stopping stream worker...");
@@ -806,10 +838,15 @@ export class StreamWorker {
   }
 
   /**
-   * Stop and close the stream worker.
+   * Stop the stream worker and wait for its run to end, as `start()` does:
+   * running handlers finish and ack, and the unstarted records are handed
+   * back, before the client it created is closed. Don't call it from a
+   * handler: the run waits for that handler.
    */
   async close(): Promise<void> {
     this.stop();
+    // Its error is start()'s to report.
+    await this.run?.catch(() => {});
     if (this.ownedClient) {
       await this.client.close();
     }

@@ -81,7 +81,7 @@ describe("queue.peek", () => {
     const msg = [...le(7n, 8), ...le(2n, 4), ...le(1n, 4), ...le(1700n, 8), ...le(5000n, 4), ...le(2n, 2), ...text("hi")];
     const { sender, sent } = answering([1, ...msg, 1]);
     expect(await new QueueOperations(sender).peek("jobs", 5)).toEqual({
-      messages: [{ seq: 7n, priority: 2, attempts: 1, enqueuedAtMs: 1700n, size: 5000, payload: enc.encode("hi") }],
+      messages: [{ seq: 7n, priority: 2, deliveries: 1, enqueuedAtMs: 1700n, size: 5000, payload: enc.encode("hi") }],
       more: true,
     });
     expect(sent[0]!.op).toBe(OpCode.QueuePeek);
@@ -116,8 +116,8 @@ describe("queue.dlqList", () => {
     const page = await new QueueOperations(sender).dlqList("jobs", { limit: 2, after: 3n });
     expect(page).toEqual({
       messages: [
-        { seq: 4n, size: 1, payload: enc.encode("a"), enqueuedAtMs: 1600n, attempts: 3, priority: 9, movedAtMs: 1700n },
-        { seq: 6n, size: 9000, payload: enc.encode("bb"), enqueuedAtMs: 1600n, attempts: 3, priority: 9, movedAtMs: 1700n },
+        { seq: 4n, size: 1, payload: enc.encode("a"), enqueuedAtMs: 1600n, deliveries: 3, priority: 9, movedAtMs: 1700n },
+        { seq: 6n, size: 9000, payload: enc.encode("bb"), enqueuedAtMs: 1600n, deliveries: 3, priority: 9, movedAtMs: 1700n },
       ],
       total: 5n,
       hasMore: true,

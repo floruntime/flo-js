@@ -876,11 +876,11 @@ export function decodePeekAnswer(data: Uint8Array): PeekResult {
   for (let n = r.u8(); n > 0; n--) {
     const seq = r.u64();
     const priority = r.u32();
-    const attempts = r.u32();
+    const deliveries = r.u32();
     const enqueuedAtMs = r.i64();
     const size = r.u32();
     const payload = r.bytes16();
-    messages.push({ seq, priority, attempts, enqueuedAtMs, size, payload });
+    messages.push({ seq, priority, deliveries, enqueuedAtMs, size, payload });
   }
   const more = r.bool();
   r.end();

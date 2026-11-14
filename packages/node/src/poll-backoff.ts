@@ -1,4 +1,4 @@
-import { Backoff, isLimit, type Logger, Ran, Reason, reasonName, ServerError, StatusCode } from "@floruntime/core";
+import { Backoff, isGroupHeldFull, isLimit, type Logger, Ran, Reason, reasonName, ServerError, StatusCode } from "@floruntime/core";
 
 /** The longest delay Node's timers keep; past it they fire after 1 ms. */
 export const MAX_TIMER_MS = 2_147_483_647;
@@ -147,12 +147,15 @@ export const LIMIT_INITIAL_BACKOFF_MS = 1000;
 export const LIMIT_MAX_BACKOFF_MS = 30_000;
 
 /**
- * Pacing for a running worker's polls refused with status limit (its
- * memory budget spent, say). Retrying won't clear it until an operator
- * deletes something, gives the node room or raises the setting, so the
- * worker neither spins nor stops: it waits, from 1 s doubling to 30 s, and
- * logs each distinct reason once at warn (later ones at debug) until a
- * poll goes through. start() doesn't use it: a limit there is thrown.
+ * Pacing for a running worker's polls refused with status limit, or a
+ * group read refused overloaded with reason GroupHeldFull (the group is at
+ * its caps, dead records included, or the shard's queues and groups are at
+ * theirs). Retrying at once won't clear either: a limit needs a delete, a
+ * full group its consumers to ack or nack, its dead records trimmed or the
+ * group deleted, or the shard's other groups and queues to drain. The worker
+ * neither spins nor stops: it waits, from 1 s doubling to 30 s, and logs
+ * each distinct reason once at warn (later ones at debug) until a poll
+ * goes through. start() doesn't use it: a limit there is thrown.
  */
 export class LimitBackoff {
   private readonly backoff = new Backoff(LIMIT_INITIAL_BACKOFF_MS, LIMIT_MAX_BACKOFF_MS);
@@ -165,13 +168,14 @@ export class LimitBackoff {
   ) {}
 
   /**
-   * If err is a limit refusal, log it, wait (less if `signal` aborts) and
-   * return true; otherwise return false at once.
+   * If err is a limit or GroupHeldFull refusal, log it, wait (less if
+   * `signal` aborts) and return true; otherwise return false at once.
    */
   async waitIf(err: unknown, call: string, signal: AbortSignal): Promise<boolean> {
-    if (!isLimit(err)) return false;
+    if (!isLimit(err) && !isGroupHeldFull(err)) return false;
     const d = this.backoff.next();
-    const msg = `${call} refused at a limit (${reasonName(err.reason)}): ${err.serverMessage}; retrying in ${d}ms`;
+    const what = isLimit(err) ? "at a limit" : "full (the group's records, dead ones included, or the shard's queues and groups)";
+    const msg = `${call} refused ${what} (${reasonName(err.reason)}): ${err.serverMessage}; retrying in ${d}ms`;
     if (this.warned.has(err.reason)) this.logger.debug(msg);
     else {
       this.warned.add(err.reason);

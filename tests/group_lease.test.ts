@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   FloError,
   IncompleteResponseError,
+  NotFoundError,
   OpCode,
   OptionTag,
   QueueRefusal,
@@ -99,18 +100,56 @@ describe("stream.groupAck, groupNack and groupTouch", () => {
     expect(await ops.groupNack("s", delivery, { group: "g1" })).toEqual({ applied: 2, refused: [] });
     expect(await ops.groupTouch("s", delivery, { group: "g1" })).toEqual({ applied: 2, refused: [], expiresAtMs: 99000n });
     expect(sent.map((s) => s.op)).toEqual([OpCode.StreamGroupAck, OpCode.StreamGroupNack, OpCode.StreamGroupTouch]);
-    for (const s of sent) expect(Array.from(s.value)).toEqual(reportValue);
+    // A nack's value ends with its error, [error_len:u16], 0 for none.
+    expect(sent.map((s) => Array.from(s.value))).toEqual([reportValue, [...reportValue, 0, 0], reportValue]);
     for (const s of sent) expect(s.options).toEqual(new Uint8Array(0));
   });
 
-  it("send a nack's delay, dead and error as options, the error cut to what an option holds", async () => {
+  it("send a nack's delay and dead as options and its error in the body, after the records", async () => {
+    const { sender, sent } = answering(groupReportAnswer(2), groupReportAnswer(2));
+    const ops = new StreamOperations(sender);
+    const error = "é".repeat(512); // 1024 bytes: the most a nack carries
+    await ops.groupNack("s", delivery, { group: "g1", delayMs: 1500, dead: true, error });
+    expect(Array.from(sent[0]!.options)).toEqual([OptionTag.DelayMS, 8, ...le(1500n, 8), OptionTag.Dead, 0]);
+    expect(Array.from(sent[0]!.value)).toEqual([...reportValue, ...le(1024n, 2), ...enc.encode(error)]);
+    // No error: [error_len:u16] 0.
+    await ops.groupNack("s", delivery, { group: "g1" });
+    expect(Array.from(sent[1]!.value)).toEqual([...reportValue, 0, 0]);
+    expect(sent[1]!.options).toEqual(new Uint8Array(0));
+  });
+
+  it("refuse a nack error past 1024 bytes before a round trip, whole, not cut", async () => {
+    const { sender, sent } = answering();
+    const err = await new StreamOperations(sender).groupNack("s", delivery, { group: "g1", error: "x".repeat(1025) }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(FloError);
+    expect((err as Error).message).toMatch(/at most 1024 bytes, got 1025/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("send abandon as a flag alone, and refuse it with dead, a delay or an error before a round trip", async () => {
     const { sender, sent } = answering(groupReportAnswer(2));
-    await new StreamOperations(sender).groupNack("s", delivery, { group: "g1", delayMs: 1500, dead: true, error: "é".repeat(200) });
-    const o = Array.from(sent[0]!.options);
-    expect(o.slice(0, 10)).toEqual([OptionTag.DelayMS, 8, ...le(1500n, 8)]);
-    expect(o.slice(10, 12)).toEqual([OptionTag.Dead, 0]);
-    expect(o.slice(12, 14)).toEqual([OptionTag.ErrorText, 254]); // whole characters only
-    expect(o.length).toBe(14 + 254);
+    const ops = new StreamOperations(sender);
+    await ops.groupNack("s", delivery, { group: "g1", abandon: true });
+    expect(Array.from(sent[0]!.options)).toEqual([OptionTag.Abandon, 0]);
+    expect(OptionTag.Abandon).toBe(0x34);
+    expect(Array.from(sent[0]!.value)).toEqual([...reportValue, 0, 0]);
+    for (const extra of [{ dead: true }, { delayMs: 10 }, { error: "boom" }]) {
+      await expect(ops.groupNack("s", delivery, { group: "g1", abandon: true, ...extra })).rejects.toThrow(/abandon hands records back unstarted/);
+    }
+    expect(sent).toHaveLength(1);
+  });
+
+  it("throw NotFoundError for a report to a group that isn't there", async () => {
+    const body = [13, 0, 0, ...enc.encode("not found: no such group")];
+    const ops = new StreamOperations({
+      getNamespace: () => "default",
+      sendRequest: async () => ({ status: StatusCode.NotFound, data: Uint8Array.from(body), requestId: 0n }),
+    } as never);
+    for (const report of [() => ops.groupAck("s", delivery, { group: "gone" }), () => ops.groupNack("s", delivery, { group: "gone" }), () => ops.groupTouch("s", delivery, { group: "gone" })]) {
+      const err = await report().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(NotFoundError);
+      expect(err).toMatchObject({ reason: Reason.NotFound, serverMessage: "not found: no such group" });
+    }
   });
 
   it("answer a stale report inside an ok answer: applied nothing, each record with why", async () => {

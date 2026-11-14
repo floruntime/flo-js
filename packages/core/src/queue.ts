@@ -67,10 +67,12 @@ export class QueueOperations {
    * Returns the sequence number of the enqueued message.
    *
    * A queue past its cap (messages or held bytes, ready, leased and dead),
-   * or a shard whose queues hold as many bytes as it may, refuses it as
-   * overloaded, not run. The client retries that as it retries any
+   * or a shard whose queues and groups together hold as many bytes as they
+   * may, refuses it overloaded with reason QueueFull, not run. It drains as
+   * messages are acked, so the client retries it as it retries any
    * overloaded refusal (about 350 ms by default), then throws
-   * OverloadedError: consume or purge the queue.
+   * OverloadedError (`isQueueFull`): back off and send again, or consume
+   * or purge the queue.
    */
   async enqueue(
     queue: string,
@@ -241,7 +243,7 @@ export function serializeDlqListValue(limit: number, after?: bigint): Uint8Array
 
 /**
  * queue.dlq_list's answer: [count:u32]([seq:u64][size:u32][len:u32][payload][enqueued_at_ms:i64]
- * [attempts:u32][priority:u8][moved_at_ms:i64])*[total:u64][has_more:u8][last_seq:u64].
+ * [deliveries:u32][priority:u8][moved_at_ms:i64])*[total:u64][has_more:u8][last_seq:u64].
  */
 export function decodeDlqListAnswer(data: Uint8Array): DLQListResult {
   const r = new AnswerReader(data);
@@ -251,10 +253,10 @@ export function decodeDlqListAnswer(data: Uint8Array): DLQListResult {
     const size = r.u32();
     const payload = r.bytes32();
     const enqueuedAtMs = r.i64();
-    const attempts = r.u32();
+    const deliveries = r.u32();
     const priority = r.u8();
     const movedAtMs = r.i64();
-    messages.push({ seq, size, payload, enqueuedAtMs, attempts, priority, movedAtMs });
+    messages.push({ seq, size, payload, enqueuedAtMs, deliveries, priority, movedAtMs });
   }
   const total = r.u64();
   const hasMore = r.bool();
