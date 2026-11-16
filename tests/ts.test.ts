@@ -205,11 +205,11 @@ describe("ts.write", () => {
 });
 
 describe("ts.floql", () => {
-  it("sends the query as the value and decodes its series, times in ms", async () => {
+  it("sends the query as the value and decodes its series, times in ns", async () => {
     const key = enc.encode("cpu");
     const field = enc.encode("value");
-    const { ts, sent } = fake(ok(bytes(u32(1), u32(3), key, u32(5), field, u32(2), i64(1000n), f64(1), i64(2000n), f64(2))));
-    expect(await ts.floql("cpu[1h]")).toEqual([{ key: "cpu", field: "value", points: [{ timeMs: 1000n, value: 1 }, { timeMs: 2000n, value: 2 }] }]);
+    const { ts, sent } = fake(ok(bytes(u32(1), u32(3), key, u32(5), field, u32(2), i64(1000n), f64(1), i64(1_700_000_000_123_456_789n), f64(2))));
+    expect(await ts.floql("cpu[1h]")).toEqual([{ key: "cpu", field: "value", points: [{ timeNs: 1000n, value: 1 }, { timeNs: 1_700_000_000_123_456_789n, value: 2 }] }]);
     expect([sent[0]!.op, sent[0]!.key, new TextDecoder().decode(sent[0]!.value)]).toEqual([OpCode.TSFloQL, "", "cpu[1h]"]);
   });
 
@@ -219,6 +219,75 @@ describe("ts.floql", () => {
     const err = await ts.floql("cpu").catch((e) => e);
     expect(err).toBeInstanceOf(BadRequestError);
     expect(err.serverMessage).toBe(text);
+  });
+});
+
+describe("ts.query", () => {
+  const T = 1_700_000_000_123_456_789n;
+
+  it("sends from, to and window as i64 ns options, one that isn't a whole ms exactly", async () => {
+    const { ts, sent } = fake(ok(bytes(u32(0))));
+    await ts.query("cpu", { field: "f", tags: "host=a", fromNs: T, toNs: T + 1n, windowNs: 1_500_001n, aggregation: "max" });
+    const s = sent[0]!;
+    expect([s.op, s.key, s.value.length]).toEqual([OpCode.TSQuery, "cpu", 0]);
+    expect(s.options).toEqual(
+      bytes(
+        [OptionTag.TSField, 1], enc.encode("f"),
+        [OptionTag.TSTags, 6], enc.encode("host=a"),
+        [OptionTag.TSFromNS, 8], i64(T),
+        [OptionTag.TSToNS, 8], i64(T + 1n),
+        [OptionTag.TSWindowNS, 8], i64(1_500_001n),
+        [OptionTag.TSAggregation, 3], enc.encode("max"),
+      ),
+    );
+    expect([OptionTag.TSFromNS, OptionTag.TSToNS, OptionTag.TSWindowNS]).toEqual([0x60, 0x61, 0x62]);
+  });
+
+  it("sends no options when given none, for the server's minute window and no bounds", async () => {
+    const { ts, sent } = fake(ok(bytes(u32(0))));
+    expect(await ts.query("cpu")).toEqual([]);
+    expect(sent[0]!.options.length).toBe(0);
+  });
+
+  it("refuses an unknown aggregation or a time past an i64 before a round trip", async () => {
+    const { ts, sent } = fake();
+    await expect(ts.query("cpu", { aggregation: "median" as never })).rejects.toThrow(FloError);
+    await expect(ts.query("cpu", { windowNs: 1n << 63n })).rejects.toThrow(FloError);
+    expect(sent).toEqual([]);
+  });
+
+  it("decodes buckets with their start in ns", async () => {
+    const key = enc.encode("cpu");
+    const { ts } = fake(ok(bytes(u32(1), u32(3), key, u32(2), i64(T), f64(1.5), i64(T + 60_000_000_000n), f64(2))));
+    expect(await ts.query("cpu")).toEqual([{ key: "cpu", buckets: [{ startNs: T, value: 1.5 }, { startNs: T + 60_000_000_000n, value: 2 }] }]);
+  });
+
+  it("surfaces the too-many-windows refusal with the server's text", async () => {
+    const text = "bad request: the range holds more than 1024 windows of this width; widen the window (it is in nanoseconds) or narrow the range";
+    const { ts } = fake(refusal(StatusCode.BadRequest, text));
+    const err = await ts.query("cpu", { fromNs: 1n, toNs: T, windowNs: 1000n }).catch((e) => e);
+    expect(err).toBeInstanceOf(BadRequestError);
+    expect(err.serverMessage).toBe(text);
+  });
+});
+
+describe("ts.info", () => {
+  const T = 1_700_000_000_123_456_789n;
+
+  it("decodes oldest and newest in ns, and none without points", async () => {
+    const f = enc.encode("value");
+    const { ts, sent } = fake(
+      ok(bytes(u32(2), u32(1), [0], u16(1), u16(5), f, i64(7n), [1], i64(T), [1], i64(T + 9n))),
+      ok(bytes(u32(1), u32(1), [1], u16(0), i64(0n), [0], [0])),
+    );
+    expect(await ts.info("cpu")).toEqual({ series: 2, fieldCount: 1, fieldsCapped: false, fields: ["value"], points: 7n, oldestNs: T, newestNs: T + 9n });
+    expect(await ts.info("cpu")).toEqual({ series: 1, fieldCount: 1, fieldsCapped: true, fields: [], points: 0n, oldestNs: null, newestNs: null });
+    expect([sent[0]!.op, sent[0]!.key, sent[0]!.value.length]).toEqual([OpCode.TSInfo, "cpu", 0]);
+  });
+
+  it("throws NotFoundError for a measurement with no series", async () => {
+    const { ts } = fake(refusal(StatusCode.NotFound, "not found: no such measurement"));
+    await expect(ts.info("cpu")).rejects.toThrow(NotFoundError);
   });
 });
 

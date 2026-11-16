@@ -429,9 +429,9 @@ export const OptionTag = {
   Abandon: 0x34, // void: A nack hands its records back unstarted: ready at once, the delivery counted, no failure
 
   // Time-Series Options (0x60 - 0x6F)
-  TSFromMS: 0x60, // i64: Start of time range (inclusive, unix ms)
-  TSToMS: 0x61, // i64: End of time range (inclusive, 0 = now)
-  TSWindowMS: 0x62, // i64: Aggregation window size (ms)
+  TSFromNS: 0x60, // i64: a query's start, inclusive, in Unix ns (0 = none)
+  TSToNS: 0x61, // i64: a query's end, inclusive, in Unix ns (0 = none)
+  TSWindowNS: 0x62, // i64: a query's window, in ns (absent = a minute; 0 is refused)
   TSAggregation: 0x63, // string: Aggregation function name (avg, sum, count, min, max)
   TSField: 0x64, // string: Field name filter (empty = "value")
   TSTags: 0x65, // string: Comma-separated tag filters "key=val,key2=val2"

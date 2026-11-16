@@ -1,8 +1,9 @@
 /**
  * Time-series operations: write a point, read a measurement field's points a
- * page at a time, and run a FloQL query.
+ * page at a time, aggregate them in windows, summarize a measurement, and
+ * run a FloQL query.
  *
- * Every time on the wire is i64 Unix nanoseconds, a bigint here. `Date`
+ * Every time and window on the wire is i64 nanoseconds, a bigint here. `Date`
  * holds only milliseconds, so `nsFromDate` and `dateFromNs` are helpers, not
  * the way in or out.
  */
@@ -81,17 +82,63 @@ export interface TSReadPage {
   stale: boolean;
 }
 
-/** One FloQL point. FloQL answers in Unix ms. */
-export interface TSFloQLPoint {
-  timeMs: bigint;
-  value: number;
-}
-
 export interface TSFloQLSeries {
   key: string;
   field: string;
-  points: TSFloQLPoint[];
+  points: TSPoint[];
 }
+
+/** How a ts.query aggregates each window. */
+export type TSAggregation = "avg" | "sum" | "min" | "max" | "count";
+
+export interface TSQueryOptions {
+  /** The field queried; "value" by default. */
+  field?: string;
+  /** Only series whose tags include every `key=value` pair of this comma-separated list. */
+  tags?: string;
+  /** The earliest time, inclusive, in Unix ns; unset or 0 for no bound. */
+  fromNs?: bigint;
+  /** The latest time, inclusive, in Unix ns; unset or 0 for no bound. */
+  toNs?: bigint;
+  /**
+   * Each window's width in ns; a minute when unset. The server refuses 0,
+   * and a range that holds more than 1024 windows of this width.
+   */
+  windowNs?: bigint;
+  /** "avg" by default. */
+  aggregation?: TSAggregation;
+  namespace?: string;
+}
+
+/** One ts.query window: its start, aligned to the epoch, in Unix ns, and its aggregate. */
+export interface TSBucket {
+  startNs: bigint;
+  value: number;
+}
+
+export interface TSQuerySeries {
+  key: string;
+  buckets: TSBucket[];
+}
+
+/** A measurement's summary (ts.info). */
+export interface TSInfo {
+  /** Its series: each field of each tag set. */
+  series: number;
+  /** Its distinct fields, counted up to 256. */
+  fieldCount: number;
+  /** It has more fields than were counted or listed. */
+  fieldsCapped: boolean;
+  /** Its fields' names, up to 256 and 128 KiB of them. */
+  fields: string[];
+  points: bigint;
+  /** Its oldest point's time in Unix ns; null without points. */
+  oldestNs: bigint | null;
+  /** Its newest point's time in Unix ns; null without points. */
+  newestNs: bigint | null;
+}
+
+const AGGREGATIONS: ReadonlySet<string> = new Set(["avg", "sum", "min", "max", "count"]);
 
 /** `date` in Unix ns. */
 export function nsFromDate(date: Date): bigint {
@@ -172,19 +219,66 @@ export function decodeTSWriteAnswer(data: Uint8Array): TSWriteResult {
   return { seriesHash, timeNs, sequence };
 }
 
-/** FloQL's answer: [series:u32] then each [key_len:u32][key][field_len:u32][field][count:u32] and its [time_ms:i64][value:f64] points. */
+/** FloQL's answer: [series:u32] then each [key_len:u32][key][field_len:u32][field][count:u32] and its [time_ns:i64][value:f64] points. */
 export function decodeFloQLAnswer(data: Uint8Array): TSFloQLSeries[] {
   const r = new AnswerReader(data);
   const out: TSFloQLSeries[] = [];
   for (let s = r.u32(); s > 0; s--) {
     const key = utf8(r.bytes32());
     const field = utf8(r.bytes32());
-    const points: TSFloQLPoint[] = [];
-    for (let n = r.u32(); n > 0; n--) points.push({ timeMs: r.i64(), value: r.f64() });
+    const points: TSPoint[] = [];
+    for (let n = r.u32(); n > 0; n--) points.push({ timeNs: r.i64(), value: r.f64() });
     out.push({ key, field, points });
   }
   r.end();
   return out;
+}
+
+/** ts.query's answer: [series:u32] then each [key_len:u32][key][count:u32] and its [start_ns:i64][value:f64] buckets. */
+export function decodeTSQueryAnswer(data: Uint8Array): TSQuerySeries[] {
+  const r = new AnswerReader(data);
+  const out: TSQuerySeries[] = [];
+  for (let s = r.u32(); s > 0; s--) {
+    const key = utf8(r.bytes32());
+    const buckets: TSBucket[] = [];
+    for (let n = r.u32(); n > 0; n--) buckets.push({ startNs: r.i64(), value: r.f64() });
+    out.push({ key, buckets });
+  }
+  r.end();
+  return out;
+}
+
+/** ts.info's answer: series, field_count, fields_capped, fields, points, oldest_ns, newest_ns. */
+export function decodeTSInfoAnswer(data: Uint8Array): TSInfo {
+  const r = new AnswerReader(data);
+  const series = r.u32();
+  const fieldCount = r.u32();
+  const fieldsCapped = r.bool();
+  const fields: string[] = [];
+  for (let n = r.u16(); n > 0; n--) fields.push(utf8(r.bytes16()));
+  const points = r.u64();
+  const oldestNs = r.present() ? r.i64() : null;
+  const newestNs = r.present() ? r.i64() : null;
+  r.end();
+  return { series, fieldCount, fieldsCapped, fields, points, oldestNs, newestNs };
+}
+
+/** ts.query's options; times and the window go as i64 ns. */
+export function encodeTSQueryOptions(opts?: TSQueryOptions): Uint8Array {
+  checkTime("fromNs", opts?.fromNs, I64_MIN);
+  checkTime("toNs", opts?.toNs, I64_MIN);
+  checkTime("windowNs", opts?.windowNs, I64_MIN);
+  if (opts?.aggregation !== undefined && !AGGREGATIONS.has(opts.aggregation)) {
+    throw new FloError(`flo: unknown aggregation ${opts.aggregation}; one of avg, sum, min, max, count`);
+  }
+  const b = new OptionsBuilder();
+  if (opts?.field !== undefined) b.addString(OptionTag.TSField, opts.field);
+  if (opts?.tags !== undefined && opts.tags !== "") b.addString(OptionTag.TSTags, opts.tags);
+  if (opts?.fromNs !== undefined) b.addI64(OptionTag.TSFromNS, opts.fromNs);
+  if (opts?.toNs !== undefined) b.addI64(OptionTag.TSToNS, opts.toNs);
+  if (opts?.windowNs !== undefined) b.addI64(OptionTag.TSWindowNS, opts.windowNs);
+  if (opts?.aggregation !== undefined) b.addString(OptionTag.TSAggregation, opts.aggregation);
+  return b.build();
 }
 
 function utf8(b: Uint8Array): string {
@@ -255,7 +349,31 @@ export class TSOperations {
   }
 
   /**
-   * Run a FloQL query. Its answer's times are Unix ms. An answer of more
+   * Aggregate `measurement`'s points in windows of `windowNs` (a minute by
+   * default), aligned to the epoch. Times and the window are ns. A range
+   * that holds more than 1024 windows is refused bad request: widen the
+   * window or narrow the range.
+   */
+  async query(measurement: string, opts?: TSQueryOptions): Promise<TSQuerySeries[]> {
+    const resp = await this.sender.sendRequest(OpCode.TSQuery, this.sender.getNamespace(opts?.namespace), textEncoder.encode(measurement), new Uint8Array(0), encodeTSQueryOptions(opts));
+    if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
+    return decodeTSQueryAnswer(resp.data);
+  }
+
+  /**
+   * A measurement's series, fields, points, and its oldest and newest
+   * points' times in ns. A measurement with no series throws NotFoundError.
+   */
+  async info(measurement: string, opts?: { namespace?: string }): Promise<TSInfo> {
+    const resp = await this.sender.sendRequest(OpCode.TSInfo, this.sender.getNamespace(opts?.namespace), textEncoder.encode(measurement), new Uint8Array(0), new Uint8Array(0));
+    if (resp.status !== StatusCode.OK) throw createReadError(resp);
+    return decodeTSInfoAnswer(resp.data);
+  }
+
+  /**
+   * Run a FloQL query. Its answer's times are Unix ns. A bare number in
+   * the query's range is epoch ms (`[1700000000000..1700000060000]`); a
+   * duration (`[1h]`, `[2h..1h]`) is relative to now. An answer of more
    * than 4096 raw points is refused bad request: aggregate them, narrow the
    * query, or page through them with `read`.
    */

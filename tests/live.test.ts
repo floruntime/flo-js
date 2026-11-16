@@ -1023,6 +1023,53 @@ describe.skipIf(!endpoint)("live time series", () => {
     await expect(client.ts.read("")).rejects.toThrow(BadRequestError);
   });
 
+  it("queries windows in ns: from, to and window over points at known ns times", async () => {
+    const { client } = await liveClient();
+    // A point every second, 123 ns past it, for 6 s; windows of 2 s.
+    for (let k = 0; k < 6; k++) await client.ts.write("q", k + 1, { timeNs: T0 + BigInt(k) * 1_000_000_000n + 123n });
+    const got = await client.ts.query("q", { fromNs: T0, toNs: T0 + 5_000_000_000n, windowNs: 2_000_000_000n, aggregation: "sum" });
+    expect(got).toEqual([
+      {
+        key: "q",
+        buckets: [
+          { startNs: T0, value: 1 + 2 },
+          { startNs: T0 + 2_000_000_000n, value: 3 + 4 },
+          { startNs: T0 + 4_000_000_000n, value: 5 },
+        ],
+      },
+    ]);
+    // A bound inside a second: the 123 ns past it counts.
+    const narrow = await client.ts.query("q", { fromNs: T0 + 124n, toNs: T0 + 1_000_000_123n, windowNs: 2_000_000_000n, aggregation: "count" });
+    expect(narrow).toEqual([{ key: "q", buckets: [{ startNs: T0, value: 1 }] }]);
+  });
+
+  it("refuses a query window that gives more than 1024 windows, and a 0 window, with the server's text", async () => {
+    const { client } = await liveClient();
+    for (let i = 0; i < 1100; i += 250) {
+      await Promise.all(Array.from({ length: Math.min(250, 1100 - i) }, (_, k) => client.ts.write("wide", 1, { timeNs: T0 + BigInt(i + k) * 1000n })));
+    }
+    const err = await client.ts.query("wide", { windowNs: 1000n }).catch((e) => e);
+    expect(err).toBeInstanceOf(BadRequestError);
+    expect(err.serverMessage).toBe("bad request: the range holds more than 1024 windows of this width; widen the window (it is in nanoseconds) or narrow the range");
+    const zero = await client.ts.query("wide", { windowNs: 0n }).catch((e) => e);
+    expect(zero).toBeInstanceOf(BadRequestError);
+    expect(zero.serverMessage).toBe("ts query: a window must be more than 0 ns");
+    expect((await client.ts.query("wide", { windowNs: 2_000_000n }))[0]!.buckets.length).toBe(1);
+  }, 30000);
+
+  it("answers FloQL points at the ns times written, and ts.info's oldest and newest in ns", async () => {
+    const { client } = await liveClient();
+    // Inside FloQL's default range, the last hour, and not whole ms.
+    const base = nsFromDate(new Date()) - 600_000_000_000n + 123_456_789n;
+    const times = [base, base + 1_000_001n, base + 2_000_002n];
+    for (const [i, t] of times.entries()) await client.ts.write("fns", i, { timeNs: t });
+    const series = await client.ts.floql("fns");
+    expect(series.map((s) => s.points)).toEqual([times.map((t, i) => ({ timeNs: t, value: i }))]);
+    const info = await client.ts.info("fns");
+    expect(info).toMatchObject({ series: 1, fields: ["value"], points: 3n, oldestNs: times[0], newestNs: times[2] });
+    await expect(client.ts.info("never")).rejects.toBeInstanceOf(NotFoundError);
+  });
+
   it("refuses a raw FloQL answer of more than 4096 points with the server's text", async () => {
     const { client } = await liveClient();
     // Inside FloQL's default range, the last hour.
