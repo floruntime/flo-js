@@ -386,6 +386,22 @@ export function createServerError(
   return err;
 }
 
+/**
+ * A read's refusal: as createServerError, except that a not-found the
+ * answer flags stale (from a node that may be behind) is a
+ * StaleNotFoundError, which still matches not-found but means "maybe not
+ * yet", not "doesn't exist".
+ */
+export function createReadError(resp: { status: StatusCode; data?: Uint8Array; stale?: boolean }): FloError {
+  const err = createServerError(resp.status, resp.data);
+  if (resp.stale !== true || !(err instanceof ServerError) || err.reason !== Reason.NotFound) return err;
+  const stale = new StaleNotFoundError(err.serverMessage);
+  stale.reason = err.reason;
+  stale.ran = err.ran;
+  stale.message = err.message;
+  return stale;
+}
+
 function serverErrorFor(status: StatusCode, message: string): ServerError {
   switch (status) {
     case StatusCode.NotFound:

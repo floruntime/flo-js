@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   ActionType,
+  BadRequestError,
   ConflictError,
   NoNamespaceError,
   NotFoundError,
@@ -29,6 +30,9 @@ import {
   StaleReportError,
   StatusCode,
   TABLE_HASH,
+  TSOrder,
+  nsFromDate,
+  type TSPoint,
   VERSION,
   WorkerStatus,
   WorkerType,
@@ -252,6 +256,22 @@ describe.skipIf(!endpoint)("live", () => {
     });
   });
 
+  it("shows a TS source's late points against the edge at or above its lateness window", async () => {
+    const { client } = await liveClient();
+    const yaml = `kind: Processing\nname: late\n\nsources:\n  - name: in\n    ts:\n      measurement: late-in\n      lateness_ms: 20000\n\nsinks:\n  - name: out\n    stream:\n      name: late-out\n`;
+    const id = await client.processing.submit(yaml);
+    cleanups.push(async () => void (await client.processing.cancel(id).catch(() => {})));
+    const deadline = Date.now() + 10000;
+    let status = await client.processing.status(id);
+    while (!status.running) {
+      expect(Date.now(), "the job never ran on this node").toBeLessThan(deadline);
+      await new Promise((r) => setTimeout(r, 50));
+      status = await client.processing.status(id);
+    }
+    // 20 s reports against the 30 s edge.
+    expect([status.late_edge_ms, status.late_points]).toEqual([30000, 0]);
+  });
+
   it("shows a job's status with its runtime and definition, and removes it only once it no longer runs", async () => {
     const { client } = await liveClient();
     const yaml = `kind: Processing\nname: tidy\n\nsources:\n  - name: in\n    stream:\n      name: tidy-in\n\nsinks:\n  - name: out\n    kv:\n      key_prefix: tidy\n`;
@@ -260,6 +280,8 @@ describe.skipIf(!endpoint)("live", () => {
     const status = await client.processing.status(id);
     expect(status).toMatchObject({ job_id: id, name: "tidy", status: "running", yaml });
     expect(typeof status.running).toBe("boolean");
+    // A stream source counts no late points.
+    expect([status.late_edge_ms, status.late_points]).toEqual([null, 0]);
     const running = await client.processing.remove(id).catch((e: unknown) => e);
     expect(running).toBeInstanceOf(ConflictError);
     expect(running).toMatchObject({ reason: Reason.JobRunning, ran: Ran.No });
@@ -349,12 +371,26 @@ describe.skipIf(!endpoint)("live", () => {
     }, 30000);
   });
 
+  it("reads a stream never written as not found, one read past its end as empty, and a blocking read waits for it", async () => {
+    const { client } = await liveClient();
+    await client.stream.append("there", encoder.encode("x"));
+    const err = await client.stream.read("never").catch((e) => e);
+    expect(err).toBeInstanceOf(NotFoundError);
+    expect(err.serverMessage).toBe("stream not found");
+    const all = await client.stream.read("there");
+    expect(all.records).toHaveLength(1);
+    expect(await client.stream.read("there", { start: all.records[0]!.id })).toEqual({ records: [] });
+    // A blocking read of a stream not created yet waits rather than failing.
+    expect(await client.stream.read("later", { blockMs: 200 })).toEqual({ records: [] });
+  });
+
   it("deletes a stream: a non-empty one only with force, a missing one without complaint", async () => {
     const { client } = await liveClient();
     await client.stream.append("doomed", encoder.encode("x"));
     await expect(client.stream.delete("doomed")).rejects.toBeInstanceOf(ConflictError);
     await client.stream.delete("doomed", { force: true });
-    expect((await client.stream.read("doomed")).records).toHaveLength(0);
+    // Deleted, it isn't there: a read is not found.
+    await expect(client.stream.read("doomed")).rejects.toBeInstanceOf(NotFoundError);
     await client.stream.delete("doomed");
   });
 
@@ -862,6 +898,191 @@ describe.skipIf(!endpoint)("live", () => {
     const listed = await client.worker.list({});
     expect(listed.workers.map((w) => w.id)).not.toContain("live-drain");
   }, 30000);
+
+  it("close() on an ActionWorker with an action running sends its complete before closing", async () => {
+    const { client, namespace } = await liveClient();
+    const worker = new ActionWorker({ endpoint, namespace, blockMs: 1000 });
+    let started = false;
+    worker.action("slow", async () => {
+      started = true;
+      await new Promise((r) => setTimeout(r, 400));
+      return encoder.encode("done");
+    });
+    const done = worker.start();
+    await new Promise((r) => setTimeout(r, 200));
+    const { runId } = await client.action.invoke("slow", new Uint8Array(0));
+    const deadline = Date.now() + 10000;
+    while (!started && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    expect(started).toBe(true);
+    await worker.close();
+    await done;
+    // The complete went out before close() returned: no wait for a lease.
+    const status = await client.action.status(runId);
+    expect(status.status).toBe("completed");
+    expect(decoder.decode(status.output!)).toBe("done");
+  }, 30000);
+});
+
+describe.skipIf(!endpoint)("live time series", () => {
+  const T0 = 1_700_000_000_000_000_000n;
+
+  /** Every point a read pages through in `order`, a page of `limit` at a time, and how many pages it took. */
+  async function pageAll(client: FloClient, measurement: string, order: TSOrder, limit: number, tags?: string): Promise<{ points: TSPoint[]; pages: number }> {
+    const points: TSPoint[] = [];
+    let cursor: Uint8Array | undefined;
+    for (let pages = 1; ; pages++) {
+      const page = await client.ts.read(measurement, { order, limit, cursor, tags });
+      points.push(...page.points);
+      if (page.cursor === null) return { points, pages };
+      cursor = page.cursor;
+    }
+  }
+
+  it("pages 5000 points over 3 series through, both ways, each once and in order", async () => {
+    const { client } = await liveClient();
+    // Series s's point j at T0 + j µs: the three series share each time.
+    const written: { s: number; j: number }[] = [];
+    for (let i = 0; i < 5000; i++) written.push({ s: i % 3, j: Math.floor(i / 3) });
+    for (let i = 0; i < written.length; i += 250) {
+      await Promise.all(written.slice(i, i + 250).map(({ s, j }) => client.ts.write("m5k", s * 10_000 + j, { tags: `host=h${s}`, timeNs: T0 + BigInt(j) * 1000n })));
+    }
+    const oldest = await pageAll(client, "m5k", TSOrder.OldestFirst, 1000);
+    const newest = await pageAll(client, "m5k", TSOrder.NewestFirst, 1000);
+    expect([oldest.pages, newest.pages]).toEqual([5, 5]);
+    for (const { points } of [oldest, newest]) {
+      expect(points.length).toBe(5000);
+      expect(new Set(points.map((p) => p.value)).size).toBe(5000);
+      for (const p of points) expect(p.timeNs).toBe(T0 + BigInt(p.value % 10_000) * 1000n);
+    }
+    for (let i = 1; i < 5000; i++) expect(oldest.points[i]!.timeNs >= oldest.points[i - 1]!.timeNs).toBe(true);
+    // Newest first is the same order, backwards: ties go by write order too.
+    expect(newest.points).toEqual([...oldest.points].reverse());
+    // The iterator walks the same points.
+    const all: TSPoint[] = [];
+    for await (const p of client.ts.readAll("m5k", { limit: 777 })) all.push(p);
+    expect(all).toEqual(oldest.points);
+    // A tag filter takes only its series.
+    const h1 = await pageAll(client, "m5k", TSOrder.OldestFirst, 4096, "host=h1");
+    expect(h1.points.length).toBe(written.filter((w) => w.s === 1).length);
+    expect(h1.points.every((p) => Math.floor(p.value / 10_000) === 1)).toBe(true);
+  }, 60000);
+
+  it("reads the last point written first, newest first with limit 1", async () => {
+    const { client } = await liveClient();
+    await client.ts.write("last", 1, { timeNs: T0 });
+    await client.ts.write("last", 2, { timeNs: T0 + 5n });
+    await client.ts.write("last", 3, { timeNs: T0 + 5n });
+    const page = await client.ts.read("last", { order: TSOrder.NewestFirst, limit: 1 });
+    expect(page.points).toEqual([{ timeNs: T0 + 5n, value: 3 }]);
+    expect(page.cursor).not.toBeNull();
+  });
+
+  it("reads back a time that isn't a whole ms exactly, as the write answered it", async () => {
+    const { client } = await liveClient();
+    const t = 1_700_000_000_123_456_789n;
+    expect((await client.ts.write("exact", 4.5, { timeNs: t })).timeNs).toBe(t);
+    expect(await client.ts.read("exact", { fromNs: t, toNs: t })).toEqual({ points: [{ timeNs: t, value: 4.5 }], cursor: null, stale: false });
+    // No time: the server's own, in ns.
+    const before = nsFromDate(new Date());
+    const now = (await client.ts.write("exact", 1)).timeNs;
+    expect(now >= before - 1_000_000_000n && now <= nsFromDate(new Date()) + 1_000_000_000n).toBe(true);
+  });
+
+  it("refuses a time before 1970 and a timestamp option not 8 bytes", async () => {
+    const { client, namespace } = await liveClient();
+    const err = await client.ts.write("bad", 1, { timeNs: -1n }).catch((e) => e);
+    expect(err).toBeInstanceOf(BadRequestError);
+    expect(err.serverMessage).toBe("ts write: a point's time must not be before 1970");
+    const value = new Uint8Array(8);
+    const raw = await client.sendRequest(OpCode.TSWrite, namespace, encoder.encode("bad"), value, new OptionsBuilder().addU32(OptionTag.TSTimestampNS, 5).build());
+    expect(raw.status).toBe(StatusCode.BadRequest);
+    expect(decoder.decode(raw.data.subarray(3))).toBe("ts write: the timestamp option must be an 8-byte i64 of nanoseconds");
+  });
+
+  it("reads a series that doesn't exist as not found, and a range with no points as an empty page", async () => {
+    const { client } = await liveClient();
+    await client.ts.write("real", 1, { timeNs: T0, tags: "host=a" });
+    const err = await client.ts.read("never").catch((e) => e);
+    expect(err).toBeInstanceOf(NotFoundError);
+    expect(err.serverMessage).toBe("not found: 'never' has no series of field 'value'");
+    await expect(client.ts.read("real", { field: "other" })).rejects.toBeInstanceOf(NotFoundError);
+    await expect(client.ts.read("real", { tags: "host=b" })).rejects.toBeInstanceOf(NotFoundError);
+    const iterate = async () => {
+      for await (const _ of client.ts.readAll("never")) void _;
+    };
+    await expect(iterate()).rejects.toBeInstanceOf(NotFoundError);
+    expect(await client.ts.read("real", { fromNs: T0 + 1n })).toEqual({ points: [], cursor: null, stale: false });
+  });
+
+  it("refuses a cursor that isn't one a page answered, and an empty measurement", async () => {
+    const { client } = await liveClient();
+    await client.ts.write("cur", 1, { timeNs: T0 });
+    const err = await client.ts.read("cur", { cursor: new Uint8Array(5) }).catch((e) => e);
+    expect(err).toBeInstanceOf(BadRequestError);
+    expect(err.serverMessage).toBe("bad request: a cursor is the 16 bytes a page answered");
+    await expect(client.ts.read("")).rejects.toThrow(BadRequestError);
+  });
+
+  it("queries windows in ns: from, to and window over points at known ns times", async () => {
+    const { client } = await liveClient();
+    // A point every second, 123 ns past it, for 6 s; windows of 2 s.
+    for (let k = 0; k < 6; k++) await client.ts.write("q", k + 1, { timeNs: T0 + BigInt(k) * 1_000_000_000n + 123n });
+    const got = await client.ts.query("q", { fromNs: T0, toNs: T0 + 5_000_000_000n, windowNs: 2_000_000_000n, aggregation: "sum" });
+    expect(got).toEqual([
+      {
+        key: "q",
+        buckets: [
+          { startNs: T0, value: 1 + 2 },
+          { startNs: T0 + 2_000_000_000n, value: 3 + 4 },
+          { startNs: T0 + 4_000_000_000n, value: 5 },
+        ],
+      },
+    ]);
+    // A bound inside a second: the 123 ns past it counts.
+    const narrow = await client.ts.query("q", { fromNs: T0 + 124n, toNs: T0 + 1_000_000_123n, windowNs: 2_000_000_000n, aggregation: "count" });
+    expect(narrow).toEqual([{ key: "q", buckets: [{ startNs: T0, value: 1 }] }]);
+  });
+
+  it("refuses a query window that gives more than 1024 windows, and a 0 window, with the server's text", async () => {
+    const { client } = await liveClient();
+    for (let i = 0; i < 1100; i += 250) {
+      await Promise.all(Array.from({ length: Math.min(250, 1100 - i) }, (_, k) => client.ts.write("wide", 1, { timeNs: T0 + BigInt(i + k) * 1000n })));
+    }
+    const err = await client.ts.query("wide", { windowNs: 1000n }).catch((e) => e);
+    expect(err).toBeInstanceOf(BadRequestError);
+    expect(err.serverMessage).toBe("bad request: the matching points span more than 1024 windows of this width; widen the window (it is in nanoseconds) or narrow the range");
+    const zero = await client.ts.query("wide", { windowNs: 0n }).catch((e) => e);
+    expect(zero).toBeInstanceOf(BadRequestError);
+    expect(zero.serverMessage).toBe("ts query: a window must be more than 0 ns");
+    expect((await client.ts.query("wide", { windowNs: 2_000_000n }))[0]!.buckets.length).toBe(1);
+  }, 30000);
+
+  it("answers FloQL points at the ns times written, and ts.info's oldest and newest in ns", async () => {
+    const { client } = await liveClient();
+    // Inside FloQL's default range, the last hour, and not whole ms.
+    const base = nsFromDate(new Date()) - 600_000_000_000n + 123_456_789n;
+    const times = [base, base + 1_000_001n, base + 2_000_002n];
+    for (const [i, t] of times.entries()) await client.ts.write("fns", i, { timeNs: t });
+    const series = await client.ts.floql("fns");
+    expect(series.map((s) => s.points)).toEqual([times.map((t, i) => ({ timeNs: t, value: i }))]);
+    const info = await client.ts.info("fns");
+    expect(info).toMatchObject({ series: 1, fields: ["value"], points: 3n, oldestNs: times[0], newestNs: times[2] });
+    await expect(client.ts.info("never")).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it("refuses a raw FloQL answer of more than 4096 points with the server's text", async () => {
+    const { client } = await liveClient();
+    // Inside FloQL's default range, the last hour.
+    const base = nsFromDate(new Date()) - 600_000_000_000n;
+    for (let i = 0; i < 4100; i += 250) {
+      await Promise.all(Array.from({ length: Math.min(250, 4100 - i) }, (_, k) => client.ts.write("fq", i + k, { timeNs: base + BigInt(i + k) * 1000n })));
+    }
+    const err = await client.ts.floql("fq").catch((e) => e);
+    expect(err).toBeInstanceOf(BadRequestError);
+    expect(err.serverMessage).toBe("bad request: the answer holds more than 4096 points; aggregate them, narrow the query, or page through them with ts read");
+    const avg = await client.ts.floql("fq | avg()");
+    expect(avg.length).toBe(1);
+  }, 60000);
 });
 
 describe.skipIf(!expiryEndpoint)("live, on a server that removes silent workers", () => {

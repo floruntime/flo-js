@@ -38,6 +38,7 @@ import {
   WorkerStatus,
   WorkerType,
   consoleLogger,
+  isNotFound,
   isOutcomePending,
   isRefusedUnrun,
   silentLogger,
@@ -53,7 +54,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff, HaltBackoff, LimitBackoff, MAX_TIMER_MS, NotReadyWarnings, newNotReadyBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { EmptyPollBackoff, HaltBackoff, LimitBackoff, MAX_TIMER_MS, NotReadyWarnings, awaitRun, closeTimeout, newNotReadyBackoff, newWorkerBackoff, pause } from "./poll-backoff.js";
 import {
   DRAIN_NOTICE_INTERVAL_MS,
   closedSince,
@@ -251,6 +252,13 @@ export interface StreamWorkerConfig {
   messageTimeoutMs?: number;
 
   /**
+   * How long `close()` waits for the run to end, its running handlers acked
+   * and its unstarted records handed back, before it closes the client
+   * under it (default: 30000).
+   */
+  closeTimeoutMs?: number;
+
+  /**
    * Heartbeat interval in milliseconds (default: 30000); must be more than
    * 0. Keep it under the server's heartbeat timeout.
    */
@@ -446,6 +454,7 @@ export class StreamWorker {
       batchSize,
       blockMs: workerBlockMs(config.blockMs),
       messageTimeoutMs: config.messageTimeoutMs ?? 300000,
+      closeTimeoutMs: closeTimeout(config.closeTimeoutMs),
       heartbeatIntervalMs,
       retry: config.retry ?? {},
     };
@@ -476,7 +485,10 @@ export class StreamWorker {
    * ends this run. It may be called again afterwards.
    *
    * start() fails with the limit error; a limit hit while running is
-   * logged and backed off.
+   * logged and backed off. A read refused not found (the stream isn't
+   * there) ends the run, and start() rejects with that NotFoundError: a
+   * worker that may start before its stream exists catches it and starts
+   * again.
    */
   async start(): Promise<void> {
     const run = this.runOnce();
@@ -727,7 +739,10 @@ export class StreamWorker {
           if (this.leaving()) break;
           await this.recover(err, connection);
           unproven = true;
-        } else if (isOutcomePending(err)) {
+        } else if (isOutcomePending(err) || isNotFound(err)) {
+          // A read of a stream that isn't there fails the run rather than
+          // ending it quietly, which would look like a stream with no more
+          // records, or retrying unseen.
           throw err;
         } else if (isRefusedUnrun(err)) {
           // Routine, not a failure: records being read back from disk, or a
@@ -838,15 +853,15 @@ export class StreamWorker {
   }
 
   /**
-   * Stop the stream worker and wait for its run to end, as `start()` does:
-   * running handlers finish and ack, and the unstarted records are handed
-   * back, before the client it created is closed. Don't call it from a
-   * handler: the run waits for that handler.
+   * Stop the stream worker. close() waits up to 30 s (closeTimeoutMs) for
+   * the running loop to send its completes, acks and hand-backs, then
+   * closes the client; anything unsent is redelivered when its lease
+   * expires. It closes only a client the worker created. Don't call it from
+   * a handler: the run waits for that handler.
    */
   async close(): Promise<void> {
     this.stop();
-    // Its error is start()'s to report.
-    await this.run?.catch(() => {});
+    await awaitRun(this.run, this.config.closeTimeoutMs, this.logger);
     if (this.ownedClient) {
       await this.client.close();
     }

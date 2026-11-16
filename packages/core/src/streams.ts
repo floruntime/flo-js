@@ -4,7 +4,7 @@
  * Append, read and consume streams through consumer groups.
  */
 
-import { createServerError, FloError, IncompleteResponseError } from "./errors.js";
+import { createReadError, createServerError, FloError, IncompleteResponseError } from "./errors.js";
 import {
   OpCode,
   OptionTag,
@@ -237,7 +237,14 @@ export class StreamOperations {
   }
 
   /**
-   * Read records from a stream.
+   * Read records from a stream. Without `blockMs`, a stream that isn't
+   * there (never created, or deleted) throws NotFoundError, while one that
+   * exists with nothing in the window answers no records; with `blockMs`,
+   * a read of a stream not created yet waits for its first append. A
+   * reader that may start before its stream exists catches NotFoundError
+   * and reads again later. A StaleNotFoundError (a NotFoundError) comes
+   * from a node that may be behind: the stream may exist but this node
+   * hasn't seen it yet, so read again rather than treating it as gone.
    *
    * @param stream - Stream name
    * @param opts - Read options (start, end, tail, limit, blockMs)
@@ -284,7 +291,7 @@ export class StreamOperations {
     );
 
     if (resp.status !== StatusCode.OK) {
-      throw createServerError(resp.status, resp.data);
+      throw createReadError(resp);
     }
 
     return parseStreamReadResponse(resp.data);

@@ -356,6 +356,8 @@ A handler that throws fails the run with retry: it runs again while attempts are
 
 `stop()` ends polling once the outstanding await returns (within `blockMs`). Handlers already running finish, and their completes or fails are sent, before `start()` returns (their signals are not aborted; `start()` doesn't wait for a handler past its time limit, whose run was already failed); then the worker deregisters and closes its connection. A result whose connection is lost after the stop is retried for up to 2 s, then dropped, and the server hands the run out again when its lease runs out.
 
+`close()` stops the worker (both `ActionWorker` and `StreamWorker`). close() waits up to 30 s (closeTimeoutMs) for the running loop to send its completes, acks and hand-backs, then closes the client; anything unsent is redelivered when its lease expires.
+
 ### Stream Operations
 
 Streams are append-only logs for event sourcing and real-time data.
@@ -405,7 +407,8 @@ count every record the group holds, leased, ready and dead; the refusal also
 comes when the shard's queues and groups together hold as many bytes as
 they may, and the message says which. Leased records clear as consumers ack
 or nack; dead ones stay until the stream is trimmed past them or the group
-is deleted; the shard's cap clears as its other groups and queues drain.
+is deleted; the shard's cap clears as any of its groups and queues drain,
+this group's own acks included.
 Reading again at once won't help, so the client doesn't retry it.
 
 A read creates the group it names, at the defaults; `groupCreate` makes one
@@ -435,6 +438,17 @@ tried again from 1 s doubling to 30 s, logged at warn once, as for `limit`;
 a report refused not found (the group was deleted) is logged at error. Given `ackTimeoutMs` or `maxDeliver` it creates
 its group with them at start; otherwise its first read creates the group at
 the defaults.
+
+`stream.read` without `blockMs` of a stream that isn't there (never
+created, or deleted) throws `NotFoundError`; a stream that exists with
+nothing in the window answers no records. With `blockMs`, a read of a
+stream not created yet waits for its first append. A `StreamWorker`'s
+`start()` rejects with a not-found its group read is refused, rather than
+retrying. A consumer that may start before its stream exists catches
+`NotFoundError` and starts again. A `StaleNotFoundError` (still a
+`NotFoundError`) from `stream.read` or `ts.read` comes from a node that may
+be behind: the stream or series may exist but this node hasn't seen it yet,
+so read again rather than treating it as gone.
 
 #### Stream Example
 
@@ -470,6 +484,31 @@ if (read.records.length > 0) {
   const { applied, refused } = await client.stream.groupAck("events", read, { group: "processors" });
 }
 ```
+
+### Time Series
+
+Every time and window is a bigint of nanoseconds, on the wire and in the API; none is in ms. `nsFromDate` and `dateFromNs` convert to and from a `Date`, which keeps only whole milliseconds.
+
+```typescript
+import { TSOrder, nsFromDate } from "@floruntime/core";
+
+// A point with its own time; with no timeNs (or 0) it takes the server's.
+const { timeNs } = await client.ts.write("cpu", 0.42, {
+  tags: "host=web-01,region=eu",
+  timeNs: nsFromDate(new Date()),
+});
+
+// One page, newest first: points, then the cursor for the next page.
+const page = await client.ts.read("cpu", { tags: "host=web-01", order: TSOrder.NewestFirst, limit: 100 });
+const next = page.cursor && (await client.ts.read("cpu", { tags: "host=web-01", order: TSOrder.NewestFirst, limit: 100, cursor: page.cursor }));
+
+// Every point in a range, oldest first, a page at a time.
+for await (const p of client.ts.readAll("cpu", { fromNs: 0n, toNs: timeNs })) {
+  console.log(p.timeNs, p.value);
+}
+```
+
+A read merges every series whose tags include each `key=value` of `tags`, in time order (then write order), or newest first. A page goes on strictly after the cursor it is given (before it, newest first), so paging neither repeats nor skips a point that was there for the whole read. Page until the cursor is null: a short page needn't be the last. The cursor is opaque. A read throws `NotFoundError` whenever no series of the field matches the tag filter, not only when the measurement was never written: a tag filter that matches nothing is not found, not empty. `readAll` throws it from the iteration; a range with no points on a series that exists is an empty page. A consumer that may start before its series exists catches `NotFoundError` and starts again. A page's `stale` is set when a node that may be behind served it. `ts.query(measurement, { fromNs?, toNs?, windowNs?, aggregation? })` aggregates points (`avg`, `sum`, `min`, `max` or `count`) in windows aligned to the epoch, each bucket's `startNs` in Unix ns. The window is a bigint of ns, a minute when unset; 0 is refused, and so is one the matching points span more than 1024 windows of: widen the window or narrow the range. `ts.info(measurement)` gives a measurement's series, fields, points, and `oldestNs` and `newestNs`. `ts.floql(query)` runs a FloQL query and answers its points' times in Unix ns. In the query text a bare number in a range is epoch ms (`cpu[1700000000000..1700000060000]`), and a duration (`[1h]`, `[2h..1h]`) is relative to now. An answer of more than 4096 raw points is refused: aggregate them, narrow the query, or page through them with `ts.read`.
 
 ## Error Handling
 

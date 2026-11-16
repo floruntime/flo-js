@@ -321,6 +321,8 @@ function unquote(s: string): string {
 // Wire Format Parsers
 // =============================================================================
 
+const NO_LATE_EDGE = (1n << 64n) - 1n;
+
 const statusNames = [
   "running",
   "stopped",
@@ -337,7 +339,10 @@ const statusNames = [
  *              [reason_len:u16][reason]
  *              [running:u8][records_in:u64][records_out:u64][watermark_ms:i64]
  *              [tick_avg_us:u64][tick_max_us:u64][uptime_ms:u64]
+ *              [late_edge_ms:u64][late_points:u64]
  *              [yaml_len:u32][yaml]
+ *
+ * A late edge of u64 max means no count.
  */
 function parseWireStatus(data: Uint8Array): ProcessingStatusResult {
   const r = new AnswerReader(data);
@@ -359,6 +364,8 @@ function parseWireStatus(data: Uint8Array): ProcessingStatusResult {
   const tick_avg_us = Number(r.u64());
   const tick_max_us = Number(r.u64());
   const uptime_ms = Number(r.u64());
+  const lateEdge = r.u64();
+  const late_points = Number(r.u64());
   const yaml = textDecoder.decode(r.bytes32());
   r.end();
   return {
@@ -376,6 +383,8 @@ function parseWireStatus(data: Uint8Array): ProcessingStatusResult {
     tick_avg_us,
     tick_max_us,
     uptime_ms,
+    late_edge_ms: lateEdge === NO_LATE_EDGE ? null : Number(lateEdge),
+    late_points,
     yaml,
   };
 }

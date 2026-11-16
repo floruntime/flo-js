@@ -2,7 +2,7 @@
  * KV operations for Flo SDK.
  */
 
-import { createServerError, IncompleteResponseError, ServerError, StaleNotFoundError } from "./errors.js";
+import { createReadError, createServerError, IncompleteResponseError, ServerError, StaleNotFoundError } from "./errors.js";
 import {
   decodeDeleteAnswer,
   decodeEmptyAnswer,
@@ -85,16 +85,8 @@ function absent(resp: RawResponse): null {
  * of its halt, throws StaleNotFoundError instead, so it can't pass for one.
  */
 function absentKey(resp: RawResponse): null {
-  if (resp.stale === true) {
-    const err = createServerError(resp.status, resp.data);
-    if (err instanceof ServerError && err.reason === Reason.NotFound) {
-      const stale = new StaleNotFoundError(err.serverMessage);
-      stale.reason = err.reason;
-      stale.ran = err.ran;
-      stale.message = err.message;
-      throw stale;
-    }
-  }
+  const err = createReadError(resp);
+  if (err instanceof StaleNotFoundError) throw err;
   return absent(resp);
 }
 

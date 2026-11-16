@@ -105,6 +105,7 @@ const TABLE_OPS: ReadonlySet<OpCode> = new Set([
   OpCode.QueueComplete,
   OpCode.QueueFail,
   OpCode.QueueTouch,
+  OpCode.TSRead,
   OpCode.TSInfo,
   OpCode.StreamGroupList,
   OpCode.StreamGroupMembers,
@@ -116,7 +117,7 @@ export function isTableOp(op: OpCode): boolean {
   return TABLE_OPS.has(op);
 }
 
-class BodyWriter {
+export class BodyWriter {
   private readonly parts: number[] = [];
   u8(v: number): void {
     this.parts.push(v & 0xff);
@@ -196,6 +197,9 @@ export class AnswerReader {
   }
   i64(): bigint {
     return this.view.getBigInt64(this.take(8), true);
+  }
+  f64(): number {
+    return this.view.getFloat64(this.take(8), true);
   }
   bool(): boolean {
     const b = this.u8();

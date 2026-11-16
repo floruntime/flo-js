@@ -207,6 +207,7 @@ export {
   InternalError,
   LimitError,
   createServerError,
+  createReadError,
   // Error type guards
   isNotFound,
   isNoNamespace,
@@ -342,6 +343,35 @@ export {
   extractProcessingMeta,
   type RequestSender as ProcessingRequestSender,
 } from "./processing.js";
+
+export {
+  TSOperations,
+  TSOrder,
+  MAX_TS_READ,
+  MAX_TS_TAG_FILTER,
+  TS_CURSOR_LEN,
+  nsFromDate,
+  dateFromNs,
+  encodeTSReadBody,
+  decodeTSReadAnswer,
+  decodeTSWriteAnswer,
+  decodeFloQLAnswer,
+  decodeTSQueryAnswer,
+  decodeTSInfoAnswer,
+  encodeTSQueryOptions,
+  type TSAggregation,
+  type TSQueryOptions,
+  type TSBucket,
+  type TSQuerySeries,
+  type TSInfo,
+  type TSPoint,
+  type TSReadOptions,
+  type TSReadPage,
+  type TSWriteOptions,
+  type TSWriteResult,
+  type TSFloQLSeries,
+  type TSRequestSender,
+} from "./ts.js";
 
 // Wire protocol - Action/Worker serialization
 export {
