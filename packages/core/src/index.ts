@@ -343,6 +343,28 @@ export {
   type RequestSender as ProcessingRequestSender,
 } from "./processing.js";
 
+export {
+  TSOperations,
+  TSOrder,
+  MAX_TS_READ,
+  MAX_TS_TAG_FILTER,
+  TS_CURSOR_LEN,
+  nsFromDate,
+  dateFromNs,
+  encodeTSReadBody,
+  decodeTSReadAnswer,
+  decodeTSWriteAnswer,
+  decodeFloQLAnswer,
+  type TSPoint,
+  type TSReadOptions,
+  type TSReadPage,
+  type TSWriteOptions,
+  type TSWriteResult,
+  type TSFloQLPoint,
+  type TSFloQLSeries,
+  type TSRequestSender,
+} from "./ts.js";
+
 // Wire protocol - Action/Worker serialization
 export {
   serializeActionRegisterValue,

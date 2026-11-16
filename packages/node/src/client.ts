@@ -20,6 +20,7 @@ import {
   type RawResponse,
   type RetryPolicy,
   StreamOperations,
+  TSOperations,
   WorkerOperations,
   WorkflowOperations,
   type WorkflowSyncOptions,
@@ -65,6 +66,9 @@ export class FloClient {
   /** Processing (stream processing) operations */
   readonly processing: NodeProcessingOperations;
 
+  /** Time-series operations */
+  readonly ts: TSOperations;
+
   /**
    * Create a new Flo client.
    *
@@ -100,6 +104,7 @@ export class FloClient {
     this.worker = new WorkerOperations(this);
     this.workflow = new NodeWorkflowOperations(this);
     this.processing = new NodeProcessingOperations(this);
+    this.ts = new TSOperations(this);
   }
 
   /**

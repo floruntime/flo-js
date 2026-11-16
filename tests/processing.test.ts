@@ -32,9 +32,10 @@ describe("processing answers", () => {
     bytes(str("job-1"), str("pipe"), [status], le(50, 4), le(1234, 8), le(99, 8));
   const status = (data: Uint8Array) => new ProcessingOperations(replying(data)).status("job-1");
   // [running:u8][records_in:u64][records_out:u64][watermark_ms:i64][tick_avg_us:u64]
-  // [tick_max_us:u64][uptime_ms:u64][yaml_len:u32][yaml]
-  const tail = (yaml = "kind: Processing") =>
-    bytes([1], le(10, 8), le(9, 8), le(1700, 8), le(12, 8), le(40, 8), le(5000, 8), le(yaml.length, 4), enc.encode(yaml));
+  // [tick_max_us:u64][uptime_ms:u64][late_edge_ms:u64][late_points:u64][yaml_len:u32][yaml]
+  const NO_EDGE = new Uint8Array(8).fill(0xff);
+  const tail = (yaml = "kind: Processing", late: Uint8Array = bytes(le(30000, 8), le(7, 8))) =>
+    bytes([1], le(10, 8), le(9, 8), le(1700, 8), le(12, 8), le(40, 8), le(5000, 8), late, le(yaml.length, 4), enc.encode(yaml));
 
   it("decodes a running job's status with no failure reason", async () => {
     expect(await status(bytes(head(0), le(0, 2), tail()))).toEqual({
@@ -52,8 +53,20 @@ describe("processing answers", () => {
       tick_avg_us: 12,
       tick_max_us: 40,
       uptime_ms: 5000,
+      late_edge_ms: 30000,
+      late_points: 7,
       yaml: "kind: Processing",
     });
+  });
+
+  it("reads a late edge of u64 max as no count", async () => {
+    const got = await status(bytes(head(0), le(0, 2), tail("kind: Processing", bytes(NO_EDGE, le(0, 8)))));
+    expect([got.late_edge_ms, got.late_points]).toEqual([null, 0]);
+  });
+
+  it("reads a late edge of 0 s as a count past 0 s, not as none", async () => {
+    const got = await status(bytes(head(0), le(0, 2), tail("kind: Processing", bytes(le(0, 8), le(3, 8)))));
+    expect([got.late_edge_ms, got.late_points]).toEqual([0, 3]);
   });
 
   it("decodes a failed job's failure reason", async () => {

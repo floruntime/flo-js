@@ -47,7 +47,7 @@ import {
   workerBlockMs,
 } from "@floruntime/core";
 import { FloClient } from "./client.js";
-import { EmptyPollBackoff, HaltBackoff, LimitBackoff, MAX_TIMER_MS, newWorkerBackoff, pause } from "./poll-backoff.js";
+import { EmptyPollBackoff, HaltBackoff, LimitBackoff, MAX_TIMER_MS, awaitRun, closeTimeout, newWorkerBackoff, pause } from "./poll-backoff.js";
 import {
   DRAIN_NOTICE_INTERVAL_MS,
   closedSince,
@@ -108,6 +108,12 @@ export interface ActionWorkerConfig {
    * delivery past 12 h from when it was delivered.
    */
   autoTouch?: boolean;
+
+  /**
+   * How long `close()` waits for the run to end, its running handlers'
+   * results sent, before it closes the client under it (default: 30000).
+   */
+  closeTimeoutMs?: number;
 
   /**
    * Logger for worker messages.
@@ -370,6 +376,8 @@ export class ActionWorker {
   private noticeDue = false;
   private readonly pendingTasks: Set<Promise<void>> = new Set();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  /** The run start() is in, for close() to wait on. */
+  private run: Promise<void> | null = null;
 
   constructor(config: ActionWorkerConfig) {
     // Validate required fields
@@ -395,6 +403,7 @@ export class ActionWorker {
       heartbeatIntervalMs,
       retry: config.retry ?? {},
       autoTouch: config.autoTouch ?? false,
+      closeTimeoutMs: closeTimeout(config.closeTimeoutMs),
     };
 
     // Setup logger
@@ -466,7 +475,16 @@ export class ActionWorker {
     if (this.handlers.size === 0) {
       throw new Error("No action handlers registered");
     }
+    const run = this.runOnce();
+    this.run = run;
+    try {
+      await run;
+    } finally {
+      if (this.run === run) this.run = null;
+    }
+  }
 
+  private async runOnce(): Promise<void> {
     this.log(
       `Starting Flo worker (id=${this.config.workerId}, ` +
         `namespace=${this.config.namespace}, concurrency=${this.config.concurrency})`
@@ -850,10 +868,16 @@ export class ActionWorker {
   }
 
   /**
-   * Stop and close the worker.
+   * Stop the worker and wait for its run to end, as `start()` does: running
+   * handlers finish and send their results before the client is closed. It
+   * waits at most `closeTimeoutMs`, then closes the client under the run;
+   * results not sent by then are lost, and those runs are delivered again
+   * once their lease runs out. Don't call it from a handler: the run waits
+   * for that handler.
    */
   async close(): Promise<void> {
     this.stop();
+    await awaitRun(this.run, this.config.closeTimeoutMs, this.logger);
     if (this.client) {
       await this.client.close();
     }

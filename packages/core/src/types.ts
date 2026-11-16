@@ -96,9 +96,10 @@ export enum Reason {
    * dead ones, or the shard's queues and groups together hold as many bytes
    * as they may; the message says which. Leased records clear as their
    * consumers ack or nack; dead ones stay until the stream is trimmed past
-   * them or the group is deleted; the shard's cap clears as its other
-   * groups and queues drain. Reading again at once won't help, so the
-   * client doesn't retry it; a worker backs off.
+   * them or the group is deleted; the shard's cap clears as any of its
+   * groups and queues drain, this group's own acks included. Reading
+   * again at once won't help, so the client doesn't retry it; a worker
+   * backs off.
    */
   GroupHeldFull = 37,
 }
@@ -402,7 +403,7 @@ export function statusCodeToString(status: StatusCode): string {
  * Option tags for TLV-encoded operation parameters.
  */
 export const OptionTag = {
-  Limit: 0x05, // u32: Maximum results for TS read; list/scan ops take theirs in the value
+  Limit: 0x05, // u32: Maximum results; list/scan ops take theirs in the value
 
   // Queue Options (0x10 - 0x1F)
   Priority: 0x10, // u8: Message priority (0-255, lower is taken first; unset is 0)
@@ -434,9 +435,9 @@ export const OptionTag = {
   TSAggregation: 0x63, // string: Aggregation function name (avg, sum, count, min, max)
   TSField: 0x64, // string: Field name filter (empty = "value")
   TSTags: 0x65, // string: Comma-separated tag filters "key=val,key2=val2"
-  TSTimestamp: 0x67, // i64: Explicit timestamp for write (0 = server-assigned)
+  TSTimestampNS: 0x67, // i64: a write's time in Unix ns (0 = the server's time)
   TSRawTTL: 0x68, // string: Raw data TTL (e.g., "7d")
-  TSDownsample: 0x69, // string: Downsample rule (e.g., "1m:avg:30d")
+  TSDownsample: 0x69, // string: refused: downsampling isn't supported
 } as const;
 
 export type OptionTag = (typeof OptionTag)[keyof typeof OptionTag];
@@ -1973,6 +1974,17 @@ export interface ProcessingStatusResult {
   tick_avg_us: number;
   tick_max_us: number;
   uptime_ms: number;
+  /**
+   * At least `late_points` of the job's TS source fields' points came in more
+   * than `late_edge_ms` behind their field's newest point, so its sources
+   * never read them. The edge is the smallest the server counts by (0 s,
+   * 1 s, 5 s, 15 s, 30 s, 1 m, 5 m, 1 h) at or above a source's lateness
+   * window, the largest of them across its sources. Null when this node
+   * runs no TS source of the job or its window is past 1 h: then
+   * `late_points` is 0 and means nothing.
+   */
+  late_edge_ms: number | null;
+  late_points: number;
   /** The definition as submitted. */
   yaml: string;
 }

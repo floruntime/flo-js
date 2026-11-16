@@ -237,7 +237,9 @@ export class StreamOperations {
   }
 
   /**
-   * Read records from a stream.
+   * Read records from a stream. A refusal throws its error, a not-found
+   * included (NotFoundError): a reader that may start before its stream
+   * exists catches it and reads again later.
    *
    * @param stream - Stream name
    * @param opts - Read options (start, end, tail, limit, blockMs)

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `client.ts`, time series. `ts.write(measurement, value, { field?, tags?, timeNs? })` writes a point; `timeNs` is a bigint of Unix nanoseconds, and with none (or 0) the point takes the server's time. The answer (`TSWriteResult`) carries the time it was written at, in ns. The server refuses a negative time, bad request: "ts write: a point's time must not be before 1970".
+- `ts.read(measurement, { field?, tags?, fromNs?, toNs?, limit?, order?, cursor? })` reads one page (`TSReadPage`): points (`TSPoint`, `{ timeNs, value }`) of every series whose tags include each `key=value` of `tags`, merged in time order (then write order), or newest first with `TSOrder.NewestFirst`, then the cursor for the next page, null on the last. `limit` is 1 to 4096 (`MAX_TS_READ`), 4096 by default; `fromNs` and `toNs` are inclusive. A page goes on strictly after the cursor it is given, or before it newest first, so paging neither repeats nor skips a point that was there for the whole read; page until the cursor is null, since a short page needn't be the last. A cursor is opaque; one that isn't one a page answered is refused bad request. `ts.readAll(measurement, opts)` is an async generator over every page; a refusal of any page, a not-found included, is thrown from the iteration.
+- `ts.floql(query)`: a FloQL query's series (`TSFloQLSeries`), their times in Unix ms as FloQL answers them. An answer of more than 4096 raw points is refused bad request with the server's text: aggregate them, narrow the query, or page through them with `ts.read`.
+- `nsFromDate` and `dateFromNs`: helpers between ns and a `Date`, which holds only whole ms.
+- `ProcessingStatusResult.late_edge_ms` and `late_points`: at least `late_points` of the job's TS source fields' points came in more than `late_edge_ms` behind their field's newest, so its sources never read them. `late_edge_ms` is null when there's no count.
+- `closeTimeoutMs` on both workers (30 s by default): how long `close()` waits for the run before closing the client under it.
+
 - `Reason.QueueFull` (36) and `Reason.GroupHeldFull` (37), both under status overloaded, with `isQueueFull` and `isGroupHeldFull`. QueueFull: the queue, or the shard's queues and groups together, are at their caps; it drains as messages are acked, so the client retries it like any refusal not run. GroupHeldFull: a group read took nothing new because the group is at its caps, counting leased, ready and dead records, or the shard's queues and groups together are at theirs; leased records clear as they are acked or nacked, dead ones only when the stream is trimmed past them or the group is deleted, and the shard's cap as its other groups and queues drain. The client doesn't retry it, and a `StreamWorker` backs off from 1 s to 30 s, warning once per reason, as for a limit.
 - `groupNack(..., { abandon: true })` (`OptionTag.Abandon`, 0x34): hands records back unstarted, ready at once, the delivery counted but no failure. It takes no `delayMs`, `dead` or `error` (refused client-side, and by the server). An abandoned record is never dead-lettered: abandon only records never started, and nack the ones that failed.
 - A refusal whose reason this SDK doesn't know decodes as a `ServerError` keeping the number in `reason` (`reasonName` gives `unknown_reason_<n>`) and the server's message; an unknown `ran` reads as `Ran.Unknown`. It used to be an `IncompleteResponseError`.
@@ -34,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `WorkerFailOptions.abandoned` (hand a task back untried, counting no failure) and `delayMs`. A fail's error past 65535 bytes is cut at a UTF-8 character boundary rather than refused, so the fail still goes out; a refused one left the run held until its lease ran out, on every attempt.
 - A handler that runs past `actionTimeoutMs` fails its run with retry, like any error; it used to fail it for good. Only `NonRetryableError` fails a run at once.
 - `ActionContext.signal`: aborted, with the `TimeoutError` as its reason, when the handler runs past `actionTimeoutMs`. The worker can't stop a handler; one that ignores the signal runs on while its run is retried, and keeps its concurrency slot until it settles, so the worker never runs more than `concurrency` handlers. `ctx.cancelled` and `checkCancelled()` read the signal.
-- `OpCode.TSInfo` (0x1a7) is known; the client has no time-series calls yet.
+- `OpCode.TSInfo` (0x1a7) is known.
 - The widened list entries: `action.list` entries carry each action's version, owner, lease, attempts and creation time; `processing.list` entries their `batch_size` and `records_processed`; `workflow.listDefinitions` entries `enabled`. `processing.status` carries this node's runtime of the job (`running`, `records_in`, `records_out`, `watermark_ms`, `tick_avg_us`, `tick_max_us`, `uptime_ms`) and the submitted `yaml`.
 
 - `stream.delete(stream, { namespace?, force? })` (`StreamDeleteOptions`; `OpCode.StreamDelete`, 0x140; `OptionTag.Force`, 0x2c): deletes a stream's records and metadata. A non-empty stream is refused with `ConflictError` unless `force` is set; deleting a missing stream succeeds.
@@ -55,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Reason.StaleReport` (26): an action report for a delivery the run has moved on from is refused with it, as `StaleReportError`. The table hash moves with the server.
 
 ### Changed
+
+- **Breaking:** the table hash moves with the server.
+- **Breaking:** `OptionTag.TSTimestamp` is `OptionTag.TSTimestampNS` (0x67): a write's time in Unix ns, no longer ms.
+- `ActionWorker.close()` waits for the run to end, running handlers' results sent, before closing its client; it used to close it at once, losing them. Both workers' `close()` waits at most `closeTimeoutMs`.
+- A `StreamWorker` group read refused not found ends the run, and `start()` rejects with the `NotFoundError`, rather than retrying it: a worker that may start before its stream exists catches it and starts again.
+- `Reason.GroupHeldFull` docs: the shard's cap clears as any of its groups and queues drain, this group's own acks included.
 
 - **Breaking:** the table hash moves to `0xc1f93eb0ed86a281` with the server (flo `fd771c1d`).
 - **Breaking:** a group nack's error travels in the body, `[error_len:u16][error]` after the records, at most 1024 bytes; longer throws before a round trip instead of being cut to 255. `OptionTag.ErrorText` (0x33) is gone.

@@ -7,9 +7,9 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { OpCode, OptionTag } from "@floruntime/core";
+import { NotFoundError, OpCode, OptionTag, Reason, StatusCode } from "@floruntime/core";
 import { ActionWorker, StreamWorker } from "@floruntime/node";
-import { type Answer, fakeServer, groupRead, notFound, oneTask, quiet, sleep, until } from "./fake_worker_server.js";
+import { type Answer, fakeServer, groupRead, notFound, oneTask, quiet, refusal, sleep, until } from "./fake_worker_server.js";
 
 type Run = { stop: () => void; drain: () => Promise<void>; start: () => Promise<void> };
 
@@ -349,5 +349,77 @@ describe("StreamWorker stop and close", () => {
       [[2n], [OptionTag.Abandon, 0]],
     ]);
     expect(srv.ops()).not.toContain(OpCode.StreamGroupAck);
+  });
+});
+
+describe("ActionWorker close", () => {
+  let close: (() => void) | undefined;
+  afterEach(() => close?.());
+
+  it("close() waits for the run: the running action's complete is sent before the client closes", async () => {
+    const srv = await fakeServer(workThenEmpty(OpCode.ActionAwait, oneTask()));
+    close = srv.close;
+    let started = false;
+    const w = new ActionWorker({ endpoint: srv.endpoint, blockMs: BLOCK_MS, logger: quiet });
+    w.action("a", async () => {
+      started = true;
+      await sleep(300);
+      return new Uint8Array(0);
+    });
+    const done = w.start();
+    await until(() => started, 3000);
+    await w.close();
+    expect(srv.ops().filter((o) => o === OpCode.ActionComplete).length).toBe(1);
+    expect(srv.ops()).toContain(OpCode.WorkerDeregister);
+    await done;
+  });
+});
+
+describe.each(workers)("%s close deadline", (_name, poll, work) => {
+  let close: (() => void) | undefined;
+  afterEach(() => close?.());
+
+  it("closes the client under a run that outlasts closeTimeoutMs", async () => {
+    const srv = await fakeServer(workThenEmpty(poll, work));
+    close = srv.close;
+    let started = false;
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const handler = async () => {
+      started = true;
+      await held;
+      return new Uint8Array(0);
+    };
+    let w: { start: () => Promise<void>; close: () => Promise<void> };
+    if (poll === OpCode.ActionAwait) {
+      const a = new ActionWorker({ endpoint: srv.endpoint, blockMs: BLOCK_MS, closeTimeoutMs: 200, logger: quiet });
+      a.action("a", handler);
+      w = a;
+    } else {
+      w = new StreamWorker(srv.endpoint, { stream: "s", blockMs: BLOCK_MS, closeTimeoutMs: 200, logger: quiet }, async () => {
+        await handler();
+      });
+    }
+    const done = w.start().catch(() => {});
+    await until(() => started, 3000);
+    const at = performance.now();
+    await w.close();
+    expect(performance.now() - at).toBeLessThan(1500);
+    release();
+    await done;
+  });
+});
+
+describe("StreamWorker read of a missing stream", () => {
+  let close: (() => void) | undefined;
+  afterEach(() => close?.());
+
+  it("fails start() with the NotFoundError, neither ending quietly nor retrying", async () => {
+    const srv = await fakeServer((op) => (op === OpCode.StreamGroupRead ? refusal(StatusCode.NotFound, Reason.NotFound, "not found: no such stream") : undefined));
+    close = srv.close;
+    const w = new StreamWorker(srv.endpoint, { stream: "s", blockMs: BLOCK_MS, logger: quiet }, async () => {});
+    await expect(w.start()).rejects.toThrow(NotFoundError);
+    expect(srv.ops().filter((o) => o === OpCode.StreamGroupRead).length).toBe(1);
+    expect(srv.ops()).toContain(OpCode.WorkerDeregister);
   });
 });

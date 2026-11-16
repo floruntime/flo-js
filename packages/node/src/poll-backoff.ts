@@ -152,10 +152,10 @@ export const LIMIT_MAX_BACKOFF_MS = 30_000;
  * its caps, dead records included, or the shard's queues and groups are at
  * theirs). Retrying at once won't clear either: a limit needs a delete, a
  * full group its consumers to ack or nack, its dead records trimmed or the
- * group deleted, or the shard's other groups and queues to drain. The worker
- * neither spins nor stops: it waits, from 1 s doubling to 30 s, and logs
- * each distinct reason once at warn (later ones at debug) until a poll
- * goes through. start() doesn't use it: a limit there is thrown.
+ * group deleted, or the shard's groups and queues, this one included, to
+ * drain. The worker neither spins nor stops: it waits, from 1 s doubling
+ * to 30 s, and logs each distinct reason once at warn (later ones at
+ * debug) until a poll goes through. start() doesn't use it: a limit there is thrown.
  */
 export class LimitBackoff {
   private readonly backoff = new Backoff(LIMIT_INITIAL_BACKOFF_MS, LIMIT_MAX_BACKOFF_MS);
@@ -190,4 +190,34 @@ export class LimitBackoff {
     this.backoff.reset();
     this.warned.clear();
   }
+}
+
+/** close()'s wait for a run, 30 s unless set; 0 doesn't wait. */
+export function closeTimeout(ms: number | undefined): number {
+  const v = ms ?? 30_000;
+  if (!(Number.isInteger(v) && v >= 0 && v <= MAX_TIMER_MS)) {
+    throw new RangeError(`closeTimeoutMs must be an integer from 0 to ${MAX_TIMER_MS}, not ${v}`);
+  }
+  return v;
+}
+
+/**
+ * Wait for `run` to end, at most `ms`. Its error is start()'s to report, so
+ * it is not thrown here. Returns whether it ended in time.
+ */
+export async function awaitRun(run: Promise<void> | null, ms: number, logger: Logger): Promise<boolean> {
+  if (!run) return true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const ended = await Promise.race([
+    run.then(
+      () => true,
+      () => true
+    ),
+    new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => resolve(false), ms);
+    }),
+  ]);
+  clearTimeout(timer);
+  if (!ended) logger.warn(`close: the run did not end within ${ms}ms; closing the client under it`);
+  return ended;
 }
