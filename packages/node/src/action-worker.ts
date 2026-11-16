@@ -868,12 +868,10 @@ export class ActionWorker {
   }
 
   /**
-   * Stop the worker and wait for its run to end, as `start()` does: running
-   * handlers finish and send their results before the client is closed. It
-   * waits at most `closeTimeoutMs`, then closes the client under the run;
-   * results not sent by then are lost, and those runs are delivered again
-   * once their lease runs out. Don't call it from a handler: the run waits
-   * for that handler.
+   * Stop the worker. close() waits up to 30 s (closeTimeoutMs) for the
+   * running loop to send its completes, acks and hand-backs, then closes
+   * the client; anything unsent is redelivered when its lease expires.
+   * Don't call it from a handler: the run waits for that handler.
    */
   async close(): Promise<void> {
     this.stop();

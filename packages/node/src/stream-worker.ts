@@ -853,12 +853,11 @@ export class StreamWorker {
   }
 
   /**
-   * Stop the stream worker and wait for its run to end, as `start()` does:
-   * running handlers finish and ack, and the unstarted records are handed
-   * back, before the client it created is closed. It waits at most
-   * `closeTimeoutMs`, then closes that client under the run; records not
-   * acked by then are delivered again once their lease runs out. Don't call
-   * it from a handler: the run waits for that handler.
+   * Stop the stream worker. close() waits up to 30 s (closeTimeoutMs) for
+   * the running loop to send its completes, acks and hand-backs, then
+   * closes the client; anything unsent is redelivered when its lease
+   * expires. It closes only a client the worker created. Don't call it from
+   * a handler: the run waits for that handler.
    */
   async close(): Promise<void> {
     this.stop();

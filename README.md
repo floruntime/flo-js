@@ -356,7 +356,7 @@ A handler that throws fails the run with retry: it runs again while attempts are
 
 `stop()` ends polling once the outstanding await returns (within `blockMs`). Handlers already running finish, and their completes or fails are sent, before `start()` returns (their signals are not aborted; `start()` doesn't wait for a handler past its time limit, whose run was already failed); then the worker deregisters and closes its connection. A result whose connection is lost after the stop is retried for up to 2 s, then dropped, and the server hands the run out again when its lease runs out.
 
-`close()` stops the worker and waits for the run to end, as `start()` does, before closing the client; it waits at most `closeTimeoutMs` (30 s by default), then closes the client under the run. A result not sent by then is lost, and the server hands that run out again when its lease runs out. `StreamWorker.close()` does the same.
+`close()` stops the worker (both `ActionWorker` and `StreamWorker`). close() waits up to 30 s (closeTimeoutMs) for the running loop to send its completes, acks and hand-backs, then closes the client; anything unsent is redelivered when its lease expires.
 
 ### Stream Operations
 
