@@ -7,7 +7,7 @@
  * the way in or out.
  */
 
-import { createServerError, FloError, IncompleteResponseError } from "./errors.js";
+import { createReadError, createServerError, FloError, IncompleteResponseError } from "./errors.js";
 import { AnswerReader, BodyWriter } from "./kv_body.js";
 import { OpCode, OptionTag, type RawResponse, StatusCode } from "./types.js";
 import { OptionsBuilder } from "./wire.js";
@@ -77,6 +77,8 @@ export interface TSReadPage {
   points: TSPoint[];
   /** Where the next page starts; null on the last page. Opaque. */
   cursor: Uint8Array | null;
+  /** The page was served by a node that may be behind: points written lately may be missing from it. */
+  stale: boolean;
 }
 
 /** One FloQL point. FloQL answers in Unix ms. */
@@ -151,13 +153,13 @@ export function encodeTSReadBody(opts?: TSReadOptions): Uint8Array {
 }
 
 /** ts.read's answer: points, then the next page's cursor (null on the last page). */
-export function decodeTSReadAnswer(data: Uint8Array): TSReadPage {
+export function decodeTSReadAnswer(data: Uint8Array, stale = false): TSReadPage {
   const r = new AnswerReader(data);
   const points: TSPoint[] = [];
   for (let n = r.u16(); n > 0; n--) points.push({ timeNs: r.i64(), value: r.f64() });
   const cursor = r.present() ? r.bytes8() : null;
   r.end();
-  return { points, cursor };
+  return { points, cursor, stale };
 }
 
 /** ts.write's answer: [series_hash:u64][time_ns:i64][sequence:u64]. */
@@ -224,12 +226,14 @@ export class TSOperations {
    * NotFoundError whenever no series of the field matches the tag filter,
    * not only when the measurement was never written: a tag filter that
    * matches nothing is not found, not empty. A series with no points in the
-   * range answers an empty page.
+   * range answers an empty page. A StaleNotFoundError (a NotFoundError)
+   * comes from a node that may be behind: the series may exist but this
+   * node hasn't seen it yet, so read again rather than treating it as gone.
    */
   async read(measurement: string, opts?: TSReadOptions): Promise<TSReadPage> {
     const resp = await this.sender.sendRequest(OpCode.TSRead, this.sender.getNamespace(opts?.namespace), textEncoder.encode(measurement), encodeTSReadBody(opts), new Uint8Array(0));
-    if (resp.status !== StatusCode.OK) throw createServerError(resp.status, resp.data);
-    return decodeTSReadAnswer(resp.data);
+    if (resp.status !== StatusCode.OK) throw createReadError(resp);
+    return decodeTSReadAnswer(resp.data, resp.stale === true);
   }
 
   /**
@@ -237,6 +241,8 @@ export class TSOperations {
    * of `opts.limit` at a time. A refusal of any page, a not-found included,
    * is thrown from the iteration rather than ending it: a consumer that may
    * start before its series exists catches NotFoundError and starts again.
+   * A stale not-found is thrown as StaleNotFoundError, as `read` throws it.
+   * It yields points, not pages, so a page's `stale` isn't carried.
    */
   async *readAll(measurement: string, opts?: TSReadOptions): AsyncGenerator<TSPoint, void, undefined> {
     let cursor = opts?.cursor;

@@ -981,7 +981,7 @@ describe.skipIf(!endpoint)("live time series", () => {
     const { client } = await liveClient();
     const t = 1_700_000_000_123_456_789n;
     expect((await client.ts.write("exact", 4.5, { timeNs: t })).timeNs).toBe(t);
-    expect(await client.ts.read("exact", { fromNs: t, toNs: t })).toEqual({ points: [{ timeNs: t, value: 4.5 }], cursor: null });
+    expect(await client.ts.read("exact", { fromNs: t, toNs: t })).toEqual({ points: [{ timeNs: t, value: 4.5 }], cursor: null, stale: false });
     // No time: the server's own, in ns.
     const before = nsFromDate(new Date());
     const now = (await client.ts.write("exact", 1)).timeNs;
@@ -1011,7 +1011,7 @@ describe.skipIf(!endpoint)("live time series", () => {
       for await (const _ of client.ts.readAll("never")) void _;
     };
     await expect(iterate()).rejects.toBeInstanceOf(NotFoundError);
-    expect(await client.ts.read("real", { fromNs: T0 + 1n })).toEqual({ points: [], cursor: null });
+    expect(await client.ts.read("real", { fromNs: T0 + 1n })).toEqual({ points: [], cursor: null, stale: false });
   });
 
   it("refuses a cursor that isn't one a page answered, and an empty measurement", async () => {

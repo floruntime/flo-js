@@ -117,11 +117,12 @@ describe("ts.read answer", () => {
     expect(decodeTSReadAnswer(page([[1n, 1.5], [1_700_000_000_123_456_789n, -2]], CURSOR))).toEqual({
       points: [{ timeNs: 1n, value: 1.5 }, { timeNs: 1_700_000_000_123_456_789n, value: -2 }],
       cursor: CURSOR,
+      stale: false,
     });
   });
 
   it("decodes the last page, with no cursor", () => {
-    expect(decodeTSReadAnswer(page([[7n, 0]], null))).toEqual({ points: [{ timeNs: 7n, value: 0 }], cursor: null });
+    expect(decodeTSReadAnswer(page([[7n, 0]], null))).toEqual({ points: [{ timeNs: 7n, value: 0 }], cursor: null, stale: false });
   });
 
   it("refuses an answer cut short or with bytes left over", () => {

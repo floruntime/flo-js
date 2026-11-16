@@ -207,6 +207,7 @@ export {
   InternalError,
   LimitError,
   createServerError,
+  createReadError,
   // Error type guards
   isNotFound,
   isNoNamespace,
