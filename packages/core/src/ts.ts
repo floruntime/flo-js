@@ -220,9 +220,11 @@ export class TSOperations {
    * One page of `measurement`'s points. A page goes on strictly after the
    * cursor it is given (strictly before it, newest first), so paging neither
    * repeats nor skips a point that was there for the whole read. Page until
-   * the cursor is null: a short page is not the last one. A series that
-   * doesn't exist (no series of the field, or none with the tags) throws
-   * NotFoundError; one with no points in the range answers an empty page.
+   * the cursor is null: a short page is not the last one. It throws
+   * NotFoundError whenever no series of the field matches the tag filter,
+   * not only when the measurement was never written: a tag filter that
+   * matches nothing is not found, not empty. A series with no points in the
+   * range answers an empty page.
    */
   async read(measurement: string, opts?: TSReadOptions): Promise<TSReadPage> {
     const resp = await this.sender.sendRequest(OpCode.TSRead, this.sender.getNamespace(opts?.namespace), textEncoder.encode(measurement), encodeTSReadBody(opts), new Uint8Array(0));
