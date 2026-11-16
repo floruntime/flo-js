@@ -116,15 +116,13 @@ jobs:
           path: ${{ runner.temp }}/pack
 
       # core goes first, so node's dependency on it exists when node lands.
-      # A version already on npm (a rerun after a partial publish) is skipped.
+      # A version already on npm (a rerun after a partial publish) is skipped,
+      # unless the run names a dist_tag: then it is retagged, which is how to
+      # move a label onto a published version.
       - name: Publish
         run: |
           for pkg in core node; do
             name=@floruntime/$pkg
-            if [ "$(npm view "$name@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
-              echo "$name@$VERSION is already on npm"
-              continue
-            fi
             DIST=$DIST_IN
             if [ "$DIST" = auto ]; then
               # Until a stable version exists, latest follows the newest
@@ -144,8 +142,26 @@ jobs:
                 *) DIST=latest ;;
               esac
             fi
-            echo "publishing $name@$VERSION as $DIST"
-            npm publish "$RUNNER_TEMP/pack/floruntime-$pkg-$VERSION.tgz" --access public --tag "$DIST"
+            if [ "$(npm view "$name@$VERSION" version 2>/dev/null)" = "$VERSION" ]; then
+              # Retag only when asked by name: an auto rerun of an older tag
+              # would otherwise move latest back to it.
+              if [ "$DIST_IN" = auto ]; then
+                echo "$name@$VERSION is already on npm"
+                continue
+              fi
+              echo "$name@$VERSION is already on npm; tagging it $DIST"
+              npm dist-tag add "$name@$VERSION" "$DIST"
+            else
+              echo "publishing $name@$VERSION as $DIST"
+              npm publish "$RUNNER_TEMP/pack/floruntime-$pkg-$VERSION.tgz" --access public --tag "$DIST"
+            fi
+            # dev never trails latest: a version that takes latest takes dev
+            # too, so `@dev` never installs an older version than a plain
+            # install. Needs "Allow npm dist-tag" on the package's trusted
+            # publisher on npmjs.com.
+            if [ "$DIST" = latest ]; then
+              npm dist-tag add "$name@$VERSION" dev
+            fi
           done
 
       - uses: softprops/action-gh-release@v2
