@@ -263,7 +263,7 @@ describe("ts.query", () => {
   });
 
   it("surfaces the too-many-windows refusal with the server's text", async () => {
-    const text = "bad request: the range holds more than 1024 windows of this width; widen the window (it is in nanoseconds) or narrow the range";
+    const text = "bad request: the matching points span more than 1024 windows of this width; widen the window (it is in nanoseconds) or narrow the range";
     const { ts } = fake(refusal(StatusCode.BadRequest, text));
     const err = await ts.query("cpu", { fromNs: 1n, toNs: T, windowNs: 1000n }).catch((e) => e);
     expect(err).toBeInstanceOf(BadRequestError);

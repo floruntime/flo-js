@@ -1050,7 +1050,7 @@ describe.skipIf(!endpoint)("live time series", () => {
     }
     const err = await client.ts.query("wide", { windowNs: 1000n }).catch((e) => e);
     expect(err).toBeInstanceOf(BadRequestError);
-    expect(err.serverMessage).toBe("bad request: the range holds more than 1024 windows of this width; widen the window (it is in nanoseconds) or narrow the range");
+    expect(err.serverMessage).toBe("bad request: the matching points span more than 1024 windows of this width; widen the window (it is in nanoseconds) or narrow the range");
     const zero = await client.ts.query("wide", { windowNs: 0n }).catch((e) => e);
     expect(zero).toBeInstanceOf(BadRequestError);
     expect(zero.serverMessage).toBe("ts query: a window must be more than 0 ns");

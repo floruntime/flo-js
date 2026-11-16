@@ -102,7 +102,7 @@ export interface TSQueryOptions {
   toNs?: bigint;
   /**
    * Each window's width in ns; a minute when unset. The server refuses 0,
-   * and a range that holds more than 1024 windows of this width.
+   * and one the matching points span more than 1024 windows of.
    */
   windowNs?: bigint;
   /** "avg" by default. */
@@ -350,9 +350,9 @@ export class TSOperations {
 
   /**
    * Aggregate `measurement`'s points in windows of `windowNs` (a minute by
-   * default), aligned to the epoch. Times and the window are ns. A range
-   * that holds more than 1024 windows is refused bad request: widen the
-   * window or narrow the range.
+   * default), aligned to the epoch. Times and the window are ns. A query
+   * whose matching points span more than 1024 windows is refused bad
+   * request: widen the window or narrow the range.
    */
   async query(measurement: string, opts?: TSQueryOptions): Promise<TSQuerySeries[]> {
     const resp = await this.sender.sendRequest(OpCode.TSQuery, this.sender.getNamespace(opts?.namespace), textEncoder.encode(measurement), new Uint8Array(0), encodeTSQueryOptions(opts));
