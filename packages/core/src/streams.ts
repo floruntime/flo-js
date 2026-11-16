@@ -237,9 +237,12 @@ export class StreamOperations {
   }
 
   /**
-   * Read records from a stream. A refusal throws its error, a not-found
-   * included (NotFoundError): a reader that may start before its stream
-   * exists catches it and reads again later.
+   * Read records from a stream. Without `blockMs`, a stream that isn't
+   * there (never created, or deleted) throws NotFoundError, while one that
+   * exists with nothing in the window answers no records; with `blockMs`,
+   * a read of a stream not created yet waits for its first append. A
+   * reader that may start before its stream exists catches NotFoundError
+   * and reads again later.
    *
    * @param stream - Stream name
    * @param opts - Read options (start, end, tail, limit, blockMs)

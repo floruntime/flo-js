@@ -371,12 +371,26 @@ describe.skipIf(!endpoint)("live", () => {
     }, 30000);
   });
 
+  it("reads a stream never written as not found, one read past its end as empty, and a blocking read waits for it", async () => {
+    const { client } = await liveClient();
+    await client.stream.append("there", encoder.encode("x"));
+    const err = await client.stream.read("never").catch((e) => e);
+    expect(err).toBeInstanceOf(NotFoundError);
+    expect(err.serverMessage).toBe("stream not found");
+    const all = await client.stream.read("there");
+    expect(all.records).toHaveLength(1);
+    expect(await client.stream.read("there", { start: all.records[0]!.id })).toEqual({ records: [] });
+    // A blocking read of a stream not created yet waits rather than failing.
+    expect(await client.stream.read("later", { blockMs: 200 })).toEqual({ records: [] });
+  });
+
   it("deletes a stream: a non-empty one only with force, a missing one without complaint", async () => {
     const { client } = await liveClient();
     await client.stream.append("doomed", encoder.encode("x"));
     await expect(client.stream.delete("doomed")).rejects.toBeInstanceOf(ConflictError);
     await client.stream.delete("doomed", { force: true });
-    expect((await client.stream.read("doomed")).records).toHaveLength(0);
+    // Deleted, it isn't there: a read is not found.
+    await expect(client.stream.read("doomed")).rejects.toBeInstanceOf(NotFoundError);
     await client.stream.delete("doomed");
   });
 
@@ -983,6 +997,21 @@ describe.skipIf(!endpoint)("live time series", () => {
     const raw = await client.sendRequest(OpCode.TSWrite, namespace, encoder.encode("bad"), value, new OptionsBuilder().addU32(OptionTag.TSTimestampNS, 5).build());
     expect(raw.status).toBe(StatusCode.BadRequest);
     expect(decoder.decode(raw.data.subarray(3))).toBe("ts write: the timestamp option must be an 8-byte i64 of nanoseconds");
+  });
+
+  it("reads a series that doesn't exist as not found, and a range with no points as an empty page", async () => {
+    const { client } = await liveClient();
+    await client.ts.write("real", 1, { timeNs: T0, tags: "host=a" });
+    const err = await client.ts.read("never").catch((e) => e);
+    expect(err).toBeInstanceOf(NotFoundError);
+    expect(err.serverMessage).toBe("not found: 'never' has no series of field 'value'");
+    await expect(client.ts.read("real", { field: "other" })).rejects.toBeInstanceOf(NotFoundError);
+    await expect(client.ts.read("real", { tags: "host=b" })).rejects.toBeInstanceOf(NotFoundError);
+    const iterate = async () => {
+      for await (const _ of client.ts.readAll("never")) void _;
+    };
+    await expect(iterate()).rejects.toBeInstanceOf(NotFoundError);
+    expect(await client.ts.read("real", { fromNs: T0 + 1n })).toEqual({ points: [], cursor: null });
   });
 
   it("refuses a cursor that isn't one a page answered, and an empty measurement", async () => {

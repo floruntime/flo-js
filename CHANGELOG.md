@@ -65,6 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking:** the table hash moves with the server.
 - **Breaking:** `OptionTag.TSTimestamp` is `OptionTag.TSTimestampNS` (0x67): a write's time in Unix ns, no longer ms.
+- `stream.read` without `blockMs` of a stream that isn't there (never created, or deleted) throws `NotFoundError`, as the server now answers not found; it used to answer no records. A stream that exists with nothing in the window still answers none, and a blocking read of a stream not created yet still waits for its first append. `ts.read` of a series that doesn't exist throws `NotFoundError` too (`readAll` throws it from the iteration); a range with no points answers an empty page. A consumer that may start before its stream or series exists catches `NotFoundError` and starts again.
 - `ActionWorker.close()` waits for the run to end, running handlers' results sent, before closing its client; it used to close it at once, losing them. Both workers' `close()` waits at most `closeTimeoutMs`.
 - A `StreamWorker` group read refused not found ends the run, and `start()` rejects with the `NotFoundError`, rather than retrying it: a worker that may start before its stream exists catches it and starts again.
 - `Reason.GroupHeldFull` docs: the shard's cap clears as any of its groups and queues drain, this group's own acks included.

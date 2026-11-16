@@ -439,10 +439,13 @@ a report refused not found (the group was deleted) is logged at error. Given `ac
 its group with them at start; otherwise its first read creates the group at
 the defaults.
 
-A read refused not found (the stream isn't there) throws `NotFoundError`
-from `stream.read`, and makes a `StreamWorker`'s `start()` reject with it
-rather than retrying. A consumer that may start before its stream exists
-catches it and starts again.
+`stream.read` without `blockMs` of a stream that isn't there (never
+created, or deleted) throws `NotFoundError`; a stream that exists with
+nothing in the window answers no records. With `blockMs`, a read of a
+stream not created yet waits for its first append. A `StreamWorker`'s
+`start()` rejects with a not-found its group read is refused, rather than
+retrying. A consumer that may start before its stream exists catches
+`NotFoundError` and starts again.
 
 #### Stream Example
 
@@ -502,7 +505,7 @@ for await (const p of client.ts.readAll("cpu", { fromNs: 0n, toNs: timeNs })) {
 }
 ```
 
-A read merges every series whose tags include each `key=value` of `tags`, in time order (then write order), or newest first. A page goes on strictly after the cursor it is given (before it, newest first), so paging neither repeats nor skips a point that was there for the whole read. Page until the cursor is null: a short page needn't be the last. The cursor is opaque. `ts.floql(query)` runs a FloQL query; its times are Unix ms, and an answer of more than 4096 raw points is refused: aggregate them, narrow the query, or page through them with `ts.read`.
+A read merges every series whose tags include each `key=value` of `tags`, in time order (then write order), or newest first. A page goes on strictly after the cursor it is given (before it, newest first), so paging neither repeats nor skips a point that was there for the whole read. Page until the cursor is null: a short page needn't be the last. The cursor is opaque. A read of a series that doesn't exist (no series of the field, or none with the tags) throws `NotFoundError`, and `readAll` throws it from the iteration; a range with no points on a series that exists is an empty page. A consumer that may start before its series exists catches `NotFoundError` and starts again. `ts.floql(query)` runs a FloQL query; its times are Unix ms, and an answer of more than 4096 raw points is refused: aggregate them, narrow the query, or page through them with `ts.read`.
 
 ## Error Handling
 
