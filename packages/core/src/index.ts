@@ -92,6 +92,16 @@ export {
   type DLQListOptions,
   type DLQListResult,
   type DeadLetter,
+  type DLQSelectOptions,
+  type DLQDeleteOptions,
+  type QueueDLQResult,
+  type GroupDeadLetter,
+  type GroupDLQListResult,
+  type GroupDLQResult,
+  type StreamGroupStealOptions,
+  type StreamGroupStealResult,
+  type StreamCreateOptions,
+  type StreamAlterOptions,
   type PeekOptions,
   type PeekResult,
   type PeekedMessage,
@@ -291,6 +301,19 @@ export {
   decodeWorkerListAnswer,
   decodeWorkerInfoAnswer,
   encodeWorkerListBody,
+  MAX_DLQ_BATCH,
+  DEFAULT_DLQ_PAGE,
+  MAX_STEAL_IDLE_MS,
+  encodeQueueDlqListBody,
+  decodeQueueDlqListAnswer,
+  encodeQueueDlqBody,
+  decodeQueueDlqAnswer,
+  encodeGroupDlqListBody,
+  decodeGroupDlqListAnswer,
+  encodeGroupDlqBody,
+  decodeGroupDlqAnswer,
+  encodeGroupStealBody,
+  decodeGroupStealAnswer,
 } from "./kv_body.js";
 export {
   Transaction,
@@ -300,9 +323,6 @@ export {
 } from "./kv_txn.js";
 export {
   QueueOperations,
-  MAX_DLQ_PAGE,
-  serializeDlqListValue,
-  decodeDlqListAnswer,
   type RequestSender as QueueRequestSender,
 } from "./queue.js";
 export {

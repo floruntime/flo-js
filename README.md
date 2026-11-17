@@ -188,7 +188,9 @@ server operator's settings. Past them an op is refused `TxnTooLarge`.
 | `touch` | `touch(queue, delivery, opts?) → Promise<QueueTouchResult>` | Keep them: extends the lease once half of it or less is left |
 | `purge` | `purge(queue, opts?) → Promise<number>` | Remove every message, ready, leased and dead; answers how many |
 | `peek` | `peek(queue, limit?, opts?) → Promise<PeekResult>` | The next ready messages (1 to 100, default 20), in dequeue order, without taking them; up to 4 KiB of each payload |
-| `dlqList` | `dlqList(queue, { limit?, after? }?) → Promise<DLQListResult>` | A page of dead letters, oldest first (up to 100); pass `lastSeq` as `after` while `hasMore` |
+| `dlqList` | `dlqList(queue, { limit?, cursor? }?) → Promise<DLQListResult>` | A page of dead letters, oldest dead first (1 to 100, default 20), each with its failures, when it died, its last error and up to 4 KiB of its payload; pass the page's `cursor` on, null on the last |
+| `dlqRequeue` | `dlqRequeue(queue, seqs, { all?, limit? }?) → Promise<QueueDLQResult>` | Make dead letters ready again, failures reset: those named, or with `all` the oldest, up to `limit` (default 100) a call |
+| `dlqDelete` | `dlqDelete(queue, seqs, { all?, limit?, dryRun? }?) → Promise<QueueDLQResult>` | Delete dead letters for good; with `dryRun`, count what it would delete |
 
 #### Enqueue Options
 
@@ -231,6 +233,19 @@ complete), so it is done. With `ack: true` a dequeue completes its messages
 as it takes them; if the leader fails in between, they come back once their
 lease runs out.
 
+#### Dead letters
+
+A message failed `dead`, or once its attempts are spent, is a dead letter:
+it stays in the queue, not delivered, until it is requeued, deleted or
+purged. `dlqList` pages through them oldest dead first; the cursor is
+opaque. `dlqRequeue` and `dlqDelete` take dead letters by seq (1 to 100),
+or with `all: true` (and no seqs) the oldest, a batch of up to `limit` per
+call: `more` says whether others remain, so call again while it is set.
+Each answers how many it `applied` to (with `dryRun`, would) and the ones it
+didn't in `refused`: `NotDead` for a message that isn't dead, `Gone` for
+one not in the queue. A requeued message is ready at once at its priority,
+with its failures at 0; its deliveries and last error stay.
+
 ### Action Operations
 
 Actions are registered tasks that can be invoked and executed by workers.
@@ -239,7 +254,7 @@ Actions are registered tasks that can be invoked and executed by workers.
 |--------|-----------|-------------|
 | `register` | `register(name, actionType?, opts?) → Promise<void>` | Register an action |
 | `invoke` | `invoke(name, input, opts?) → Promise<ActionInvokeResult>` | Invoke an action |
-| `status` | `status(runId, opts?) → Promise<ActionRunStatus>` | Get run status |
+| `status` | `status(runId, opts?) → Promise<ActionRunStatus>` | A run's status; `held` says why a run past its lease hasn't ended yet (its end waits for room on the calling workflow's shard) |
 | `list` | `list(opts?) → Promise<ActionListResult>` | A page of actions, each with its version, owner, lease, attempts and creation time |
 | `info` | `info(name, opts?) → Promise<ActionInfo>` | An action's definition, its runs by status and completed runs' latencies; `NotFoundError` if it isn't registered |
 | `delete` | `delete(name, opts?) → Promise<void>` | Delete an action |
@@ -373,6 +388,13 @@ Streams are append-only logs for event sourcing and real-time data.
 | `groupTouch` | `groupTouch(stream, delivery, { group }) → Promise<StreamGroupTouchResult>` | Keep a lease |
 | `groupList` | `groupList(stream, opts?) → Promise<StreamGroupListResult>` | The stream's consumer groups, with members, pending records, settings and last delivery |
 | `groupMembers` | `groupMembers(stream, group, opts?) → Promise<StreamGroupMembersResult>` | A group's members (the consumers holding its records now), each with how many it holds |
+| `groupSteal` | `groupSteal(stream, records, { group, consumer, minIdleMs, leaseMs? }) → Promise<StreamGroupStealResult>` | Take records another consumer has left idle at least `minIdleMs`: a new delivery to `consumer` |
+| `groupDlqList` | `groupDlqList(stream, group, { limit?, cursor? }?) → Promise<GroupDLQListResult>` | A page of the group's dead letters, oldest dead first (1 to 100, default 20) |
+| `groupDlqRequeue` | `groupDlqRequeue(stream, group, ids, { all?, limit? }?) → Promise<GroupDLQResult>` | Make dead letters ready again, failures reset |
+| `groupDlqDelete` | `groupDlqDelete(stream, group, ids, { all?, limit?, dryRun? }?) → Promise<GroupDLQResult>` | Delete dead letters for good |
+| `create` | `create(stream, { partitions?, retentionAgeS?, retentionCount? }?) → Promise<void>` | Create a stream with settings |
+| `alter` | `alter(stream, { retentionAgeS?, retentionCount? }) → Promise<void>` | Change a stream's retention |
+| `info` | `info(stream, opts?) → Promise<StreamInfoResult>` | First and last ids, count, bytes, partitions and retention |
 
 A consumer group hands each of its stream's records to one consumer at a
 time, leased: a read takes records whose lease ran out or that were nacked
@@ -416,6 +438,23 @@ with other settings. Creating a group that exists with the same settings
 changes nothing; with others it throws `ConflictError`, which names the
 group's own: a create can't change them.
 
+A group's dead letters work as a queue's (see Queue Operations, Dead
+letters), named by record id: `groupDlqList` pages them with each one's
+deliveries, failures, when it died and its last error; `groupDlqRequeue`
+and `groupDlqDelete` take ids or `all` with a `limit`, and refuse a record
+that isn't dead `NotDead`. A requeue passes over a record trimmed from the
+stream since.
+
+`groupSteal` is an operator's command: a read takes expired records by
+itself. It takes records another consumer holds, named with the deliveries
+their holder has (a read's result, narrowed), if each has been idle at
+least `minIdleMs` (1 ms to 12 h): idle is the time since its holder last
+read, stole or touched it, so a holder that touches more often is never
+stolen from, and such a record comes back in `refused` as `NotIdle`. Each
+one taken gets a new delivery leased to `consumer` (for `leaseMs`, or the
+group's lease), its failures kept; ack, nack and touch the result as a
+read's. The old holder's reports on it then apply nothing.
+
 A `StreamWorker` reads its group and runs a handler per record: it acks the
 record when the handler returns and nacks it when the handler throws. From
 a read's arrival until each of its records is acked or nacked, running or
@@ -449,6 +488,30 @@ retrying. A consumer that may start before its stream exists catches
 `NotFoundError`) from `stream.read` or `ts.read` comes from a node that may
 be behind: the stream or series may exist but this node hasn't seen it yet,
 so read again rather than treating it as gone.
+
+#### Creating and altering streams
+
+An append makes a stream it names, with one partition and no retention.
+`create` makes one with settings: `partitions`, `retentionAgeS` (trim
+records older than this) and `retentionCount` (keep at most this many).
+`alter` changes retention: each setting given replaces the stream's, one
+left out is kept. It works on a stream an append made as on one a create
+made; a stream that doesn't exist throws `NotFoundError`. `info` shows the
+settings.
+
+A create of a stream that exists:
+
+- made by an append and never altered: the create gives it the settings
+  asked, and succeeds;
+- made by a create, or altered since: it succeeds if it asks for the
+  settings the stream has (as a retry does), and is otherwise refused
+  `ConflictError`, "the stream exists with other settings; change them
+  with stream alter". After an alter, a create must name the altered
+  settings, all of them.
+
+A create whose name's 64-bit hash is another stream's in the namespace is
+refused `ConflictError` too ("another stream's name hashes as this one's;
+choose another name"): pick another name.
 
 #### Stream Example
 
@@ -597,6 +660,15 @@ ends a wait at once. An `outcome_pending` refusal of any of those calls
 is not resent: `start()` throws `OutcomePendingError` with the server's
 message. A handler's result (complete, fail, ack, nack) refused by a halted
 shard is logged and dropped, not resent.
+
+A handler's result refused `overloaded` and not run, once the client's own
+retries are spent, is sent again by the worker, the same request, from
+100 ms doubling to 5 s, each refusal logged at warn, until the server takes
+it or answers otherwise. A complete or fail that ends a run a workflow step
+called is refused so while the queue of messages to the workflow's shard is
+full; the run is held meanwhile (`action.status` shows why in `held`), not
+handed out again, so the result must get through. After `stop()` or
+`drain()` it is tried for up to 2 s more, then dropped with an error.
 
 `limit` is never retried by the client either. For the workers, start()
 fails with the limit error; a limit hit while running is logged and backed

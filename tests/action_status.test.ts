@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { IncompleteResponseError, decodeActionStatusAnswer } from "@floruntime/core";
 
 /** action.status's answer as the server encodes it. */
-function answer(status: number, opts: { started?: bigint; completed?: bigint; attempt?: number; output?: string; error?: string; worker?: string; outcome?: string } = {}): Uint8Array {
+function answer(status: number, opts: { started?: bigint; completed?: bigint; attempt?: number; output?: string; error?: string; worker?: string; outcome?: string; held?: string } = {}): Uint8Array {
   const parts: number[] = [status];
   const i64 = (v: bigint) => {
     const b = new DataView(new ArrayBuffer(8));
@@ -29,6 +29,11 @@ function answer(status: number, opts: { started?: bigint; completed?: bigint; at
       parts.push(...b);
     }
   }
+  if (opts.held === undefined) parts.push(0);
+  else {
+    const b = new TextEncoder().encode(opts.held);
+    parts.push(1, b.length, ...b);
+  }
   return new Uint8Array(parts);
 }
 
@@ -46,7 +51,14 @@ describe("action.status", () => {
       errorMessage: undefined,
       workerId: undefined,
       outcome: undefined,
+      held: undefined,
     });
+  });
+
+  it("decodes why a run past due isn't ended yet, last, with a one-byte length", () => {
+    const why = "held: the calling workflow's shard has no room for the end";
+    const s = decodeActionStatusAnswer("r", answer(1, { started: 1100n, attempt: 1, worker: "w", held: why }));
+    expect([s.status, s.workerId, s.held]).toEqual(["running", "w", why]);
   });
 
   it("decodes the outcome a completed run's worker named, last; none is success", () => {
@@ -66,10 +78,11 @@ describe("action.status", () => {
   });
 
   it("refuses a cut answer and a status this client doesn't know", () => {
-    const whole = answer(2, { attempt: 1, output: "x", worker: "w", outcome: "o" });
+    const whole = answer(2, { attempt: 1, output: "x", worker: "w", outcome: "o", held: "h" });
     for (let n = 0; n < whole.length; n++) {
       expect(() => decodeActionStatusAnswer("r", whole.subarray(0, n))).toThrow(IncompleteResponseError);
     }
+    expect(() => decodeActionStatusAnswer("r", new Uint8Array([...whole, 0]))).toThrow(IncompleteResponseError);
     expect(() => decodeActionStatusAnswer("r", answer(9))).toThrow(IncompleteResponseError);
   });
 });
