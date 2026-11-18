@@ -444,7 +444,7 @@ describe.skipIf(!endpoint)("live", () => {
     expect((await client.queue.peek("jobs")).messages).toHaveLength(0);
   }, 30000);
 
-  it("peeks a queue's next messages in dequeue order without taking them, and pages its dead letters", async () => {
+  it("peeks a queue's next messages in dequeue order without taking them, and lists no dead letters", async () => {
     const { client } = await liveClient();
     const seqs: bigint[] = [];
     for (const [p, priority] of [["low", 5], ["high", 1], ["mid", 3]] as const) seqs.push(await client.queue.enqueue("jobs", encoder.encode(p), { priority }));
@@ -457,9 +457,157 @@ describe.skipIf(!endpoint)("live", () => {
     expect((await client.queue.peek("jobs")).messages).toHaveLength(3);
     const taken = await client.queue.dequeue("jobs", 1);
     expect(decoder.decode(taken.messages[0]!.payload)).toBe("high");
-    // Nothing has died: an empty first page, and one after a seq.
-    expect(await client.queue.dlqList("jobs")).toEqual({ messages: [], total: 0n, hasMore: false, lastSeq: 0n });
-    expect(await client.queue.dlqList("jobs", { limit: 1, after: seqs[0]! })).toEqual({ messages: [], total: 0n, hasMore: false, lastSeq: 0n });
+    // Nothing has died: an empty last page.
+    expect(await client.queue.dlqList("jobs")).toEqual({ messages: [], cursor: null });
+    expect(seqs).toHaveLength(3);
+  });
+
+  it("pages a queue's dead letters, requeues and deletes them, and refuses ones that aren't dead", async () => {
+    const { client } = await liveClient();
+    for (const p of ["a", "bb", "ccc"]) await client.queue.enqueue("jobs", encoder.encode(p));
+    const taken = await client.queue.dequeue("jobs", 3, { consumer: "c1" });
+    expect(taken.messages).toHaveLength(3);
+    expect(await client.queue.fail("jobs", taken, { dead: true, error: "boom" })).toEqual({ applied: 3, refused: [] });
+    const live = await client.queue.enqueue("jobs", encoder.encode("alive"));
+    const deadSeqs = taken.messages.map((m) => m.seq);
+
+    // Two pages: the first has a cursor, the last none.
+    const first = await client.queue.dlqList("jobs", { limit: 2 });
+    expect(first.messages).toHaveLength(2);
+    expect(first.cursor).not.toBeNull();
+    const last = await client.queue.dlqList("jobs", { limit: 2, cursor: first.cursor });
+    expect(last.cursor).toBeNull();
+    const all = [...first.messages, ...last.messages];
+    expect(all.map((m) => m.seq).sort()).toEqual([...deadSeqs].sort());
+    for (const m of all) {
+      expect(m).toMatchObject({ deliveries: 1, failures: 1, error: "boom" });
+      expect(m.deadAtMs).toBeGreaterThan(0n);
+      expect(decoder.decode(m.payload)).toBe(["a", "bb", "ccc"][deadSeqs.indexOf(m.seq)]);
+      expect(m.size).toBe(m.payload.length);
+    }
+
+    // A dry run deletes nothing; a requeue of a live message is refused not_dead, of none gone.
+    expect(await client.queue.dlqDelete("jobs", [deadSeqs[0]!], { dryRun: true })).toEqual({ applied: 1, refused: [], more: false });
+    expect((await client.queue.dlqList("jobs")).messages).toHaveLength(3);
+    const requeued = await client.queue.dlqRequeue("jobs", [deadSeqs[0]!, live, 1n << 40n]);
+    expect(requeued.applied).toBe(1);
+    expect(requeued.more).toBe(false);
+    expect(requeued.refused.map((r) => [r.seq, r.why])).toEqual([
+      [live, QueueRefusal.NotDead],
+      [1n << 40n, QueueRefusal.Gone],
+    ]);
+    expect(requeued.refused[0]!.reason.length).toBeGreaterThan(0);
+    // Requeued, it is ready again, its failures reset.
+    const back = await client.queue.peek("jobs");
+    expect(back.messages.map((m) => m.seq).sort()).toEqual([deadSeqs[0]!, live].sort());
+
+    // Delete all, a batch at a time.
+    expect(await client.queue.dlqDelete("jobs", [], { all: true, limit: 1 })).toEqual({ applied: 1, refused: [], more: true });
+    expect(await client.queue.dlqDelete("jobs", [], { all: true })).toEqual({ applied: 1, refused: [], more: false });
+    expect(await client.queue.dlqList("jobs")).toEqual({ messages: [], cursor: null });
+    const notDead = await client.queue.dlqDelete("jobs", [live]);
+    expect(notDead.applied).toBe(0);
+    expect(notDead.refused.map((r) => r.why)).toEqual([QueueRefusal.NotDead]);
+  }, 30000);
+
+  it("pages a group's dead letters, requeues and deletes them, and refuses ones that aren't dead", async () => {
+    const { client } = await liveClient();
+    for (const p of ["a", "b", "c"]) await client.stream.append("events", encoder.encode(p));
+    const opts = { group: "g1", consumer: "c1" };
+    const read = await client.stream.groupRead("events", { ...opts, limit: 10 });
+    expect(read.records).toHaveLength(3);
+    const [r0, r1, r2] = read.records;
+    const nacked = await client.stream.groupNack("events", { ...read, records: [r0!, r1!] }, { group: "g1", dead: true, error: "bad record" });
+    expect(nacked).toEqual({ applied: 2, refused: [] });
+
+    const first = await client.stream.groupDlqList("events", "g1", { limit: 1 });
+    expect(first.dead).toHaveLength(1);
+    expect(first.cursor).not.toBeNull();
+    const last = await client.stream.groupDlqList("events", "g1", { cursor: first.cursor });
+    expect(last.cursor).toBeNull();
+    const dead = [...first.dead, ...last.dead];
+    expect(dead.map((d) => d.id.toString()).sort()).toEqual([r0!.id.toString(), r1!.id.toString()].sort());
+    for (const d of dead) {
+      expect(d).toMatchObject({ deliveries: 1, failures: 1, error: "bad record" });
+      expect(d.deadAtMs).toBeGreaterThan(0n);
+    }
+
+    // r2 is leased, not dead: a requeue or delete naming it is refused not_dead.
+    const requeued = await client.stream.groupDlqRequeue("events", "g1", [r0!.id, r2!.id]);
+    expect(requeued.applied).toBe(1);
+    expect(requeued.more).toBe(false);
+    expect(requeued.refused.map((r) => [r.id.toString(), r.why])).toEqual([[r2!.id.toString(), QueueRefusal.NotDead]]);
+    expect(requeued.refused[0]!.reason.length).toBeGreaterThan(0);
+    // Requeued, it is read again.
+    const again = await client.stream.groupRead("events", { group: "g1", consumer: "c2", limit: 10 });
+    expect(again.records.map((r) => [r.id.toString(), r.deliveries])).toEqual([[r0!.id.toString(), 2]]);
+
+    expect(await client.stream.groupDlqDelete("events", "g1", [r1!.id], { dryRun: true })).toEqual({ applied: 1, refused: [], more: false });
+    expect((await client.stream.groupDlqList("events", "g1")).dead).toHaveLength(1);
+    const deleted = await client.stream.groupDlqDelete("events", "g1", [], { all: true });
+    expect(deleted).toEqual({ applied: 1, refused: [], more: false });
+    expect(await client.stream.groupDlqList("events", "g1")).toEqual({ dead: [], cursor: null });
+    const notDead = await client.stream.groupDlqDelete("events", "g1", [r2!.id]);
+    expect(notDead.refused.map((r) => r.why)).toEqual([QueueRefusal.NotDead]);
+
+    await expect(client.stream.groupDlqList("events", "nope")).rejects.toBeInstanceOf(NotFoundError);
+    await expect(client.stream.groupDlqRequeue("events", "nope", [], { all: true })).rejects.toBeInstanceOf(NotFoundError);
+  }, 30000);
+
+  it("steals a group's idle records to another consumer, refusing ones not idle long enough", async () => {
+    const { client } = await liveClient();
+    await client.stream.append("events", encoder.encode("x"));
+    const read = await client.stream.groupRead("events", { group: "g1", consumer: "c1", limit: 10 });
+    expect(read.records).toHaveLength(1);
+    const steal = { group: "g1", consumer: "c2" };
+
+    // Not idle for 12 h: refused not_idle, nothing taken.
+    const early = await client.stream.groupSteal("events", read.records, { ...steal, minIdleMs: 43_200_000 });
+    expect(early.records).toEqual([]);
+    expect(early.expiresAtMs).toBe(0n);
+    expect(early.refused.map((r) => [r.id.toString(), r.why])).toEqual([[read.records[0]!.id.toString(), QueueRefusal.NotIdle]]);
+    expect(early.refused[0]!.reason.length).toBeGreaterThan(0);
+
+    await new Promise((r) => setTimeout(r, 100));
+    const stolen = await client.stream.groupSteal("events", read.records, { ...steal, minIdleMs: 50, leaseMs: 5000 });
+    expect(stolen.refused).toEqual([]);
+    expect(stolen.consumer).toBe("c2");
+    expect(stolen.records.map((r) => [r.id.toString(), r.deliveries])).toEqual([[read.records[0]!.id.toString(), 2]]);
+    expect(stolen.expiresAtMs).toBeGreaterThan(BigInt(Date.now()));
+    const members = await client.stream.groupMembers("events", "g1");
+    expect(members.members.map((m) => [m.id, m.pending])).toEqual([["c2", 1]]);
+
+    // The old holder's delivery is over; the thief's acks.
+    const stale = await client.stream.groupAck("events", read, { group: "g1" });
+    expect(stale.applied).toBe(0);
+    expect(stale.refused).toHaveLength(1);
+    expect(await client.stream.groupAck("events", stolen, { group: "g1" })).toEqual({ applied: 1, refused: [] });
+
+    await expect(client.stream.groupSteal("events", read.records, { group: "nope", consumer: "c2", minIdleMs: 1 })).rejects.toBeInstanceOf(NotFoundError);
+  }, 30000);
+
+  it("alters a stream an append made, info shows it, and a create must then name its settings", async () => {
+    const { client } = await liveClient();
+    await client.stream.append("made", encoder.encode("x"));
+    expect(await client.stream.info("made")).toMatchObject({ count: 1n, partitionCount: 1, retentionAgeS: 0n, retentionCount: 0n });
+    await client.stream.alter("made", { retentionCount: 1000n });
+    expect(await client.stream.info("made")).toMatchObject({ count: 1n, retentionAgeS: 0n, retentionCount: 1000n });
+    await client.stream.alter("made", { retentionAgeS: 3600n });
+    expect(await client.stream.info("made")).toMatchObject({ retentionAgeS: 3600n, retentionCount: 1000n });
+
+    // Altered, it has settings: a create naming others is a conflict; the same ones succeed.
+    const err = await client.stream.create("made").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConflictError);
+    expect((err as ConflictError).message).toContain("the stream exists with other settings");
+    await client.stream.create("made", { retentionAgeS: 3600n, retentionCount: 1000n });
+
+    // A create of a stream an append made, never altered, gives it the settings asked.
+    await client.stream.append("plain", encoder.encode("y"));
+    await client.stream.create("plain", { retentionCount: 50n });
+    expect(await client.stream.info("plain")).toMatchObject({ count: 1n, retentionCount: 50n });
+    await expect(client.stream.create("plain", { retentionCount: 51n })).rejects.toBeInstanceOf(ConflictError);
+
+    await expect(client.stream.alter("never", { retentionCount: 1n })).rejects.toBeInstanceOf(NotFoundError);
   });
 
   it("lists a stream's consumer groups and a group's members, and refuses an unknown group not found", async () => {
@@ -718,6 +866,8 @@ describe.skipIf(!endpoint)("live", () => {
     expect(status.status).toBe("completed");
     expect(decoder.decode(status.output!)).toBe("pong");
     expect(status.outcome).toBeUndefined();
+    // Nothing holds its end: it isn't a workflow step's.
+    expect(status.held).toBeUndefined();
 
     // The fail path: a retried failure counts an attempt; an abandoned one doesn't.
     const second = await client.action.invoke("echo", encoder.encode("ping 2"));

@@ -32,6 +32,12 @@ describe("OpCode", () => {
     expect([OpCode.StreamGroupList, OpCode.StreamGroupMembers, OpCode.QueuePeek, OpCode.ProcessingRemove]).toEqual([0x15d, 0x15e, 0x180, 0x365]);
   });
 
+  it("drops the old queue dead-letter codes 0x176-0x178 for the table's, and knows the group steal and dead-letter ops", () => {
+    for (const code of [0x176, 0x177, 0x178]) expect(codes).not.toContain(code);
+    expect([OpCode.QueueDLQList, OpCode.QueueDLQRequeue, OpCode.QueueDLQDelete]).toEqual([0x185, 0x186, 0x187]);
+    expect([OpCode.StreamGroupSteal, OpCode.StreamGroupDLQList, OpCode.StreamGroupDLQRequeue, OpCode.StreamGroupDLQDelete]).toEqual([0x15f, 0x160, 0x161, 0x162]);
+  });
+
   it("gives every op its own code", () => {
     expect(new Set(codes).size).toBe(codes.length);
   });

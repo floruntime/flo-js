@@ -5,7 +5,10 @@
 import {
   ConnectionError,
   InvalidChecksumError,
+  Ran,
+  Reason,
   ServerError,
+  StatusCode,
   NotConnectedError,
   TimeoutError,
   UnexpectedEOFError,
@@ -115,15 +118,33 @@ function lost(err: unknown, client: FloClient, seen: Seen): boolean {
 }
 
 /**
+ * Whether a result was refused overloaded and not run, so the same result
+ * can go again. Any write can be refused so while too many writes wait for
+ * commit, or on a follower whose link to the leader is full. A group ack or
+ * nack's lease keeps running meanwhile, so a long overload can redeliver the
+ * record (at-least-once). A complete or fail that ends a run a workflow step
+ * called is also refused while the outbox to the caller's shard is full;
+ * that run is held, not handed out again, until its end gets through. A full
+ * group (GroupHeldFull) is not one: it is a read's refusal, and stays until
+ * the group drains.
+ */
+export function isOverloadedUnrun(err: unknown): boolean {
+  return err instanceof ServerError && err.status === StatusCode.Overloaded && err.ran === Ran.No && err.reason !== Reason.GroupHeldFull;
+}
+
+/**
  * Send a worker's result (complete, fail, ack or nack) with `send`, which
  * builds the same request each call. If it is lost (see lost()), the worker
  * reconnects and sends it again: a resend at worst repeats a result the
- * server already has. After RESULT_SENDS sends, RESULT_GRACE_MS into the
- * send once `leaving` has aborted (a stop or drain, so neither waits on a
- * server that is gone), or if the client's owner closed it, the result is
- * dropped with an error log naming `what`; the server then hands the work
- * out again once its lease runs out. A refusal is not resent. Returns
- * whether it was delivered.
+ * server already has. A result refused overloaded and not run (once the
+ * client's own retries are spent) is sent again with a backoff from 100 ms
+ * doubling to 5 s, a warning each time, until the server takes it or
+ * answers otherwise. After RESULT_SENDS lost sends, RESULT_GRACE_MS into
+ * the send once `leaving` has aborted (a stop or drain, so neither waits on
+ * a server that is gone or stays overloaded), or if the client's owner
+ * closed it, the result is dropped with an error log naming `what`; the
+ * server then hands the work out again once its lease runs out. Any other
+ * refusal is not resent. Returns whether it was delivered.
  */
 export async function sendResult(
   client: FloClient,
@@ -149,7 +170,8 @@ async function sendWithin(
   what: string,
   send: () => Promise<unknown>,
 ): Promise<boolean> {
-  for (let sends = 1; ; sends++) {
+  const overloaded = newWorkerBackoff();
+  for (let sends = 1; ; ) {
     // Read before the send: a client shared with another worker may be
     // redialed meanwhile, and only this connection should be dropped.
     const seen = { connection: client.connection(), closes };
@@ -157,6 +179,16 @@ async function sendWithin(
       await send();
       return true;
     } catch (err) {
+      if (isOverloadedUnrun(err)) {
+        if (grace.aborted || closedSince(client, seen)) {
+          logger.error(`Dropped ${what}: ${err}; the worker is stopping or draining, or its client was closed`);
+          return false;
+        }
+        const d = overloaded.next();
+        logger.warn(`Sending ${what} was refused, not run: ${err}; sending it again in ${d} ms`);
+        await pause(d, grace);
+        continue;
+      }
       if (!lost(err, client, seen)) {
         logger.error(`Dropped ${what}: ${err}`);
         return false;
@@ -165,6 +197,7 @@ async function sendWithin(
         logger.error(`Dropped ${what} after ${sends} sends: ${err}`);
         return false;
       }
+      sends++;
       const gone = `Dropped ${what}: ${err}; it found no connection within ${RESULT_GRACE_MS} ms of the worker stopping or draining, or its client was closed`;
       if (grace.aborted || closedSince(client, seen)) {
         logger.error(gone);

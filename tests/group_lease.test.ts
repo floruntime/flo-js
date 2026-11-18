@@ -168,7 +168,7 @@ describe("stream.groupAck, groupNack and groupTouch", () => {
 
   it("refuse a why this SDK doesn't know, and an answer cut short", async () => {
     const ops = (a: Uint8Array) => new StreamOperations(answering(a).sender);
-    await expect(ops(groupReportAnswer(0, [{ why: 6 }])).groupAck("s", delivery, { group: "g1" })).rejects.toBeInstanceOf(IncompleteResponseError);
+    await expect(ops(groupReportAnswer(0, [{ why: 8 }])).groupAck("s", delivery, { group: "g1" })).rejects.toBeInstanceOf(IncompleteResponseError);
     await expect(ops(new Uint8Array(7)).groupAck("s", delivery, { group: "g1" })).rejects.toBeInstanceOf(IncompleteResponseError);
     await expect(ops(groupReportAnswer(1)).groupTouch("s", delivery, { group: "g1" })).rejects.toBeInstanceOf(IncompleteResponseError);
   });

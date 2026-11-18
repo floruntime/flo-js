@@ -14,7 +14,7 @@ export const VERSION = 0x03;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0x17f3632347cd6dd9n;
+export const TABLE_HASH = 0xac07f1f7338c66bdn;
 
 /**
  * Why the server refused a request. Mirrors the server's list. A code this
@@ -260,12 +260,13 @@ export const OpCode = {
   StreamGroupDelete: 0x15c,
   StreamGroupList: 0x15d,
   StreamGroupMembers: 0x15e,
+  StreamGroupSteal: 0x15f,
+  StreamGroupDLQList: 0x160,
+  StreamGroupDLQRequeue: 0x161,
+  StreamGroupDLQDelete: 0x162,
 
   // ── Queues (0x170 – 0x19F) ──
   QueueEnqueue: 0x170,
-  QueueDLQList: 0x176,
-  QueueDLQDelete: 0x177,
-  QueueDLQRequeue: 0x178,
   QueueStats: 0x17b,
   QueuePurge: 0x17f,
   QueuePeek: 0x180,
@@ -273,6 +274,9 @@ export const OpCode = {
   QueueComplete: 0x182,
   QueueFail: 0x183,
   QueueTouch: 0x184,
+  QueueDLQList: 0x185,
+  QueueDLQRequeue: 0x186,
+  QueueDLQDelete: 0x187,
   QueueList: 0x198,
 
   // ── Time-Series (0x1A0 – 0x1BF) ──
@@ -420,6 +424,8 @@ export const OptionTag = {
   PartitionKey: 0x25, // string: Key for partition routing
   MaxAgeSeconds: 0x26, // u64: Maximum age in seconds for retention
   DryRun: 0x28, // void: Flag to preview what would be deleted without deleting
+  RetentionCount: 0x29, // u64: a stream keeps at most this many records (0 = no bound)
+  RetentionAge: 0x2a, // u64: a stream trims records older than this many seconds (0 = no bound)
   Force: 0x2c, // void: Allow a destructive op, e.g. deleting a non-empty stream
 
   // Consumer Group Options (0x30 - 0x3F)
@@ -604,6 +610,10 @@ export const QueueRefusal = {
   Released: 4,
   /** No one holds it. */
   NotHeld: 5,
+  /** A dead-letter requeue or delete named it, and it isn't dead. */
+  NotDead: 6,
+  /** A group steal named it, and its holder kept its lease moving within the idle time named. */
+  NotIdle: 7,
 } as const;
 
 export type QueueRefusal = (typeof QueueRefusal)[keyof typeof QueueRefusal];
@@ -684,6 +694,34 @@ export interface StreamInfoResult {
   count: bigint;
   bytes: bigint;
   partitionCount: number;
+  /** Records older than this many seconds are trimmed; 0 for no age bound. */
+  retentionAgeS: bigint;
+  /** The stream keeps at most this many records; 0 for no count bound. */
+  retentionCount: bigint;
+}
+
+/**
+ * Settings for stream.create. Unset, each is the server's default: one
+ * partition and no retention.
+ */
+export interface StreamCreateOptions {
+  namespace?: string;
+  /** Partitions, at least 1. */
+  partitions?: number;
+  /** Trim records older than this many seconds. */
+  retentionAgeS?: bigint;
+  /** Keep at most this many records. */
+  retentionCount?: bigint;
+}
+
+/**
+ * Settings for stream.alter: each one given replaces the stream's; unset
+ * (or 0) leaves it as it is.
+ */
+export interface StreamAlterOptions {
+  namespace?: string;
+  retentionAgeS?: bigint;
+  retentionCount?: bigint;
 }
 
 /**
@@ -1084,14 +1122,14 @@ export interface QueueFailOptions {
 }
 
 /**
- * Options for DLQ list operations.
+ * Options for a dead-letter list, a queue's or a group's.
  */
 export interface DLQListOptions {
   namespace?: string;
-  /** Most dead letters on the page, 1 to 100 (default 100); the server clamps it to that range. */
+  /** Most dead letters on the page, 1 to 100 (default 20). */
   limit?: number;
-  /** Start after the dead letter with this seq: the previous page's `lastSeq`. Unset starts from the oldest. */
-  after?: bigint;
+  /** The previous page's `cursor`; unset for the first page. Opaque. */
+  cursor?: Uint8Array | null;
 }
 
 /**
@@ -1099,28 +1137,118 @@ export interface DLQListOptions {
  */
 export interface DeadLetter {
   seq: bigint;
+  priority: number;
+  /** Times it was delivered. */
+  deliveries: number;
+  /** Times it failed: failed by its consumer, or its lease ran out. */
+  failures: number;
+  enqueuedAtMs: bigint;
+  /** When it died, in ms since the Unix epoch. */
+  deadAtMs: bigint;
   /** The payload's whole length; `payload` holds at most its first 4 KiB. */
   size: number;
   payload: Uint8Array;
-  enqueuedAtMs: bigint;
-  /** Times it was delivered. */
-  deliveries: number;
-  priority: number;
-  /** When it was moved to the dead letter queue, in ms since the Unix epoch. */
-  movedAtMs: bigint;
+  /** Its last error, its first 256 bytes. */
+  error: string;
 }
 
 /**
- * A page of a queue's dead letters, oldest first.
+ * A page of a queue's dead letters, oldest dead first.
  */
 export interface DLQListResult {
   messages: DeadLetter[];
-  /** The queue's dead letters in all. */
-  total: bigint;
-  /** Whether more follow: ask again with `after` set to `lastSeq`. */
-  hasMore: boolean;
-  /** The seq of the page's last dead letter; 0 on an empty page. */
-  lastSeq: bigint;
+  /** Pass as the next call's cursor; null on the last page. */
+  cursor: Uint8Array | null;
+}
+
+/**
+ * Which dead letters a requeue or delete takes: those named (1 to 100), or,
+ * with `all`, the oldest, a batch of up to `limit` (1 to 100, 100 by
+ * default) per call. Name some or set `all`, not both.
+ */
+export interface DLQSelectOptions {
+  namespace?: string;
+  all?: boolean;
+  limit?: number;
+}
+
+/** Options for a dead-letter delete. */
+export interface DLQDeleteOptions extends DLQSelectOptions {
+  /** Count what it would delete, and delete nothing. */
+  dryRun?: boolean;
+}
+
+/**
+ * What a queue dead-letter requeue or delete did: how many it applied to
+ * (with dry run, would), each one named it didn't, with why (NotDead, or
+ * Gone), and, with `all`, whether dead letters remain past this batch.
+ */
+export interface QueueDLQResult extends QueueReportResult {
+  more: boolean;
+}
+
+/**
+ * A consumer group's dead letter, as groupDlqList shows it.
+ */
+export interface GroupDeadLetter {
+  id: StreamID;
+  /** Times it was delivered. */
+  deliveries: number;
+  /** Times it failed: nacked, or its lease ran out. */
+  failures: number;
+  /** When it died, in ms since the Unix epoch. */
+  deadAtMs: bigint;
+  /** Its last error, its first 256 bytes. */
+  error: string;
+}
+
+/**
+ * A page of a group's dead letters, oldest dead first.
+ */
+export interface GroupDLQListResult {
+  dead: GroupDeadLetter[];
+  /** Pass as the next call's cursor; null on the last page. */
+  cursor: Uint8Array | null;
+}
+
+/**
+ * What a group dead-letter requeue or delete did: how many it applied to
+ * (with dry run, would), each one named it didn't, with why, and, with
+ * `all`, whether dead letters remain past this batch.
+ */
+export interface GroupDLQResult extends StreamGroupReportResult {
+  more: boolean;
+}
+
+/**
+ * Options for a group steal.
+ */
+export interface StreamGroupStealOptions {
+  namespace?: string;
+  /** Consumer group name. */
+  group: string;
+  /** Who takes the records. */
+  consumer: string;
+  /**
+   * Take only records idle this long, 1 to 43200000 ms: idle is the time
+   * since their holder last read, stole or touched them.
+   */
+  minIdleMs: number;
+  /** The lease they're taken for, 5000 to 43200000 ms; the group's when unset. */
+  leaseMs?: number;
+}
+
+/**
+ * What a steal took: a new delivery to `consumer`, which acks, nacks and
+ * touches name as they name a read's. Records it didn't take come back in
+ * `refused` (NotIdle, or a code saying the delivery named is over).
+ */
+export interface StreamGroupStealResult extends StreamGroupDelivery {
+  /** The records taken, with their new deliveries. */
+  records: { id: StreamID; deliveries: number }[];
+  /** When the new lease runs out without a touch, in ms since the Unix epoch; 0 when none was taken. */
+  expiresAtMs: bigint;
+  refused: StreamGroupReportResult["refused"];
 }
 
 /**
@@ -1303,6 +1431,12 @@ export interface ActionRunStatus {
   workerId?: string;
   /** The outcome a completed run's worker named; absent for success. */
   outcome?: string;
+  /**
+   * Why its lease, past due, hasn't ended yet: the run ends a workflow
+   * step, and its end waits for room on the calling workflow's shard.
+   * Absent otherwise.
+   */
+  held?: string;
 }
 
 /**

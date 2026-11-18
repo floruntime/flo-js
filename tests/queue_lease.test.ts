@@ -123,7 +123,7 @@ describe("queue reports", () => {
   });
 
   it("refuses a report naming no messages or more than 100, and a refusal code this client doesn't know", async () => {
-    const q = new QueueOperations(answering([...le(0n, 4), 1, ...le(9n, 8), 6, 0]).sender);
+    const q = new QueueOperations(answering([...le(0n, 4), 1, ...le(9n, 8), 8, 0]).sender);
     await expect(q.complete("jobs", { ...lease, messages: [] })).rejects.toBeInstanceOf(FloError);
     await expect(q.complete("jobs", { ...lease, messages: Array.from({ length: 101 }, (_, i) => ({ seq: BigInt(i), deliveries: 1 })) })).rejects.toBeInstanceOf(FloError);
     await expect(q.complete("jobs", lease)).rejects.toBeInstanceOf(IncompleteResponseError);

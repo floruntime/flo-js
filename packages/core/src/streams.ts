@@ -34,8 +34,29 @@ import {
   QueueRefusal,
   type StreamGroupListResult,
   type StreamGroupMembersResult,
+  type StreamGroupStealOptions,
+  type StreamGroupStealResult,
+  type StreamCreateOptions,
+  type StreamAlterOptions,
+  type DLQListOptions,
+  type DLQSelectOptions,
+  type DLQDeleteOptions,
+  type GroupDLQListResult,
+  type GroupDLQResult,
 } from "./types.js";
-import { decodeGroupListAnswer, decodeGroupMembersAnswer, encodeGroupMembersBody, MAX_CONSUMER, MAX_DELAY_MS } from "./kv_body.js";
+import {
+  decodeGroupDlqAnswer,
+  decodeGroupDlqListAnswer,
+  decodeGroupListAnswer,
+  decodeGroupMembersAnswer,
+  decodeGroupStealAnswer,
+  encodeGroupDlqBody,
+  encodeGroupDlqListBody,
+  encodeGroupMembersBody,
+  encodeGroupStealBody,
+  MAX_CONSUMER,
+  MAX_DELAY_MS,
+} from "./kv_body.js";
 import { kvGet, kvScan } from "./kv.js";
 import { OptionsBuilder, serializeStreamAppendValue } from "./wire.js";
 
@@ -173,18 +194,17 @@ export function parseStreamAppendResponse(data: Uint8Array): StreamAppendResult 
  * Wire format: [first_ts:u64][first_seq:u64][last_ts:u64][last_seq:u64][count:u64][bytes:u64][partition_count:u32]
  */
 export function parseStreamInfoResponse(data: Uint8Array): StreamInfoResult {
-  if (data.length < 52) {
-    throw new Error("Invalid stream info response: too short");
-  }
-
+  if (data.length !== 76) throw new IncompleteResponseError(`stream info answer of ${data.length} bytes, not 76`);
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-
   return {
     firstId: new StreamID(view.getBigUint64(0, true), view.getBigUint64(8, true)),
     lastId: new StreamID(view.getBigUint64(16, true), view.getBigUint64(24, true)),
     count: view.getBigUint64(32, true),
     bytes: view.getBigUint64(40, true),
     partitionCount: view.getUint32(48, true),
+    retentionAgeS: view.getBigUint64(52, true),
+    retentionCount: view.getBigUint64(60, true),
+    // [retention_bytes:u64] follows: always 0, since retention by bytes isn't supported.
   };
 }
 
@@ -319,6 +339,54 @@ export class StreamOperations {
     }
 
     return parseStreamInfoResponse(resp.data);
+  }
+
+  /**
+   * Create a stream with settings: `partitions` (1 by default) and
+   * retention by age and count (none by default). An append also makes a
+   * stream, at the defaults; a create of one an append made gives it these
+   * settings. A create of one that exists with the same settings (a retry)
+   * succeeds. One that a create or an alter gave other settings is refused
+   * `ConflictError` ("the stream exists with other settings"): change them
+   * with `alter`. A name whose 64-bit hash is another stream's is refused
+   * `ConflictError` too: choose another name.
+   */
+  async create(stream: string, opts?: StreamCreateOptions): Promise<void> {
+    const partitions = opts?.partitions ?? 1;
+    if (!Number.isInteger(partitions) || partitions < 1 || partitions > 0xffffffff) {
+      throw new FloError(`flo: partitions must be a whole number from 1, got ${partitions}`);
+    }
+    const value = new Uint8Array(4);
+    new DataView(value.buffer).setUint32(0, partitions, true);
+    await this.config(OpCode.StreamCreate, stream, value, opts);
+  }
+
+  /**
+   * Change a stream's retention: each setting given replaces the stream's,
+   * and one unset (or 0) is left as it is. It works on a stream an append
+   * made as on one a create made. A stream that doesn't exist throws
+   * `NotFoundError`. After an alter, a create must name the settings the
+   * stream has, or it is refused `ConflictError`.
+   */
+  async alter(stream: string, opts: StreamAlterOptions): Promise<void> {
+    await this.config(OpCode.StreamAlter, stream, new Uint8Array(0), opts);
+  }
+
+  private async config(op: OpCode, stream: string, value: Uint8Array, opts?: { namespace?: string; retentionAgeS?: bigint; retentionCount?: bigint }): Promise<void> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+    const builder = new OptionsBuilder();
+    for (const [name, tag, v] of [
+      ["retentionAgeS", OptionTag.RetentionAge, opts?.retentionAgeS],
+      ["retentionCount", OptionTag.RetentionCount, opts?.retentionCount],
+    ] as const) {
+      if (v === undefined) continue;
+      if (v < 0n || v >= 1n << 64n) throw new FloError(`flo: ${name} must fit a u64, got ${v}`);
+      if (v > 0n) builder.addU64(tag, v);
+    }
+    const resp = await this.sender.sendRequest(op, namespace, textEncoder.encode(stream), value, builder.build());
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
   }
 
   /**
@@ -513,6 +581,63 @@ export class StreamOperations {
     }
     return decodeGroupMembersAnswer(resp.data);
   }
+
+  /**
+   * Take records another consumer holds and has left idle for at least
+   * `minIdleMs`: each gets a new delivery leased to `consumer`, its
+   * failures kept. Name each record with the deliveries its holder has (a
+   * read's result, narrowed). Idle is the time since its holder last read,
+   * stole or touched it, so a holder that touches more often is never
+   * stolen from: such a record comes back in `refused` as NotIdle. An
+   * operator's command: a read takes expired records by itself. A group
+   * that doesn't exist throws NotFoundError.
+   */
+  async groupSteal(stream: string, records: StreamGroupDelivery["records"], opts: StreamGroupStealOptions): Promise<StreamGroupStealResult> {
+    const body = encodeGroupStealBody(opts.group, opts.consumer, opts.minIdleMs, opts.leaseMs, records);
+    const resp = await this.send(OpCode.StreamGroupSteal, stream, body, opts.namespace);
+    return decodeGroupStealAnswer(resp, opts.consumer);
+  }
+
+  /**
+   * A page of a group's dead letters, oldest dead first: up to `limit` (1
+   * to 100, 20 by default), each with its deliveries, failures, when it
+   * died and its last error. Read on the leader. Pass the answer's `cursor`
+   * for the next page; it is null on the last.
+   */
+  async groupDlqList(stream: string, group: string, opts?: DLQListOptions): Promise<GroupDLQListResult> {
+    return decodeGroupDlqListAnswer(await this.send(OpCode.StreamGroupDLQList, stream, encodeGroupDlqListBody(group, opts), opts?.namespace));
+  }
+
+  /**
+   * Make a group's dead letters ready again at once, with their failures
+   * reset to 0 (deliveries and last error stay): those named, or with
+   * `all` the oldest, up to `limit` per call, `more` saying whether others
+   * remain. One named that isn't dead comes back in `refused` as NotDead;
+   * one trimmed from the stream since is Gone.
+   */
+  async groupDlqRequeue(stream: string, group: string, ids: readonly StreamID[], opts?: DLQSelectOptions): Promise<GroupDLQResult> {
+    return decodeGroupDlqAnswer(await this.send(OpCode.StreamGroupDLQRequeue, stream, encodeGroupDlqBody(group, ids, opts, false), opts?.namespace));
+  }
+
+  /**
+   * Delete a group's dead letters for good: those named, or with `all` the
+   * oldest, up to `limit` per call, `more` saying whether others remain.
+   * With `dryRun`, `applied` is how many it would delete, and nothing is
+   * deleted. One named that isn't dead comes back in `refused` as NotDead.
+   */
+  async groupDlqDelete(stream: string, group: string, ids: readonly StreamID[], opts?: DLQDeleteOptions): Promise<GroupDLQResult> {
+    return decodeGroupDlqAnswer(await this.send(OpCode.StreamGroupDLQDelete, stream, encodeGroupDlqBody(group, ids, opts, true), opts?.namespace));
+  }
+
+  /** Send a table op on `stream`, answering its body or throwing its refusal. */
+  private async send(op: OpCode, stream: string, body: Uint8Array, ns?: string): Promise<Uint8Array> {
+    const namespace = this.sender.getNamespace(ns);
+    const resp = await this.sender.sendRequest(op, namespace, textEncoder.encode(stream), body, new Uint8Array(0));
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+    return resp.data;
+  }
 }
 
 /** A group's lease bounds, in ms. */
@@ -606,6 +731,8 @@ const GROUP_REFUSAL_TEXT: Record<QueueRefusal, string> = {
   [QueueRefusal.Expired]: "stale report: the lease expired and the record moved on",
   [QueueRefusal.Released]: "stale report: the record was nacked",
   [QueueRefusal.NotHeld]: "stale report: the record isn't held",
+  [QueueRefusal.NotDead]: "not dead: the record isn't a dead letter",
+  [QueueRefusal.NotIdle]: "not idle: its holder kept its lease moving",
 };
 
 /**

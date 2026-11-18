@@ -1,7 +1,9 @@
 /**
  * Worker results: the handler's outcome alone picks complete or fail, ack or
  * nack. A result whose connection drops or times out is sent again, the same
- * request, after a reconnect, up to 3 sends; a refusal is not resent.
+ * request, after a reconnect, up to 3 sends; one refused overloaded and not
+ * run is sent again with a backoff until it is taken; any other refusal is
+ * not resent.
  */
 
 import * as net from "node:net";
@@ -445,6 +447,80 @@ describe("ActionWorker results", () => {
     expect(took).toBeLessThan(3500);
     expect(errors.some((m) => m.includes("complete for task t1:1:1:10:a"))).toBe(true);
   });
+});
+
+describe("ActionWorker results refused overloaded", () => {
+  // A complete or fail that would end a run a workflow step called is
+  // refused overloaded, not run, while the outbox to the caller's shard is
+  // full; the run is held until its end gets through, so the worker sends
+  // the same report again until it is taken.
+  function worker(endpoint: string, logger: Logger, handler: () => Promise<Uint8Array>) {
+    const w = new ActionWorker({ endpoint, blockMs: 30000, logger, retry: { maxAttempts: 1 } });
+    w.action("a", handler);
+    const done = w.start();
+    cleanups.push(async () => {
+      w.stop();
+      await done;
+    });
+  }
+
+  function warnings() {
+    const warns: string[] = [];
+    const errors: string[] = [];
+    const logger: Logger = { debug: () => {}, warn: (m) => void warns.push(m), error: (m) => void errors.push(m) };
+    return { logger, warns, errors };
+  }
+
+  it("sends a complete refused overloaded again, the same request, until it is taken", async () => {
+    let completes = 0;
+    const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionComplete && ++completes === 1 ? OVERLOADED : undefined)));
+    const { logger, warns, errors } = warnings();
+    worker(srv.endpoint, logger, async () => new Uint8Array([1]));
+    await until(() => srv.of(OpCode.ActionComplete).length >= 2, 3000);
+    await sleep(300);
+    const sent = srv.of(OpCode.ActionComplete);
+    expect(sent).toHaveLength(2);
+    expect(masked(sent[1]!.bytes).equals(masked(sent[0]!.bytes))).toBe(true);
+    expect(srv.of(OpCode.ActionFail)).toHaveLength(0);
+    expect(srv.connections()).toBe(1);
+    expect(warns.some((m) => m.includes("complete for task t1:1:1:10:a") && m.includes("refused, not run"))).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
+  it("keeps sending a fail refused overloaded past several refusals, backing off", async () => {
+    let fails = 0;
+    const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionFail && ++fails <= 3 ? OVERLOADED : undefined)));
+    const { logger, warns, errors } = warnings();
+    worker(srv.endpoint, logger, async () => {
+      throw new Error("boom");
+    });
+    await until(() => srv.of(OpCode.ActionFail).length >= 4, 5000);
+    await sleep(300);
+    expect(srv.of(OpCode.ActionFail)).toHaveLength(4);
+    expect(srv.of(OpCode.ActionComplete)).toHaveLength(0);
+    expect(warns.filter((m) => m.includes("fail for task t1:1:1:10:a"))).toHaveLength(3);
+    expect(errors).toEqual([]);
+  });
+
+  it("drops a report still refused overloaded about 2 s after stop(), with an error", async () => {
+    const srv = await serve(oneTaskThen((op) => (op === OpCode.ActionComplete ? OVERLOADED : undefined)));
+    const { logger, errors } = warnings();
+    const w = new ActionWorker({ endpoint: srv.endpoint, blockMs: 30000, logger, retry: { maxAttempts: 1 } });
+    w.action("a", async () => new Uint8Array(0));
+    const done = w.start();
+    await until(() => srv.of(OpCode.ActionComplete).length >= 1, 3000);
+    const stopped = Date.now();
+    w.stop();
+    await until(() => errors.length > 0, 5000);
+    const took = Date.now() - stopped;
+    // The worker's parked await ends with the server.
+    srv.close();
+    await done;
+    expect(took).toBeGreaterThanOrEqual(1900);
+    expect(took).toBeLessThan(3500);
+    expect(srv.of(OpCode.ActionComplete).length).toBeGreaterThan(1);
+    expect(errors.some((m) => m.includes("Dropped complete for task t1:1:1:10:a"))).toBe(true);
+  }, 10000);
 });
 
 describe("StreamWorker results", () => {

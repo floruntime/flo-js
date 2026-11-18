@@ -5,6 +5,27 @@ All notable changes to the Flo JavaScript SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed (breaking)
+
+- Queue dead letters moved to the server's table ops `queue.dlq_list`, `queue.dlq_requeue` and `queue.dlq_delete` (0x185 to 0x187); the old codes 0x176 to 0x178 and their wire format are gone, with `serializeDlqListValue`, `decodeDlqListAnswer` and `MAX_DLQ_PAGE`. `queue.dlqList(queue, { limit?, cursor? })` pages by an opaque `cursor` (null on the last page) instead of `after`/`hasMore`/`lastSeq`/`total`, 20 by default (1 to 100). A `DeadLetter` now carries `failures`, `deadAtMs` (was `movedAtMs`) and its last `error` (first 256 bytes), with `priority`, `deliveries`, `enqueuedAtMs`, `size` and up to 4 KiB of `payload`.
+- `StreamInfoResult` carries `retentionAgeS` and `retentionCount`; an info answer that isn't the server's 76 bytes throws `IncompleteResponseError`.
+
+### Added
+
+- `queue.dlqRequeue(queue, seqs, { all?, limit? })` and `queue.dlqDelete(queue, seqs, { all?, limit?, dryRun? })` (`QueueDLQResult`): by seq, or with `all` the oldest dead letters, a batch of up to `limit` (default 100) a call, `more` saying whether others remain. A requeued message is ready at once with its failures at 0. One named that isn't dead is refused `NotDead`; with `dryRun` a delete counts and deletes nothing.
+- Consumer group dead letters: `stream.groupDlqList(stream, group, { limit?, cursor? })`, `groupDlqRequeue(stream, group, ids, ...)` and `groupDlqDelete(stream, group, ids, ...)` (0x160 to 0x162), as the queue's, by record id.
+- `stream.groupSteal(stream, records, { group, consumer, minIdleMs, leaseMs? })` (0x15f): takes records another consumer has left idle at least `minIdleMs` as a new delivery to `consumer`, which acks, nacks and touches name as a read's. A record whose holder touched it within that time is refused `NotIdle`.
+- `QueueRefusal.NotDead` (6) and `NotIdle` (7), in queue reports, group reports and the new ops' answers.
+- `ActionRunStatus.held`: why a run past its lease hasn't ended yet, its end waiting for room on the calling workflow's shard.
+- `stream.create(stream, { partitions?, retentionAgeS?, retentionCount? })` and `stream.alter(stream, { retentionAgeS?, retentionCount? })`, with `OptionTag.RetentionAge` and `RetentionCount`. An alter of a stream an append made works. After an alter, a create must name the stream's settings, or it is refused `ConflictError` ("the stream exists with other settings"); so is a create whose name's 64-bit hash is another stream's.
+- Workers send a complete, fail, ack or nack refused overloaded and not run again, the same request, from 100 ms doubling to 5 s, until it is taken or answered otherwise; after `stop()` or `drain()` for up to 2 s more. A complete or fail ending a run a workflow step called is refused so while the queue to the workflow's shard is full, and the run is held until it gets through; it used to be dropped once the client's retries ran out.
+
+### Server behaviour this release follows
+
+- A workflow step whose action isn't registered waits and retries, up to the server's `missing_action_wait_ms`, rather than failing at once.
+
 ## [0.1.0-dev.13] - 2026-11-16
 
 ### Added

@@ -45,6 +45,15 @@ import {
   type QueueRefusal,
   type QueueReportResult,
   type QueueTouchResult,
+  type DeadLetter,
+  type DLQListResult,
+  type QueueDLQResult,
+  type GroupDeadLetter,
+  type GroupDLQListResult,
+  type GroupDLQResult,
+  type StreamGroupReportResult,
+  type StreamGroupStealResult,
+  StreamID,
 } from "./types.js";
 
 /** The most keys one kv.mget takes. */
@@ -109,6 +118,13 @@ const TABLE_OPS: ReadonlySet<OpCode> = new Set([
   OpCode.TSInfo,
   OpCode.StreamGroupList,
   OpCode.StreamGroupMembers,
+  OpCode.StreamGroupSteal,
+  OpCode.StreamGroupDLQList,
+  OpCode.StreamGroupDLQRequeue,
+  OpCode.StreamGroupDLQDelete,
+  OpCode.QueueDLQList,
+  OpCode.QueueDLQRequeue,
+  OpCode.QueueDLQDelete,
   OpCode.ProcessingRemove,
 ]);
 
@@ -567,7 +583,7 @@ const RUN_STATUSES = ["pending", "running", "completed", "failed", "cancelled", 
 /**
  * action.status's answer: [status:u8][created_at_ms:i64][started_at_ms?][completed_at_ms?]
  * [attempt:u32][output?: u16 length][error_message?: u16 length][worker_id?: u16 length]
- * [outcome?: u16 length], each ? a present byte first.
+ * [outcome?: u16 length][held?: u8 length], each ? a present byte first.
  */
 export function decodeActionStatusAnswer(runId: string, data: Uint8Array): import("./types.js").ActionRunStatus {
   const r = new AnswerReader(data);
@@ -582,8 +598,9 @@ export function decodeActionStatusAnswer(runId: string, data: Uint8Array): impor
   const errorMessage = r.present() ? new TextDecoder().decode(r.bytes16()) : undefined;
   const workerId = r.present() ? new TextDecoder().decode(r.bytes16()) : undefined;
   const outcome = r.present() ? r.string16() : undefined;
+  const held = r.present() ? r.string8() : undefined;
   r.end();
-  return { runId, status, createdAtMs, startedAtMs, completedAtMs, attempt, output, errorMessage, workerId, outcome };
+  return { runId, status, createdAtMs, startedAtMs, completedAtMs, attempt, output, errorMessage, workerId, outcome, held };
 }
 
 /** worker.list's request: limit (1 to 1024), cursor (empty for the first page), action (empty for every worker). */
@@ -1049,7 +1066,7 @@ export function encodeQueueFailBody(d: QueueDelivery, opts?: { delayMs?: number;
   return w.build();
 }
 
-const QUEUE_REFUSALS = 6; // gone, delivered_again, other_holder, expired, released, not_held
+const QUEUE_REFUSALS = 8; // gone, delivered_again, other_holder, expired, released, not_held, not_dead, not_idle
 
 function readRefused(r: AnswerReader): QueueReportResult["refused"] {
   const out: QueueReportResult["refused"] = [];
@@ -1079,4 +1096,237 @@ export function decodeQueueTouchAnswer(data: Uint8Array): QueueTouchResult {
   const refused = readRefused(r);
   r.end();
   return { expiresAtMs, applied, refused };
+}
+
+// ── Dead letters and steals ─────────────────────────────────────────────
+
+/** The most dead letters one list page holds, and one requeue or delete takes. */
+export const MAX_DLQ_BATCH = 100;
+/** The default dead-letter list page. */
+export const DEFAULT_DLQ_PAGE = 20;
+/** A queue dead-letter cursor: dead_ns, seq. */
+const QUEUE_DLQ_CURSOR = 16;
+/** A group dead-letter cursor: dead_ns, ms, seq. */
+const GROUP_DLQ_CURSOR = 24;
+/** A steal's min_idle_ms and lease_ms bounds. */
+export const MAX_STEAL_IDLE_MS = 43_200_000;
+const MIN_STEAL_LEASE_MS = 5000;
+const MAX_STEAL_LEASE_MS = 43_200_000;
+
+function writeCursor(w: BodyWriter, cursor: Uint8Array | null | undefined, len: number): void {
+  if (cursor == null || cursor.length === 0) return w.u8(0);
+  if (cursor.length !== len) throw new FloError(`flo: a dead-letter cursor is ${len} bytes, got ${cursor.length}: pass the one a page answered`);
+  w.u8(1);
+  w.bytes(cursor);
+}
+
+function readCursor(r: AnswerReader, len: number): Uint8Array | null {
+  return r.present() ? r.bytes(len) : null;
+}
+
+/** A dead-letter list's request after any group: limit, after. */
+function writeDlqListTail(w: BodyWriter, limit: number | undefined, cursor: Uint8Array | null | undefined, len: number): void {
+  const l = limit ?? DEFAULT_DLQ_PAGE;
+  checkLimit("limit", l, MAX_DLQ_BATCH);
+  w.u8(1);
+  w.u32(l);
+  writeCursor(w, cursor, len);
+}
+
+/** A requeue's or delete's selection: names some, or all with a limit. */
+function checkSelection(named: number, opts?: { all?: boolean; limit?: number }): number {
+  const all = opts?.all ?? false;
+  if (all === named > 0) throw new FloError(all ? "flo: name the dead letters or set all, not both" : "flo: name 1 or more dead letters, or set all");
+  if (named > MAX_DLQ_BATCH) throw new FloError(`flo: a requeue or delete names at most ${MAX_DLQ_BATCH} dead letters, got ${named}`);
+  const limit = opts?.limit ?? MAX_DLQ_BATCH;
+  checkLimit("limit", limit, MAX_DLQ_BATCH);
+  return limit;
+}
+
+function groupBytes(group: string): Uint8Array {
+  const g = textEncoder.encode(group);
+  if (g.length === 0) throw new FloError("flo: a group name is required");
+  checkLength("group name", g, MAX_GROUP_NAME);
+  return g;
+}
+
+/** queue.dlq_list's request: limit, after. */
+export function encodeQueueDlqListBody(opts?: { limit?: number; cursor?: Uint8Array | null }): Uint8Array {
+  const w = new BodyWriter();
+  writeDlqListTail(w, opts?.limit, opts?.cursor, QUEUE_DLQ_CURSOR);
+  return w.build();
+}
+
+/** queue.dlq_list's answer: the dead letters, then the next page's cursor. */
+export function decodeQueueDlqListAnswer(data: Uint8Array): DLQListResult {
+  const r = new AnswerReader(data);
+  const messages: DeadLetter[] = [];
+  for (let n = r.u8(); n > 0; n--) {
+    const seq = r.u64();
+    const priority = r.u32();
+    const deliveries = r.u32();
+    const failures = r.u32();
+    const enqueuedAtMs = r.i64();
+    const deadAtMs = r.i64();
+    const size = r.u32();
+    const payload = r.bytes16();
+    const error = r.string16();
+    messages.push({ seq, priority, deliveries, failures, enqueuedAtMs, deadAtMs, size, payload, error });
+  }
+  const cursor = readCursor(r, QUEUE_DLQ_CURSOR);
+  r.end();
+  return { messages, cursor };
+}
+
+/** queue.dlq_requeue's and queue.dlq_delete's request: messages, all, limit, then dry_run for a delete. */
+export function encodeQueueDlqBody(seqs: readonly bigint[], opts?: { all?: boolean; limit?: number; dryRun?: boolean }, del = false): Uint8Array {
+  const limit = checkSelection(seqs.length, opts);
+  const w = new BodyWriter();
+  if (seqs.length === 0) w.u8(0);
+  else {
+    w.u8(1);
+    w.u8(seqs.length);
+    for (const seq of seqs) {
+      checkU64("seq", seq);
+      w.u64(seq);
+    }
+  }
+  w.u8(1);
+  w.u8(opts?.all ? 1 : 0);
+  w.u8(1);
+  w.u32(limit);
+  if (del) {
+    w.u8(1);
+    w.u8(opts?.dryRun ? 1 : 0);
+  }
+  return w.build();
+}
+
+/** queue.dlq_requeue's and queue.dlq_delete's answer: applied, refused, more. */
+export function decodeQueueDlqAnswer(data: Uint8Array): QueueDLQResult {
+  const r = new AnswerReader(data);
+  const applied = r.u32();
+  const refused = readRefused(r);
+  const more = r.bool();
+  r.end();
+  return { applied, refused, more };
+}
+
+function readGroupRefused(r: AnswerReader): StreamGroupReportResult["refused"] {
+  const out: StreamGroupReportResult["refused"] = [];
+  for (let n = r.u8(); n > 0; n--) {
+    const id = new StreamID(r.u64(), r.u64());
+    const why = r.u8();
+    if (why >= QUEUE_REFUSALS) throw new IncompleteResponseError(`group refusal ${why} is not one this client knows`);
+    out.push({ id, why: why as QueueRefusal, reason: utf8(r.bytes8()) });
+  }
+  return out;
+}
+
+/** stream.group.dlq_list's request: group, limit, after. */
+export function encodeGroupDlqListBody(group: string, opts?: { limit?: number; cursor?: Uint8Array | null }): Uint8Array {
+  const w = new BodyWriter();
+  w.bytes16(groupBytes(group));
+  writeDlqListTail(w, opts?.limit, opts?.cursor, GROUP_DLQ_CURSOR);
+  return w.build();
+}
+
+/** stream.group.dlq_list's answer: the dead letters, then the next page's cursor. */
+export function decodeGroupDlqListAnswer(data: Uint8Array): GroupDLQListResult {
+  const r = new AnswerReader(data);
+  const dead: GroupDeadLetter[] = [];
+  for (let n = r.u8(); n > 0; n--) {
+    const id = new StreamID(r.u64(), r.u64());
+    const deliveries = r.u32();
+    const failures = r.u32();
+    const deadAtMs = r.i64();
+    const error = r.string16();
+    dead.push({ id, deliveries, failures, deadAtMs, error });
+  }
+  const cursor = readCursor(r, GROUP_DLQ_CURSOR);
+  r.end();
+  return { dead, cursor };
+}
+
+/** stream.group.dlq_requeue's and stream.group.dlq_delete's request: group, records, all, limit, then dry_run for a delete. */
+export function encodeGroupDlqBody(group: string, ids: readonly StreamID[], opts?: { all?: boolean; limit?: number; dryRun?: boolean }, del = false): Uint8Array {
+  const limit = checkSelection(ids.length, opts);
+  const w = new BodyWriter();
+  w.bytes16(groupBytes(group));
+  if (ids.length === 0) w.u8(0);
+  else {
+    w.u8(1);
+    w.u8(ids.length);
+    for (const id of ids) {
+      checkU64("id", id.timestampMs);
+      checkU64("id", id.sequence);
+      w.u64(id.timestampMs);
+      w.u64(id.sequence);
+    }
+  }
+  w.u8(1);
+  w.u8(opts?.all ? 1 : 0);
+  w.u8(1);
+  w.u32(limit);
+  if (del) {
+    w.u8(1);
+    w.u8(opts?.dryRun ? 1 : 0);
+  }
+  return w.build();
+}
+
+/** stream.group.dlq_requeue's and stream.group.dlq_delete's answer: applied, refused, more. */
+export function decodeGroupDlqAnswer(data: Uint8Array): GroupDLQResult {
+  const r = new AnswerReader(data);
+  const applied = r.u32();
+  const refused = readGroupRefused(r);
+  const more = r.bool();
+  r.end();
+  return { applied, refused, more };
+}
+
+/** stream.group.steal's request: group, consumer, min_idle_ms, lease_ms, records. */
+export function encodeGroupStealBody(
+  group: string,
+  consumer: string,
+  minIdleMs: number,
+  leaseMs: number | undefined,
+  records: readonly { id: StreamID; deliveries: number }[]
+): Uint8Array {
+  const c = textEncoder.encode(consumer);
+  if (c.length === 0) throw new FloError("flo: a steal names the consumer that takes the records");
+  checkLength("consumer", c, MAX_GROUP_NAME);
+  checkLimit("minIdleMs", minIdleMs, MAX_STEAL_IDLE_MS);
+  if (leaseMs !== undefined && (!Number.isInteger(leaseMs) || leaseMs < MIN_STEAL_LEASE_MS || leaseMs > MAX_STEAL_LEASE_MS)) {
+    throw new FloError(`flo: leaseMs must be a whole number of ms from ${MIN_STEAL_LEASE_MS} to ${MAX_STEAL_LEASE_MS}, got ${leaseMs}`);
+  }
+  if (records.length === 0 || records.length > MAX_QUEUE_BATCH) throw new FloError(`flo: a steal names 1 to ${MAX_QUEUE_BATCH} records, got ${records.length}`);
+  const w = new BodyWriter();
+  w.bytes16(groupBytes(group));
+  w.bytes16(c);
+  w.u64(BigInt(minIdleMs));
+  w.optU64(leaseMs === undefined ? undefined : BigInt(leaseMs));
+  w.u8(records.length);
+  for (const r of records) {
+    checkU64("id", r.id.timestampMs);
+    checkU64("id", r.id.sequence);
+    if (!Number.isInteger(r.deliveries) || r.deliveries < 0 || r.deliveries > 0xffffffff) throw new FloError(`flo: deliveries must fit a u32, got ${r.deliveries}`);
+    w.u64(r.id.timestampMs);
+    w.u64(r.id.sequence);
+    w.u32(r.deliveries);
+  }
+  return w.build();
+}
+
+/** stream.group.steal's answer: term, index, expires_at_ms, stolen, refused. */
+export function decodeGroupStealAnswer(data: Uint8Array, consumer: string): StreamGroupStealResult {
+  const r = new AnswerReader(data);
+  const term = r.u64();
+  const index = r.u64();
+  const expiresAtMs = r.i64();
+  const records: StreamGroupStealResult["records"] = [];
+  for (let n = r.u8(); n > 0; n--) records.push({ id: new StreamID(r.u64(), r.u64()), deliveries: r.u32() });
+  const refused = readGroupRefused(r);
+  r.end();
+  return { consumer, term, index, expiresAtMs, records, refused };
 }

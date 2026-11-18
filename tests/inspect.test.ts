@@ -1,6 +1,6 @@
 /**
  * The reads that show what a shard holds: action.info, queue.peek, a
- * queue's dead letters, a stream's groups and members. Each request and
+ * stream's groups and members. Each request and
  * answer per the server's layout, and the stale-report refusal of a report.
  */
 
@@ -96,49 +96,6 @@ describe("queue.peek", () => {
     expect(Array.from(sent[0]!.value)).toEqual([1, ...le(20n, 4)]);
     await expect(new QueueOperations(sender).peek("jobs", 0)).rejects.toThrow();
     await expect(new QueueOperations(sender).peek("jobs", 101)).rejects.toThrow();
-  });
-});
-
-describe("queue.dlqList", () => {
-  const letter = (seq: bigint, payload: string, size: number) => [
-    ...le(seq, 8),
-    ...le(BigInt(size), 4),
-    ...le(BigInt(payload.length), 4),
-    ...text(payload),
-    ...le(1600n, 8),
-    ...le(3n, 4),
-    9,
-    ...le(1700n, 8),
-  ];
-
-  it("sends [limit:u32][after:u64] in the value, not options, and reads the page's trailer", async () => {
-    const { sender, sent } = answering([...le(2n, 4), ...letter(4n, "a", 1), ...letter(6n, "bb", 9000), ...le(5n, 8), 1, ...le(6n, 8)]);
-    const page = await new QueueOperations(sender).dlqList("jobs", { limit: 2, after: 3n });
-    expect(page).toEqual({
-      messages: [
-        { seq: 4n, size: 1, payload: enc.encode("a"), enqueuedAtMs: 1600n, deliveries: 3, priority: 9, movedAtMs: 1700n },
-        { seq: 6n, size: 9000, payload: enc.encode("bb"), enqueuedAtMs: 1600n, deliveries: 3, priority: 9, movedAtMs: 1700n },
-      ],
-      total: 5n,
-      hasMore: true,
-      lastSeq: 6n,
-    });
-    expect(Array.from(sent[0]!.value)).toEqual([...le(2n, 4), ...le(3n, 8)]);
-    expect(sent[0]!.options.length).toBe(0);
-  });
-
-  it("asks for a first page of 100 by default, leaving after out", async () => {
-    const { sender, sent } = answering([...le(0n, 4), ...le(0n, 8), 0, ...le(0n, 8)]);
-    expect(await new QueueOperations(sender).dlqList("jobs")).toEqual({ messages: [], total: 0n, hasMore: false, lastSeq: 0n });
-    expect(Array.from(sent[0]!.value)).toEqual(le(100n, 4));
-  });
-
-  it("refuses a cut answer and a limit outside 1 to 100", async () => {
-    const whole = [...le(1n, 4), ...letter(4n, "a", 1), ...le(1n, 8), 0, ...le(4n, 8)];
-    for (let n = 0; n < whole.length; n++) {
-      await expect(new QueueOperations(answering(whole.slice(0, n)).sender).dlqList("q")).rejects.toBeInstanceOf(IncompleteResponseError);
-    }
-    await expect(new QueueOperations(answering(whole).sender).dlqList("q", { limit: 101 })).rejects.toThrow();
   });
 });
 

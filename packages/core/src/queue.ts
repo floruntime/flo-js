@@ -4,8 +4,11 @@
 
 import { createServerError, FloError, IncompleteResponseError } from "./errors.js";
 import {
-  AnswerReader,
   decodeDequeueAnswer,
+  decodeQueueDlqAnswer,
+  decodeQueueDlqListAnswer,
+  encodeQueueDlqBody,
+  encodeQueueDlqListBody,
   decodePeekAnswer,
   decodeQueueReportAnswer,
   decodeQueueTouchAnswer,
@@ -18,9 +21,11 @@ import {
 import {
   type DequeueOptions,
   type DequeueResult,
-  type DeadLetter,
+  type DLQDeleteOptions,
   type DLQListOptions,
   type DLQListResult,
+  type DLQSelectOptions,
+  type QueueDLQResult,
   type EnqueueOptions,
   type PeekOptions,
   type PeekResult,
@@ -184,26 +189,48 @@ export class QueueOperations {
   }
 
   /**
-   * A page of the queue's dead letters, oldest first: up to `limit` (100
-   * at most), each with up to 4 KiB of its payload. For the next page, pass
-   * the answer's `lastSeq` as `after` while `hasMore` is set.
+   * A page of the queue's dead letters, oldest dead first: up to `limit`
+   * (1 to 100, 20 by default), each with its failures, when it died, its
+   * last error and up to 4 KiB of its payload. Read on the leader. Pass the
+   * answer's `cursor` for the next page; it is null on the last.
    */
   async dlqList(queue: string, opts?: DLQListOptions): Promise<DLQListResult> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-
-    const resp = await this.sender.sendRequest(
-      OpCode.QueueDLQList,
-      namespace,
-      textEncoder.encode(queue),
-      serializeDlqListValue(opts?.limit ?? MAX_DLQ_PAGE, opts?.after),
-      new Uint8Array(0)
-    );
-
+    const resp = await this.sender.sendRequest(OpCode.QueueDLQList, namespace, textEncoder.encode(queue), encodeQueueDlqListBody(opts), new Uint8Array(0));
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
+    return decodeQueueDlqListAnswer(resp.data);
+  }
 
-    return decodeDlqListAnswer(resp.data);
+  /**
+   * Make dead letters ready again at once, at their priority, with their
+   * failures reset to 0 (deliveries and last error stay): those named by
+   * seq, or with `all` the oldest, up to `limit` per call, `more` saying
+   * whether others remain. One named that isn't dead comes back in
+   * `refused` as NotDead; one not in the queue as Gone.
+   */
+  async dlqRequeue(queue: string, seqs: readonly bigint[], opts?: DLQSelectOptions): Promise<QueueDLQResult> {
+    return this.dead(OpCode.QueueDLQRequeue, queue, encodeQueueDlqBody(seqs, opts, false), opts?.namespace);
+  }
+
+  /**
+   * Delete dead letters for good: those named by seq, or with `all` the
+   * oldest, up to `limit` per call, `more` saying whether others remain.
+   * With `dryRun`, `applied` is how many it would delete, and nothing is
+   * deleted. One named that isn't dead comes back in `refused` as NotDead.
+   */
+  async dlqDelete(queue: string, seqs: readonly bigint[], opts?: DLQDeleteOptions): Promise<QueueDLQResult> {
+    return this.dead(OpCode.QueueDLQDelete, queue, encodeQueueDlqBody(seqs, opts, true), opts?.namespace);
+  }
+
+  private async dead(op: OpCode, queue: string, body: Uint8Array, ns?: string): Promise<QueueDLQResult> {
+    const namespace = this.sender.getNamespace(ns);
+    const resp = await this.sender.sendRequest(op, namespace, textEncoder.encode(queue), body, new Uint8Array(0));
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+    return decodeQueueDlqAnswer(resp.data);
   }
 
   /**
@@ -223,44 +250,4 @@ export class QueueOperations {
     }
     return decodePeekAnswer(resp.data);
   }
-}
-
-/** The most dead letters one dlqList page holds. */
-export const MAX_DLQ_PAGE = 100;
-
-/** queue.dlq_list's value: [limit:u32][after_seq:u64], the seq left out for the first page. */
-export function serializeDlqListValue(limit: number, after?: bigint): Uint8Array {
-  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_DLQ_PAGE) {
-    throw new FloError(`flo: limit must be a whole number from 1 to ${MAX_DLQ_PAGE}, got ${limit}`);
-  }
-  if (after !== undefined && (after < 0n || after >= 1n << 64n)) throw new FloError(`flo: after must fit a u64, got ${after}`);
-  const buf = new Uint8Array(after === undefined ? 4 : 12);
-  const view = new DataView(buf.buffer);
-  view.setUint32(0, limit, true);
-  if (after !== undefined) view.setBigUint64(4, after, true);
-  return buf;
-}
-
-/**
- * queue.dlq_list's answer: [count:u32]([seq:u64][size:u32][len:u32][payload][enqueued_at_ms:i64]
- * [deliveries:u32][priority:u8][moved_at_ms:i64])*[total:u64][has_more:u8][last_seq:u64].
- */
-export function decodeDlqListAnswer(data: Uint8Array): DLQListResult {
-  const r = new AnswerReader(data);
-  const messages: DeadLetter[] = [];
-  for (let n = r.u32(); n > 0; n--) {
-    const seq = r.u64();
-    const size = r.u32();
-    const payload = r.bytes32();
-    const enqueuedAtMs = r.i64();
-    const deliveries = r.u32();
-    const priority = r.u8();
-    const movedAtMs = r.i64();
-    messages.push({ seq, size, payload, enqueuedAtMs, deliveries, priority, movedAtMs });
-  }
-  const total = r.u64();
-  const hasMore = r.bool();
-  const lastSeq = r.u64();
-  r.end();
-  return { messages, total, hasMore, lastSeq };
 }
