@@ -442,8 +442,8 @@ A group's dead letters work as a queue's (see Queue Operations, Dead
 letters), named by record id: `groupDlqList` pages them with each one's
 deliveries, failures, when it died and its last error; `groupDlqRequeue`
 and `groupDlqDelete` take ids or `all` with a `limit`, and refuse a record
-that isn't dead `NotDead`. A requeue passes over a record trimmed from the
-stream since.
+that isn't dead `NotDead`. A requeue refuses a record trimmed from the
+stream since as `Gone`.
 
 `groupSteal` is an operator's command: a read takes expired records by
 itself. It takes records another consumer holds, named with the deliveries
@@ -664,10 +664,13 @@ shard is logged and dropped, not resent.
 A handler's result refused `overloaded` and not run, once the client's own
 retries are spent, is sent again by the worker, the same request, from
 100 ms doubling to 5 s, each refusal logged at warn, until the server takes
-it or answers otherwise. A complete or fail that ends a run a workflow step
-called is refused so while the queue of messages to the workflow's shard is
-full; the run is held meanwhile (`action.status` shows why in `held`), not
-handed out again, so the result must get through. After `stop()` or
+it or answers otherwise. Any result can be refused so while too many writes
+wait for commit, or on a follower whose link to the leader is full. A group
+ack or nack's lease keeps running meanwhile, so a long overload can deliver
+the record again: at-least-once. A complete or fail that ends a run a
+workflow step called is also refused while the queue of messages to the
+workflow's shard is full; that run is held meanwhile (`action.status` shows
+why in `held`), not handed out again, so the result must get through. After `stop()` or
 `drain()` it is tried for up to 2 s more, then dropped with an error.
 
 `limit` is never retried by the client either. For the workers, start()
