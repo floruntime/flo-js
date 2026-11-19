@@ -17,6 +17,8 @@ The server's op table hash is now `0xdc7e06b2a9f89c65`, the hash of flo `08d5161
 ### Changed
 
 - A processing job's `name` is at most 4096 bytes and a workflow definition's `version` at most 256; the server refuses longer ones at `processing.submit` and `workflow.create` with `BadRequestError`.
+- A stream deleted and made again under the same name keeps its ids rising past the old ones while the server still holds the deleted stream's tombstone; once the tombstone is forgotten, they start again.
+- A `groupSteal` naming no records is answered at once, after the group and consumer checks: nothing stolen, a lease of zeros, and nothing logged.
 
 ## [0.1.0-dev.14] - 2026-11-18
 

@@ -453,7 +453,9 @@ read, stole or touched it, so a holder that touches more often is never
 stolen from, and such a record comes back in `refused` as `NotIdle`. Each
 one taken gets a new delivery leased to `consumer` (for `leaseMs`, or the
 group's lease), its failures kept; ack, nack and touch the result as a
-read's. The old holder's reports on it then apply nothing.
+read's. The old holder's reports on it then apply nothing. A steal naming
+no records is answered at once, after the group and consumer checks: nothing
+stolen and a lease of zeros.
 
 A `StreamWorker` reads its group and runs a handler per record: it acks the
 record when the handler returns and nacks it when the handler throws. From
