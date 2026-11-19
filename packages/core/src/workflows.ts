@@ -64,6 +64,7 @@ export class WorkflowOperations {
    * Create (or replace) a workflow from a YAML definition.
    * The server parses the YAML, validates the definition, and stores it.
    * This is an upsert — calling with the same name overwrites the previous version.
+   * A `version` over 256 bytes is refused `BadRequestError`.
    *
    * @param name - Workflow name (must match the `name` field in YAML)
    * @param yaml - YAML definition bytes

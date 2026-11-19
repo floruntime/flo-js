@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 The server's op table hash is now `0xe394286115044c9d`, the hash of flo `19cfe003`; this SDK and older servers refuse each other. Run ids may now be up to 42 bytes (`{prefix}{bits}-{shard}-{term}`); treat them as opaque.
 
+### Added
+
+- `stream.alter(stream, { clearRetentionAge?, clearRetentionCount? })` drops a retention bound, sent as the void options `OptionTag.RetentionAgeClear` (0x2d) and `RetentionCountClear` (0x2e). Setting and clearing the same bound in one alter throws before it is sent; the server refuses it too, and refuses a create carrying a clear. A count bound of u64 max is refused `BadRequestError` ("retention bound too large") on a create and an alter.
+- `Reason.SkippedByRepair` (38), under conflict: a repair skipped the log entry or message that carried the request, so it never runs on any node.
+
+### Changed
+
+- A processing job's `name` is at most 4096 bytes and a workflow definition's `version` at most 256; the server refuses longer ones at `processing.submit` and `workflow.create` with `BadRequestError`.
+
 ## [0.1.0-dev.14] - 2026-11-18
 
 Works with flo v0.1.0-dev.19.

@@ -610,6 +610,42 @@ describe.skipIf(!endpoint)("live", () => {
     await expect(client.stream.alter("never", { retentionCount: 1n })).rejects.toBeInstanceOf(NotFoundError);
   });
 
+  it("an alter clears a retention bound; set and clear, a create's clear and a bound of u64 max are refused", async () => {
+    const { client, namespace } = await liveClient();
+    await client.stream.create("ret", { retentionAgeS: 3600n, retentionCount: 100n });
+    await client.stream.alter("ret", { clearRetentionAge: true });
+    expect(await client.stream.info("ret")).toMatchObject({ retentionAgeS: 0n, retentionCount: 100n });
+    await client.stream.alter("ret", { clearRetentionCount: true });
+    expect(await client.stream.info("ret")).toMatchObject({ retentionAgeS: 0n, retentionCount: 0n });
+    // A create must now name no bounds.
+    await client.stream.create("ret");
+
+    // Set and clear of one bound: this SDK refuses it, and so does the server.
+    await client.stream.alter("ret", { retentionCount: 100n });
+    await expect(client.stream.alter("ret", { retentionCount: 5n, clearRetentionCount: true })).rejects.toThrow(/both set retentionCount and clear it/);
+    const both = await client.sendRequest(OpCode.StreamAlter, namespace, encoder.encode("ret"), new Uint8Array(0), new OptionsBuilder().addU64(OptionTag.RetentionCount, 5n).addFlag(OptionTag.RetentionCountClear).build());
+    expect(both.status).toBe(StatusCode.BadRequest);
+    expect(decoder.decode(both.data.subarray(3))).toContain("both sets and clears");
+    expect(await client.stream.info("ret")).toMatchObject({ retentionCount: 100n });
+
+    // stream.create can't send a clear; sent by hand, it is refused.
+    const value = new Uint8Array([1, 0, 0, 0]);
+    const created = await client.sendRequest(OpCode.StreamCreate, namespace, encoder.encode("fresh"), value, new OptionsBuilder().addFlag(OptionTag.RetentionAgeClear).build());
+    expect(created.status).toBe(StatusCode.BadRequest);
+    expect(decoder.decode(created.data.subarray(3))).toContain("only an alter drops a retention bound");
+    await expect(client.stream.info("fresh")).rejects.toBeInstanceOf(NotFoundError);
+
+    // u64 max is how the log carries a clear: a client's own is refused.
+    const max = (1n << 64n) - 1n;
+    for (const call of [() => client.stream.create("huge", { retentionCount: max }), () => client.stream.alter("ret", { retentionCount: max })]) {
+      const err = await call().catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BadRequestError);
+      expect((err as BadRequestError).message).toContain("retention bound too large");
+    }
+    await expect(client.stream.alter("ret", { retentionAgeS: max })).rejects.toBeInstanceOf(BadRequestError);
+    expect(await client.stream.info("ret")).toMatchObject({ retentionAgeS: 0n, retentionCount: 100n });
+  });
+
   it("lists a stream's consumer groups and a group's members, and refuses an unknown group not found", async () => {
     const { client } = await liveClient();
     await client.stream.append("events", encoder.encode("x"));

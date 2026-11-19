@@ -5,6 +5,7 @@
 import * as net from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  ConflictError,
   HEADER_SIZE,
   InternalError,
   MAGIC,
@@ -103,6 +104,16 @@ describe("createServerError", () => {
     expect(Reason.AdminOnly).toBe(30);
     expect(reasonName(Reason.AdminOnly)).toBe("admin_only");
     expect((createServerError(StatusCode.BadRequest, refusal("admin socket only", Reason.AdminOnly)) as ServerError).reason).toBe(Reason.AdminOnly);
+  });
+
+  it("knows reason 38, skipped_by_repair, under conflict", () => {
+    expect(Reason.SkippedByRepair).toBe(38);
+    expect(reasonName(Reason.SkippedByRepair)).toBe("skipped_by_repair");
+    const err = createServerError(StatusCode.Conflict, refusal("a repair skipped entry 12, message 3", Reason.SkippedByRepair)) as ServerError;
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(err).toMatchObject({ reason: Reason.SkippedByRepair, ran: Ran.No });
+    expect(err.message).toContain("skipped_by_repair");
+    expect(err.message).not.toContain("unknown_reason");
   });
 
   it("keeps internal_error apart from the retryable statuses", () => {

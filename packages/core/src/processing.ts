@@ -54,7 +54,8 @@ export class ProcessingOperations {
 
   /**
    * Submit a processing job from a YAML definition.
-   * Returns the server-assigned job ID.
+   * Returns the server-assigned job ID. A job `name` over 4096 bytes is
+   * refused `BadRequestError`.
    *
    * @param yaml - YAML job definition (bytes or string)
    * @param opts - Options (namespace)

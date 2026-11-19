@@ -363,18 +363,28 @@ export class StreamOperations {
 
   /**
    * Change a stream's retention: each setting given replaces the stream's,
-   * and one unset (or 0) is left as it is. It works on a stream an append
-   * made as on one a create made. A stream that doesn't exist throws
+   * and one unset (or 0) is left as it is. `clearRetentionAge` and
+   * `clearRetentionCount` drop a bound; setting and clearing the same one
+   * throws before anything is sent. It works on a stream an append made as
+   * on one a create made. A stream that doesn't exist throws
    * `NotFoundError`. After an alter, a create must name the settings the
    * stream has, or it is refused `ConflictError`.
    */
   async alter(stream: string, opts: StreamAlterOptions): Promise<void> {
-    await this.config(OpCode.StreamAlter, stream, new Uint8Array(0), opts);
+    const builder = new OptionsBuilder();
+    for (const [name, set, clear, tag] of [
+      ["retentionAgeS", opts.retentionAgeS, opts.clearRetentionAge, OptionTag.RetentionAgeClear],
+      ["retentionCount", opts.retentionCount, opts.clearRetentionCount, OptionTag.RetentionCountClear],
+    ] as const) {
+      if (!clear) continue;
+      if (set !== undefined && set !== 0n) throw new FloError(`flo: an alter can't both set ${name} and clear it`);
+      builder.addFlag(tag);
+    }
+    await this.config(OpCode.StreamAlter, stream, new Uint8Array(0), opts, builder);
   }
 
-  private async config(op: OpCode, stream: string, value: Uint8Array, opts?: { namespace?: string; retentionAgeS?: bigint; retentionCount?: bigint }): Promise<void> {
+  private async config(op: OpCode, stream: string, value: Uint8Array, opts?: { namespace?: string; retentionAgeS?: bigint; retentionCount?: bigint }, builder = new OptionsBuilder()): Promise<void> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-    const builder = new OptionsBuilder();
     for (const [name, tag, v] of [
       ["retentionAgeS", OptionTag.RetentionAge, opts?.retentionAgeS],
       ["retentionCount", OptionTag.RetentionCount, opts?.retentionCount],
