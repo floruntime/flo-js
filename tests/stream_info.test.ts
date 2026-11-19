@@ -86,4 +86,32 @@ describe("stream.create and alter", () => {
     expect(Array.from(sent[0]!.options)).toEqual(u64opt(OptionTag.RetentionCount, 5n));
     await expect(stream.alter("s", { retentionAgeS: -1n })).rejects.toThrow(/u64/);
   });
+
+  it("alter sends a clear as a flag with no value, beside the other bound's setting", async () => {
+    const { stream, sent } = answering(new Uint8Array(0));
+    await stream.alter("s", { clearRetentionAge: true, retentionCount: 5n });
+    await stream.alter("s", { clearRetentionAge: true, clearRetentionCount: true });
+    // A bound of 0 is unset, so clearing it too is no conflict.
+    await stream.alter("s", { retentionCount: 0n, clearRetentionCount: true, clearRetentionAge: false });
+    expect(OptionTag.RetentionAgeClear).toBe(0x2d);
+    expect(OptionTag.RetentionCountClear).toBe(0x2e);
+    expect(sent.map((x) => Array.from(x.options))).toEqual([
+      [OptionTag.RetentionAgeClear, 0, ...u64opt(OptionTag.RetentionCount, 5n)],
+      [OptionTag.RetentionAgeClear, 0, OptionTag.RetentionCountClear, 0],
+      [OptionTag.RetentionCountClear, 0],
+    ]);
+  });
+
+  it("alter refuses setting and clearing one bound before sending", async () => {
+    const { stream, sent } = answering(new Uint8Array(0));
+    await expect(stream.alter("s", { retentionAgeS: 60n, clearRetentionAge: true })).rejects.toThrow(/both set retentionAgeS and clear it/);
+    await expect(stream.alter("s", { retentionCount: 5n, clearRetentionCount: true })).rejects.toThrow(/both set retentionCount and clear it/);
+    expect(sent).toHaveLength(0);
+  });
+
+  it("create sends no clear, even one passed untyped", async () => {
+    const { stream, sent } = answering(new Uint8Array(0));
+    await stream.create("s", { clearRetentionAge: true } as never);
+    expect(sent[0]!.options.length).toBe(0);
+  });
 });

@@ -14,7 +14,7 @@ export const VERSION = 0x03;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0xe394286115044c9dn;
+export const TABLE_HASH = 0xdc7e06b2a9f89c65n;
 
 /**
  * Why the server refused a request. Mirrors the server's list. A code this
@@ -102,6 +102,12 @@ export enum Reason {
    * backs off.
    */
   GroupHeldFull = 37,
+  /**
+   * Status conflict: a repair skipped the log entry, or the message between
+   * shards, that carried the request, so it never runs on any node. The
+   * message names the repair's entry and the message's seq.
+   */
+  SkippedByRepair = 38,
 }
 
 /** Whether a refused request took effect: retry logic reads this, not the message. */
@@ -151,6 +157,7 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.TooManyWorkflowRuns]: "too_many_workflow_runs",
   [Reason.QueueFull]: "queue_full",
   [Reason.GroupHeldFull]: "group_held_full",
+  [Reason.SkippedByRepair]: "skipped_by_repair",
 };
 
 /** The server's name for a reason, as it appears in messages; `unknown_reason_<n>` for one this SDK doesn't know. */
@@ -427,6 +434,8 @@ export const OptionTag = {
   RetentionCount: 0x29, // u64: a stream keeps at most this many records (0 = no bound)
   RetentionAge: 0x2a, // u64: a stream trims records older than this many seconds (0 = no bound)
   Force: 0x2c, // void: Allow a destructive op, e.g. deleting a non-empty stream
+  RetentionAgeClear: 0x2d, // void: an alter drops the stream's age bound
+  RetentionCountClear: 0x2e, // void: an alter drops the stream's count bound
 
   // Consumer Group Options (0x30 - 0x3F)
   AckTimeoutMS: 0x30, // u32: A group's lease: a record not acked this long is redelivered (5 s to 12 h; default 30 s)
@@ -716,12 +725,18 @@ export interface StreamCreateOptions {
 
 /**
  * Settings for stream.alter: each one given replaces the stream's; unset
- * (or 0) leaves it as it is.
+ * (or 0) leaves it as it is. A clear drops that bound, so the stream keeps
+ * records of any age, or any number of them; setting and clearing the same
+ * bound in one alter is refused.
  */
 export interface StreamAlterOptions {
   namespace?: string;
   retentionAgeS?: bigint;
   retentionCount?: bigint;
+  /** Drop the stream's age bound. */
+  clearRetentionAge?: boolean;
+  /** Drop the stream's count bound. */
+  clearRetentionCount?: boolean;
 }
 
 /**

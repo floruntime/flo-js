@@ -453,7 +453,9 @@ read, stole or touched it, so a holder that touches more often is never
 stolen from, and such a record comes back in `refused` as `NotIdle`. Each
 one taken gets a new delivery leased to `consumer` (for `leaseMs`, or the
 group's lease), its failures kept; ack, nack and touch the result as a
-read's. The old holder's reports on it then apply nothing.
+read's. The old holder's reports on it then apply nothing. A steal naming
+no records is answered at once, after the group and consumer checks: nothing
+stolen and a lease of zeros.
 
 A `StreamWorker` reads its group and runs a handler per record: it acks the
 record when the handler returns and nacks it when the handler throws. From
@@ -495,9 +497,19 @@ An append makes a stream it names, with one partition and no retention.
 `create` makes one with settings: `partitions`, `retentionAgeS` (trim
 records older than this) and `retentionCount` (keep at most this many).
 `alter` changes retention: each setting given replaces the stream's, one
-left out is kept. It works on a stream an append made as on one a create
-made; a stream that doesn't exist throws `NotFoundError`. `info` shows the
-settings.
+left out (or 0) is kept. `clearRetentionAge` and `clearRetentionCount`
+drop a bound, so the stream keeps records of any age, or any number of
+them; setting and clearing the same bound in one alter throws before it
+is sent. Only an alter clears: `create` has no clear. A create or alter
+whose count bound is u64 max is refused `BadRequestError` ("retention
+bound too large"), as is an age over 100 years. It works on a
+stream an append made as on one a create made; a stream that doesn't
+exist throws `NotFoundError`. `info` shows the settings.
+
+```typescript
+await client.stream.create("events", { retentionAgeS: 3600n, retentionCount: 100000n });
+await client.stream.alter("events", { clearRetentionAge: true }); // keeps the count bound
+```
 
 A create of a stream that exists:
 
@@ -612,7 +624,7 @@ try {
 | `BlockTooLongError` | `blockMs` or `waitMs` over 300000, refused before sending |
 | `NotFoundError` | Resource not found |
 | `StaleNotFoundError` | A `NotFoundError` from `get` or `jsonGet` served stale (a halted shard, or a node whose reads are blocked): the key was absent as of that state; `stale` is true |
-| `ConflictError` | CAS version mismatch, or a condition that didn't hold |
+| `ConflictError` | CAS version mismatch, or a condition that didn't hold. Reason `SkippedByRepair`: a repair skipped the log entry or message that carried the request, so it never runs on any node |
 | `StaleReportError` | A `ConflictError` (reason `StaleReport`) for an action complete, fail or touch whose delivery the run has moved on from; the message says how |
 | `BadRequestError` | Invalid request |
 | `UnauthorizedError` | Authentication failed |
