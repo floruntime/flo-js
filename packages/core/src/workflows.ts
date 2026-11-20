@@ -393,7 +393,10 @@ export class WorkflowOperations {
   }
 
   /**
-   * Send a signal to a running workflow.
+   * Send a signal to a running workflow. Each signal ends one wait: a wait
+   * takes the oldest signal of its type the run holds. The run keeps signals
+   * no wait has taken (at most 64; one more is refused) until a wait takes
+   * them or the run ends.
    *
    * @param runId - Run ID of the target workflow
    * @param signalName - Signal type name

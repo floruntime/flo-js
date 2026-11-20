@@ -1849,7 +1849,10 @@ export interface WorkflowStartOptions {
   namespace?: string;
   /** Specific version to run (default: "latest") */
   version?: string;
-  /** Idempotency key — same key returns existing run ID without creating a new one */
+  /**
+   * Idempotency key — same key returns existing run ID without creating a new one.
+   * Keys starting with '_' are reserved for the server and refused.
+   */
   idempotencyKey?: string;
   /** Explicit run ID (optional — server generates one if omitted) */
   runId?: string;

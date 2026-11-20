@@ -105,6 +105,7 @@ describe.skipIf(!endpoint)("live", () => {
     expect((await client.kv.get("p"))!.expiresAtMs).toBeNull();
   });
 
+  // A delete frees what the key held, so the version before it is gone.
   it("shows a deleted version in a key's history", async () => {
     const { client } = await liveClient();
     await client.kv.put("h", encoder.encode("one"));
@@ -115,7 +116,6 @@ describe.skipIf(!endpoint)("live", () => {
     expect(versions.map((v) => ({ deleted: v.deleted, value: decoder.decode(v.value) }))).toEqual([
       { deleted: false, value: "three" },
       { deleted: true, value: "" },
-      { deleted: false, value: "one" },
     ]);
   });
 
