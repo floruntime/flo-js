@@ -14,7 +14,7 @@ export const VERSION = 0x03;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0xdc7e06b2a9f89c65n;
+export const TABLE_HASH = 0x2440b62edffe27a6n;
 
 /**
  * Why the server refused a request. Mirrors the server's list. A code this
@@ -1849,7 +1849,10 @@ export interface WorkflowStartOptions {
   namespace?: string;
   /** Specific version to run (default: "latest") */
   version?: string;
-  /** Idempotency key — same key returns existing run ID without creating a new one */
+  /**
+   * Idempotency key — same key returns existing run ID without creating a new one.
+   * Keys starting with '_' are reserved for the server and refused.
+   */
   idempotencyKey?: string;
   /** Explicit run ID (optional — server generates one if omitted) */
   runId?: string;
