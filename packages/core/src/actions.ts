@@ -8,6 +8,7 @@ import {
   decodeActionInfoAnswer,
   decodeActionStatusAnswer,
   decodeAwaitAnswer,
+  decodeRunHistoryAnswer,
   decodeEmptyAnswer,
   decodeTouchAnswer,
   decodeWorkerInfoAnswer,
@@ -15,6 +16,7 @@ import {
   encodeAwaitBody,
   encodeCompleteBody,
   encodeFailBody,
+  encodeRunHistoryBody,
   encodeTouchBody,
   encodeWorkerListBody,
   MAX_WORKER_LIST_LIMIT,
@@ -34,6 +36,8 @@ import {
   ActionType,
   OpCode,
   type RawResponse,
+  type RunHistoryOptions,
+  type RunHistoryPage,
   StatusCode,
   type TaskDelivery,
   type WorkerAwaitOptions,
@@ -171,6 +175,22 @@ export class ActionOperations {
     }
 
     return decodeActionStatusAnswer(runId, resp.data);
+  }
+
+  /**
+   * A page of an action run's history: its invoke, deliveries, failures
+   * and result, in order. Pass the page's `cursor` to get the next; stop
+   * when `hasMore` is false. The run's whole result is its `action_settled`
+   * event. A read may wait up to 5 s while the run's latest events reach
+   * its history.
+   */
+  async history(runId: string, opts?: RunHistoryOptions): Promise<RunHistoryPage> {
+    const namespace = this.sender.getNamespace(opts?.namespace);
+    const resp = await this.sender.sendRequest(OpCode.ActionHistory, namespace, textEncoder.encode(runId), encodeRunHistoryBody(opts), new Uint8Array(0));
+    if (resp.status !== StatusCode.OK) {
+      throw createServerError(resp.status, resp.data);
+    }
+    return decodeRunHistoryAnswer(resp.data);
   }
 
   /**

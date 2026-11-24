@@ -14,7 +14,7 @@ export const VERSION = 0x03;
  * tests run against the flo commit in .github/flo-ref.env: change both in
  * one commit.
  */
-export const TABLE_HASH = 0xe188239e79bb6befn;
+export const TABLE_HASH = 0xaaef4dfa38d45632n;
 
 /**
  * Why the server refused a request. Mirrors the server's list. A code this
@@ -78,12 +78,6 @@ export enum Reason {
   JobRunning = 31,
   /** Status limit: the node's memory budget is spent. */
   MemoryBudget = 32,
-  /** Status limit: the action's shard holds as many actions as it registers; delete one first. */
-  TooManyActions = 33,
-  /** Status limit: the node holds as many workflow definitions as it keeps. */
-  TooManyWorkflowDefinitions = 34,
-  /** Status limit: the node holds as many workflow runs as it keeps. */
-  TooManyWorkflowRuns = 35,
   /**
    * Status overloaded: the queue holds as many messages or bytes as its caps
    * allow, or the shard's queues and groups together do. It drains as
@@ -152,9 +146,6 @@ const REASON_NAMES: Record<Reason, string> = {
   [Reason.AdminOnly]: "admin_only",
   [Reason.JobRunning]: "job_running",
   [Reason.MemoryBudget]: "memory_budget",
-  [Reason.TooManyActions]: "too_many_actions",
-  [Reason.TooManyWorkflowDefinitions]: "too_many_workflow_definitions",
-  [Reason.TooManyWorkflowRuns]: "too_many_workflow_runs",
   [Reason.QueueFull]: "queue_full",
   [Reason.GroupHeldFull]: "group_held_full",
   [Reason.SkippedByRepair]: "skipped_by_repair",
@@ -310,6 +301,7 @@ export const OpCode = {
   /** Shard to shard only; the SDK never sends it. */
   ActionDeliver: 0x30e,
   ActionInfo: 0x30f,
+  ActionHistory: 0x310,
 
   // ── Workers (0x320 – 0x33F) ──
   WorkerRegister: 0x320,
@@ -1434,9 +1426,17 @@ export interface ActionRunStatus {
   completedAtMs?: bigint;
   /** Attempts begun so far, the current one included. */
   attempt: number;
-  /** What the worker completed it with; absent until it completes. */
+  /**
+   * What the worker completed it with: its first 256 bytes; absent until it
+   * completes. `outputTruncated` says whether more were cut; the whole is
+   * the detail of the run's `action_settled` history event.
+   */
   output?: Uint8Array;
-  /** Why its last attempt failed, if one did. */
+  /**
+   * Why its last attempt failed, if one did: its first 256 bytes.
+   * `errorTruncated` says whether more were cut; the whole is in the run's
+   * history.
+   */
   errorMessage?: string;
   /**
    * The worker that holds the run, or last held it; absent until a worker
@@ -1452,6 +1452,10 @@ export interface ActionRunStatus {
    * Absent otherwise.
    */
   held?: string;
+  /** Whether `output` is only the result's first 256 bytes. */
+  outputTruncated: boolean;
+  /** Whether `errorMessage` is only the error's first 256 bytes. */
+  errorTruncated: boolean;
 }
 
 /**
@@ -1879,29 +1883,68 @@ export interface WorkflowStatusResult {
   started_at?: bigint;
   completed_at?: bigint;
   wait_signal?: string;
-}
-
-/**
- * Options for getting workflow run history.
- */
-export interface WorkflowHistoryOptions {
-  namespace?: string;
-  /** Maximum number of history events to return (default: 100) */
-  limit?: number;
-}
-
-/**
- * A single workflow history event.
- */
-export interface WorkflowHistoryEvent {
   /**
-   * The event's kind, as the server names it: `step_waiting_for_room`, say,
+   * The run's output, once it has one. An ended run's is its first 256
+   * bytes, and its input is empty: the whole of each is in its history,
+   * the output as the `workflow_output` event's detail.
+   */
+  output?: Uint8Array;
+  /** Whether `output` is only the first 256 bytes of the run's output. */
+  output_truncated: boolean;
+}
+
+/**
+ * Options for reading a page of a run's history, a workflow's or an
+ * action's. Each field omitted is the server's default.
+ */
+export interface RunHistoryOptions {
+  namespace?: string;
+  /**
+   * The most events on the page, 1 to 1000; 100 when omitted. 0 is refused
+   * before it is sent.
+   */
+  limit?: number;
+  /** The cursor the last page answered; omit for the first page. */
+  cursor?: bigint | null;
+  /** Newest first, going back from the cursor; oldest first when omitted. */
+  newestFirst?: boolean;
+}
+
+/**
+ * One event of a run's history.
+ */
+export interface RunHistoryEvent {
+  /**
+   * What happened, as the server names it: `step_waiting_for_room`, say,
    * once per wait when a step couldn't start because the log was full (it
-   * runs again). Expect kinds this SDK doesn't list.
+   * runs again). `workflow_output` carries a workflow run's whole output,
+   * and `action_settled` an action run's whole result. `history_lost` and
+   * `history_missing` mark a gap: events a repair skipped or the log no
+   * longer holds, or not landed by the read's deadline. Expect kinds this
+   * SDK doesn't list.
    */
   type: string;
-  detail: string;
-  timestamp: number;
+  /** Its detail: an input, a result, an error, a worker. */
+  detail: Uint8Array;
+  /**
+   * For an action's settle, the outcome its worker named. For an action's
+   * delivery, retried failure or hand-back, `"truncated"` when `detail` is
+   * only the first 256 bytes. Empty otherwise.
+   */
+  extra: string;
+  /** When, in Unix milliseconds. */
+  timestampMs: bigint;
+}
+
+/**
+ * A page of a run's history, in the order asked.
+ */
+export interface RunHistoryPage {
+  events: RunHistoryEvent[];
+  /** Whether more events follow. */
+  hasMore: boolean;
+  /** The cursor that asks for them; null on the last page. */
+  cursor: bigint | null;
 }
 
 /**

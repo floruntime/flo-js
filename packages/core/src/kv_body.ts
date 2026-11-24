@@ -22,6 +22,8 @@ import {
   type ScanResult,
   type VersionEntry,
   type HistoryResult,
+  type RunHistoryEvent,
+  type RunHistoryPage,
   WaitFor,
   type WorkerInfo,
   type WorkerInfoResult,
@@ -107,6 +109,8 @@ const TABLE_OPS: ReadonlySet<OpCode> = new Set([
   OpCode.ActionFail,
   OpCode.ActionTouch,
   OpCode.ActionInfo,
+  OpCode.ActionHistory,
+  OpCode.WorkflowHistory,
   OpCode.WorkerList,
   OpCode.WorkerInfo,
   OpCode.QueuePeek,
@@ -583,7 +587,8 @@ const RUN_STATUSES = ["pending", "running", "completed", "failed", "cancelled", 
 /**
  * action.status's answer: [status:u8][created_at_ms:i64][started_at_ms?][completed_at_ms?]
  * [attempt:u32][output?: u16 length][error_message?: u16 length][worker_id?: u16 length]
- * [outcome?: u16 length][held?: u8 length], each ? a present byte first.
+ * [outcome?: u16 length][held?: u8 length][output_truncated:u8][error_truncated:u8],
+ * each ? a present byte first.
  */
 export function decodeActionStatusAnswer(runId: string, data: Uint8Array): import("./types.js").ActionRunStatus {
   const r = new AnswerReader(data);
@@ -599,8 +604,61 @@ export function decodeActionStatusAnswer(runId: string, data: Uint8Array): impor
   const workerId = r.present() ? new TextDecoder().decode(r.bytes16()) : undefined;
   const outcome = r.present() ? r.string16() : undefined;
   const held = r.present() ? r.string8() : undefined;
+  const outputTruncated = r.bool();
+  const errorTruncated = r.bool();
   r.end();
-  return { runId, status, createdAtMs, startedAtMs, completedAtMs, attempt, output, errorMessage, workerId, outcome, held };
+  return { runId, status, createdAtMs, startedAtMs, completedAtMs, attempt, output, errorMessage, workerId, outcome, held, outputTruncated, errorTruncated };
+}
+
+/** The most events one page of a run's history holds. */
+export const MAX_RUN_HISTORY_LIMIT = 1000;
+
+const lenientText = new TextDecoder();
+
+/**
+ * workflow.history's and action.history's request: limit, cursor,
+ * newest_first, each sent absent when not given so the server's default
+ * holds.
+ */
+export function encodeRunHistoryBody(opts?: { limit?: number; cursor?: bigint | null; newestFirst?: boolean }): Uint8Array {
+  const w = new BodyWriter();
+  if (opts?.limit === undefined) w.u8(0);
+  else {
+    checkLimit("limit", opts.limit, MAX_RUN_HISTORY_LIMIT);
+    w.u8(1);
+    w.u32(opts.limit);
+  }
+  const cursor = opts?.cursor ?? undefined;
+  checkU64("cursor", cursor);
+  w.optU64(cursor);
+  if (opts?.newestFirst === undefined) w.u8(0);
+  else {
+    w.u8(1);
+    w.u8(opts.newestFirst ? 1 : 0);
+  }
+  return w.build();
+}
+
+/**
+ * workflow.history's and action.history's answer: [count:u16]([event_type: u32 length]
+ * [detail: u32 length][extra: u16 length][timestamp_ms:i64])*[has_more:u8][cursor?:u64].
+ */
+export function decodeRunHistoryAnswer(data: Uint8Array): RunHistoryPage {
+  const r = new AnswerReader(data);
+  const count = r.u16();
+  if (count > MAX_RUN_HISTORY_LIMIT) throw new IncompleteResponseError(`history answer: ${count} events, more than a page holds`);
+  const events: RunHistoryEvent[] = [];
+  for (let n = count; n > 0; n--) {
+    const type = lenientText.decode(r.bytes32());
+    const detail = r.bytes32();
+    const extra = lenientText.decode(r.bytes16());
+    events.push({ type, detail, extra, timestampMs: r.i64() });
+  }
+  const hasMore = r.bool();
+  const cursor = r.present() ? r.u64() : null;
+  r.end();
+  if (hasMore !== (cursor !== null)) throw new IncompleteResponseError(`history answer: has_more ${hasMore} with${cursor === null ? "out" : ""} a cursor`);
+  return { events, hasMore, cursor };
 }
 
 /** worker.list's request: limit (1 to 1024), cursor (empty for the first page), action (empty for every worker). */

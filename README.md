@@ -254,10 +254,13 @@ Actions are registered tasks that can be invoked and executed by workers.
 |--------|-----------|-------------|
 | `register` | `register(name, actionType?, opts?) → Promise<void>` | Register an action |
 | `invoke` | `invoke(name, input, opts?) → Promise<ActionInvokeResult>` | Invoke an action |
-| `status` | `status(runId, opts?) → Promise<ActionRunStatus>` | A run's status; `held` says why a run past its lease hasn't ended yet (its end waits for room on the calling workflow's shard) |
+| `status` | `status(runId, opts?) → Promise<ActionRunStatus>` | A run's status; `held` says why a run past its lease hasn't ended yet (its end waits for room on the calling workflow's shard). `output` and `errorMessage` are their first 256 bytes, `outputTruncated` and `errorTruncated` saying whether more were cut |
+| `history` | `history(runId, opts?) → Promise<RunHistoryPage>` | A page of a run's history: its invoke, deliveries, failures and result; the whole result is the `action_settled` event's `detail` |
 | `list` | `list(opts?) → Promise<ActionListResult>` | A page of actions, each with its version, owner, lease, attempts and creation time |
 | `info` | `info(name, opts?) → Promise<ActionInfo>` | An action's definition, its runs by status and completed runs' latencies; `NotFoundError` if it isn't registered |
 | `delete` | `delete(name, opts?) → Promise<void>` | Delete an action |
+
+An action name is at most 256 bytes; a longer one is refused `BadRequestError`.
 
 An action's `timeoutMs` is its lease: how long a worker holds a run without
 completing, failing or touching it. It is 5000 to 43200000 ms; unset or 0 sends 0,
@@ -372,6 +375,39 @@ A handler that throws fails the run with retry: it runs again while attempts are
 `stop()` ends polling once the outstanding await returns (within `blockMs`). Handlers already running finish, and their completes or fails are sent, before `start()` returns (their signals are not aborted; `start()` doesn't wait for a handler past its time limit, whose run was already failed); then the worker deregisters and closes its connection. A result whose connection is lost after the stop is retried for up to 2 s, then dropped, and the server hands the run out again when its lease runs out.
 
 `close()` stops the worker (both `ActionWorker` and `StreamWorker`). close() waits up to 30 s (closeTimeoutMs) for the running loop to send its completes, acks and hand-backs, then closes the client; anything unsent is redelivered when its lease expires.
+
+### Workflow Operations
+
+`client.workflow` creates workflows from YAML and starts, signals, cancels
+and reads their runs. A workflow name is at most 256 bytes: a longer one is
+refused `BadRequestError` at `create` and `start`. A step calling an action
+whose name is longer than an action may have fails.
+
+`status(runId)` shows a run. An ended run's `input` is empty and its
+`output` is its first 256 bytes, `output_truncated` saying whether more were
+cut; both are whole in its history, the output as the `workflow_output`
+event's `detail`.
+
+`workflow.history(runId, opts?)` and `action.history(runId, opts?)` read one
+page of a run's history (`RunHistoryPage`), in order: `events`, `hasMore`,
+and the `cursor` for the next page (null on the last). Options are `limit`
+(1 to 1000, 100 when omitted; 0 is refused before it is sent), `cursor` and
+`newestFirst`. An event (`RunHistoryEvent`) is its `type`, `detail` (bytes),
+`extra` and `timestampMs`. `extra` is the outcome an action's worker named
+on its settle, `"truncated"` on an action's delivery, retried failure or
+hand-back whose `detail` is only its first 256 bytes, and empty otherwise.
+A `history_lost` or `history_missing` event marks events a page can't
+show: skipped by a repair, no longer held, or not landed in time. A read
+may wait up to 5 s while the run's latest events reach its history.
+
+```typescript
+let cursor: bigint | null = null;
+do {
+  const page = await client.workflow.history(runId, { cursor });
+  for (const e of page.events) console.log(e.type, new TextDecoder().decode(e.detail));
+  cursor = page.cursor;
+} while (cursor !== null);
+```
 
 ### Stream Operations
 
@@ -630,7 +666,7 @@ try {
 | `UnauthorizedError` | Authentication failed |
 | `OverloadedError` | Server overloaded, and the client's retries ran out. `reason` `QueueFull`: the queue is at its caps (retried); `GroupHeldFull`: the group (dead records included) or the shard's queues and groups are at their caps (not retried) |
 | `UnavailableError` | No leader, or the shard isn't taking writes, and the client's retries ran out. With `reason === Reason.ShardHalted` the shard halted, and takes no writes until an operator repairs it; never retried |
-| `LimitError` | The server holds as much of something as it is built to keep: `reason` says which (today `TooManyActions`, past 10,000 actions on the action's shard), and the message names it. The limits are fixed in the server's build, not settings: retrying won't clear it until something is deleted (it isn't permanent). Never run, never retried |
+| `LimitError` | The server holds as much of something as it can keep: `reason` says which (today `MemoryBudget`: the node's memory budget is spent, so a register or create past it is refused), and the message names the node. Retrying won't clear it until something is deleted or the node gets more memory (it isn't permanent). Never run, never retried |
 | `OutcomePendingError` | The write committed but hasn't applied: its shard halted at it or before it (`reason` ShardHalted, `ran` Unknown); the message says whether it applies when the shard resumes. Never retried |
 | `InternalError` | Internal server error |
 

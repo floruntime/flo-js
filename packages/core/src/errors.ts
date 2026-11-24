@@ -334,12 +334,11 @@ export class OutcomePendingError extends ServerError {
 }
 
 /**
- * Error thrown when the server holds as much of something as it is built to
- * keep: `reason` says which (today TooManyActions, past 10,000 actions on
- * the action's shard) and the message names it. It never ran. The limits
- * are fixed in the server's build, not settings, so retrying won't clear it
- * until something is deleted; the client never retries it. It doesn't mean
- * permanent.
+ * Error thrown when the server holds as much of something as it can keep:
+ * `reason` says which (today MemoryBudget, the node's memory budget spent)
+ * and the message names the node. It never ran. Retrying won't clear it
+ * until something is deleted or the node gets more memory; the client never
+ * retries it. It doesn't mean permanent.
  */
 export class LimitError extends ServerError {
   constructor(message?: string) {
