@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { IncompleteResponseError, decodeActionStatusAnswer } from "@floruntime/core";
 
 /** action.status's answer as the server encodes it. */
-function answer(status: number, opts: { started?: bigint; completed?: bigint; attempt?: number; output?: string; error?: string; worker?: string; outcome?: string; held?: string } = {}): Uint8Array {
+function answer(
+  status: number,
+  opts: { started?: bigint; completed?: bigint; attempt?: number; output?: string; error?: string; worker?: string; outcome?: string; held?: string; outputTruncated?: boolean; errorTruncated?: boolean } = {}
+): Uint8Array {
   const parts: number[] = [status];
   const i64 = (v: bigint) => {
     const b = new DataView(new ArrayBuffer(8));
@@ -34,6 +37,7 @@ function answer(status: number, opts: { started?: bigint; completed?: bigint; at
     const b = new TextEncoder().encode(opts.held);
     parts.push(1, b.length, ...b);
   }
+  parts.push(opts.outputTruncated ? 1 : 0, opts.errorTruncated ? 1 : 0);
   return new Uint8Array(parts);
 }
 
@@ -52,7 +56,20 @@ describe("action.status", () => {
       workerId: undefined,
       outcome: undefined,
       held: undefined,
+      outputTruncated: false,
+      errorTruncated: false,
     });
+  });
+
+  it("decodes whether the output and the error are only their first 256 bytes, last", () => {
+    const out = decodeActionStatusAnswer("r", answer(2, { completed: 1200n, attempt: 1, output: "o".repeat(256), outputTruncated: true }));
+    expect([out.output?.length, out.outputTruncated, out.errorTruncated]).toEqual([256, true, false]);
+    const err = decodeActionStatusAnswer("r", answer(3, { attempt: 2, error: "e".repeat(256), errorTruncated: true }));
+    expect([err.errorMessage?.length, err.outputTruncated, err.errorTruncated]).toEqual([256, false, true]);
+    // A flag is a bool: 2 is malformed.
+    const bad = answer(2, { attempt: 1 });
+    bad[bad.length - 1] = 2;
+    expect(() => decodeActionStatusAnswer("r", bad)).toThrow(IncompleteResponseError);
   });
 
   it("decodes why a run past due isn't ended yet, last, with a one-byte length", () => {
@@ -78,7 +95,7 @@ describe("action.status", () => {
   });
 
   it("refuses a cut answer and a status this client doesn't know", () => {
-    const whole = answer(2, { attempt: 1, output: "x", worker: "w", outcome: "o", held: "h" });
+    const whole = answer(2, { attempt: 1, output: "x", worker: "w", outcome: "o", held: "h", outputTruncated: true, errorTruncated: true });
     for (let n = 0; n < whole.length; n++) {
       expect(() => decodeActionStatusAnswer("r", whole.subarray(0, n))).toThrow(IncompleteResponseError);
     }

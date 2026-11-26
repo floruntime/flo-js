@@ -5,6 +5,26 @@ All notable changes to the Flo JavaScript SDK will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+The server's op table hash is now `0xaaef4dfa38d45632`, the hash of flo `0bc90b34`; this SDK and older servers refuse each other.
+
+### Changed (breaking)
+
+- `workflow.history(runId, { limit?, cursor?, newestFirst? })` returns one page (`RunHistoryPage`: `events`, `hasMore`, `cursor`, null on the last page) instead of an array of `WorkflowHistoryEvent`, and is sent as the server's table op `workflow.history` (0x345); the old `[limit]` value is refused. An event (`RunHistoryEvent`) is `{ type, detail, extra, timestampMs }`: `detail` is bytes (was a string) and `timestampMs` a bigint (was `timestamp`, a number). `WorkflowHistoryOptions` and `WorkflowHistoryEvent` are gone. Each option omitted is the server's default: 100 events oldest first from the start. `limit` is 1 to 1000; 0 is refused before it is sent.
+- `Reason.TooManyActions` (33), `TooManyWorkflowDefinitions` (34) and `TooManyWorkflowRuns` (35) are gone; the server no longer counts actions, definitions or runs against fixed caps. A register past the node's memory is refused `LimitError` with `Reason.MemoryBudget` (32). Nothing renumbers.
+
+### Added
+
+- `action.history(runId, opts)` (`OpCode.ActionHistory`, 0x310): a page of an action run's history, the same request and `RunHistoryPage` as a workflow's: its invoke, deliveries, failures and result. `extra` is the outcome its worker named on `action_settled`, and `"truncated"` on a delivery, retried failure or hand-back whose `detail` is only its first 256 bytes; empty otherwise.
+- `ActionRunStatus.outputTruncated` and `errorTruncated`: `output` and `errorMessage` are now their first 256 bytes, and these say whether more were cut. The whole result is the run's `action_settled` history event.
+- `WorkflowStatusResult.output` and `output_truncated`. An ended run's `input` is empty and its `output` its first 256 bytes; the whole output is the run's `workflow_output` history event. `decodeWorkflowStatusAnswer` refuses an answer with bytes left over.
+- A history page may hold `history_lost` or `history_missing` events, marking events skipped by a repair, no longer held, or not landed in time. A history read may wait up to 5 s while the run's latest events reach its history.
+
+### Server behaviour this release follows
+
+- A workflow or action name over 256 bytes is refused `BadRequestError` at `workflow.create`, `workflow.start` and `action.register`; a workflow step calling an action by a longer name fails.
+
 ## [0.1.0-dev.15] - 2026-11-24
 
 Works with flo v0.1.0-dev.21.

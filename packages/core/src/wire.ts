@@ -89,6 +89,9 @@ export function workerBlockMs(blockMs: number | undefined): number {
  *
  * @internal
  */
+/** How long the server may hold a history read, in milliseconds. */
+export const RUN_HISTORY_HOLD_MS = 5000;
+
 export function requestBlockMs(request: Uint8Array): number {
   const view = new DataView(request.buffer, request.byteOffset, request.byteLength);
   let off = HEADER_SIZE;
@@ -114,6 +117,9 @@ export function requestBlockMs(request: Uint8Array): number {
       off += request[off] === 1 ? 9 : 1;
       if (request.length < off + 9 || request[off] !== 1) return 0;
       return Number(view.getBigUint64(off + 1, true));
+    } else if (op === OpCode.WorkflowHistory || op === OpCode.ActionHistory) {
+      // The server may hold a history read while the run's history catches up.
+      return RUN_HISTORY_HOLD_MS;
     } else if (op !== OpCode.KVGet) {
       return 0;
     }

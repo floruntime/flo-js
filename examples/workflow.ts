@@ -17,6 +17,8 @@
 
 import { FloClient } from "@floruntime/node";
 
+const decoder = new TextDecoder();
+
 // --- Sample workflow definitions ---
 
 const orderWorkflowYAML = `\
@@ -296,8 +298,8 @@ async function main() {
       console.log(`  ⚠ Expected 'failed' but got '${failStatus.status}'`);
     }
     const failHistory = await client.workflow.history(failRunId, { limit: 10 });
-    for (const event of failHistory) {
-      console.log(`  [${event.type}] ${event.detail}`);
+    for (const event of failHistory.events) {
+      console.log(`  [${event.type}] ${decoder.decode(event.detail)}`);
     }
 
     // ============================================================
@@ -351,8 +353,8 @@ async function main() {
 
     // Show history
     const sigHist = await client.workflow.history(sigRunId, { limit: 15 });
-    for (const event of sigHist) {
-      console.log(`    [${event.type}] ${event.detail}`);
+    for (const event of sigHist.events) {
+      console.log(`    [${event.type}] ${decoder.decode(event.detail)}`);
     }
 
     // ── 6b. Signal timeout fails the workflow ──
@@ -391,8 +393,8 @@ async function main() {
 
     // Show history
     const toHist = await client.workflow.history(timeoutRunId, { limit: 15 });
-    for (const event of toHist) {
-      console.log(`    [${event.type}] ${event.detail}`);
+    for (const event of toHist.events) {
+      console.log(`    [${event.type}] ${decoder.decode(event.detail)}`);
     }
 
     // ============================================================
@@ -401,8 +403,8 @@ async function main() {
     console.log("\n=== Run History ===");
 
     const history = await client.workflow.history(runId, { limit: 10 });
-    for (const event of history) {
-      console.log(`  [${event.timestamp}] ${event.type}: ${event.detail}`);
+    for (const event of history.events) {
+      console.log(`  [${event.timestampMs}] ${event.type}: ${decoder.decode(event.detail)}`);
     }
 
     // ============================================================
@@ -481,8 +483,8 @@ async function main() {
 
       // Show history
       const hist = await client.workflow.history(runId, { limit: 10 });
-      for (const event of hist) {
-        console.log(`    [${event.type}] ${event.detail}`);
+      for (const event of hist.events) {
+        console.log(`    [${event.type}] ${decoder.decode(event.detail)}`);
       }
     }
 

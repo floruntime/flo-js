@@ -125,6 +125,10 @@ describe("kv.get", () => {
     const body = new Uint8Array([1, ...u64(7000n), 1, 0, 0]);
     const req = serializeRequest(1n, OpCode.KVGet, enc.encode("ns"), enc.encode("k"), body, new Uint8Array(0));
     expect(requestBlockMs(req)).toBe(7000);
+    for (const op of [OpCode.WorkflowHistory, OpCode.ActionHistory]) {
+      const h = serializeRequest(2n, op, enc.encode("ns"), enc.encode("run"), new Uint8Array([0, 0, 0]), new Uint8Array(0));
+      expect(requestBlockMs(h)).toBe(5000);
+    }
     // The table frame: no value length or options trailer.
     expect(new DataView(req.buffer).getUint32(4, true)).toBe(2 + 2 + 2 + 1 + body.length);
   });

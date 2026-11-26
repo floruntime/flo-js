@@ -1,5 +1,5 @@
 /**
- * Status limit: the node is at a limit an operator sets. Never run, and
+ * Status limit: the node's memory budget is spent. Never run, and
  * terminal: the client never retries it. start() fails with the limit
  * error; a limit hit while running is logged and backed off, warning once
  * per distinct reason. And a transaction's key
@@ -24,17 +24,20 @@ import { fakeServer, quiet, refusal, sleep, until } from "./fake_worker_server.j
 let close: (() => void) | undefined;
 afterEach(() => close?.());
 
-const LIMIT_TEXT = "limit: this node holds 10000 actions, as many as it registers; delete one first";
+const LIMIT_TEXT = "limit: node 1's memory budget is spent; delete something or give the node more memory";
 
 describe("a limit refusal", () => {
-  it("decodes every limit reason by name", () => {
+  it("decodes the limit reason by name", () => {
     expect(StatusCode.Limit).toBe(15);
-    expect([Reason.MemoryBudget, Reason.TooManyActions, Reason.TooManyWorkflowDefinitions, Reason.TooManyWorkflowRuns]).toEqual([32, 33, 34, 35]);
-    expect([32, 33, 34, 35].map((r) => reasonName(r as Reason))).toEqual(["memory_budget", "too_many_actions", "too_many_workflow_definitions", "too_many_workflow_runs"]);
+    expect(Reason.MemoryBudget).toBe(32);
+    expect(reasonName(Reason.MemoryBudget)).toBe("memory_budget");
+    // 33 to 35 are gone, and nothing after them moved.
+    expect([33, 34, 35].map((r) => reasonName(r as Reason))).toEqual(["unknown_reason_33", "unknown_reason_34", "unknown_reason_35"]);
+    expect(Reason.QueueFull).toBe(36);
   });
 
   it("is a LimitError carrying the reason and the server's message, sent once though retries are on", async () => {
-    const srv = await fakeServer((op) => (op === OpCode.ActionRegister ? refusal(StatusCode.Limit, Reason.TooManyActions, LIMIT_TEXT) : undefined));
+    const srv = await fakeServer((op) => (op === OpCode.ActionRegister ? refusal(StatusCode.Limit, Reason.MemoryBudget, LIMIT_TEXT) : undefined));
     close = srv.close;
     const client = new FloClient(srv.endpoint, { retry: { maxAttempts: 5, initialBackoffMs: 1, maxBackoffMs: 2 } });
     await client.connect();
@@ -43,8 +46,8 @@ describe("a limit refusal", () => {
       expect(err).toBeInstanceOf(LimitError);
       expect(isLimit(err)).toBe(true);
       expect(isRefusedUnrun(err)).toBe(false);
-      expect(err).toMatchObject({ status: StatusCode.Limit, reason: Reason.TooManyActions, ran: Ran.No, serverMessage: LIMIT_TEXT });
-      expect((err as Error).message).toContain("too_many_actions");
+      expect(err).toMatchObject({ status: StatusCode.Limit, reason: Reason.MemoryBudget, ran: Ran.No, serverMessage: LIMIT_TEXT });
+      expect((err as Error).message).toContain("memory_budget");
       expect(srv.ops().filter((o) => o === OpCode.ActionRegister)).toHaveLength(1);
     } finally {
       await client.close();
@@ -55,14 +58,14 @@ describe("a limit refusal", () => {
 
 describe("start() refused at a limit", () => {
   it("rejects an ActionWorker's start with LimitError after exactly one registration", async () => {
-    const srv = await fakeServer((op) => (op === OpCode.ActionRegister ? refusal(StatusCode.Limit, Reason.TooManyActions, LIMIT_TEXT) : undefined));
+    const srv = await fakeServer((op) => (op === OpCode.ActionRegister ? refusal(StatusCode.Limit, Reason.MemoryBudget, LIMIT_TEXT) : undefined));
     close = srv.close;
     const w = new ActionWorker({ endpoint: srv.endpoint, blockMs: 30000, logger: quiet, retry: { maxAttempts: 4, initialBackoffMs: 1, maxBackoffMs: 2 } });
     w.action("a", async () => new Uint8Array(0));
     const err = await w.start().catch((e: unknown) => e);
     // The refusal has come back, so the one request reached the fake.
     expect(err).toBeInstanceOf(LimitError);
-    expect(err).toMatchObject({ reason: Reason.TooManyActions, serverMessage: LIMIT_TEXT });
+    expect(err).toMatchObject({ reason: Reason.MemoryBudget, serverMessage: LIMIT_TEXT });
     await until(() => srv.ops().includes(OpCode.ActionRegister), 3000);
     await sleep(100);
     expect(srv.ops().filter((o) => o === OpCode.ActionRegister)).toHaveLength(1);
@@ -70,12 +73,12 @@ describe("start() refused at a limit", () => {
   });
 
   it("rejects a StreamWorker's start with LimitError after exactly one group create", async () => {
-    const srv = await fakeServer((op) => (op === OpCode.StreamGroupCreate ? refusal(StatusCode.Limit, Reason.TooManyActions, LIMIT_TEXT) : undefined));
+    const srv = await fakeServer((op) => (op === OpCode.StreamGroupCreate ? refusal(StatusCode.Limit, Reason.MemoryBudget, LIMIT_TEXT) : undefined));
     close = srv.close;
     const w = new StreamWorker(srv.endpoint, { stream: "s", ackTimeoutMs: 30000, blockMs: 30000, logger: quiet, retry: { maxAttempts: 4, initialBackoffMs: 1, maxBackoffMs: 2 } }, async () => {});
     const err = await w.start().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(LimitError);
-    expect(err).toMatchObject({ reason: Reason.TooManyActions, serverMessage: LIMIT_TEXT });
+    expect(err).toMatchObject({ reason: Reason.MemoryBudget, serverMessage: LIMIT_TEXT });
     await until(() => srv.ops().includes(OpCode.StreamGroupCreate), 3000);
     await sleep(100);
     expect(srv.ops().filter((o) => o === OpCode.StreamGroupCreate)).toHaveLength(1);
@@ -114,7 +117,7 @@ describe("a re-registration refused at a limit after a mid-run reconnect", () =>
   it("keeps the ActionWorker running and retrying with back-off, logged at error once, until it registers", async () => {
     const srv = await fakeServer((op, nth) => {
       if (op === OpCode.ActionAwait) return nth === 0 ? "drop" : "park";
-      if (op === OpCode.ActionRegister && (nth === 1 || nth === 2)) return refusal(StatusCode.Limit, Reason.TooManyActions, LIMIT_TEXT);
+      if (op === OpCode.ActionRegister && (nth === 1 || nth === 2)) return refusal(StatusCode.Limit, Reason.MemoryBudget, LIMIT_TEXT);
       return undefined;
     });
     close = srv.close;
@@ -133,7 +136,7 @@ describe("a re-registration refused at a limit after a mid-run reconnect", () =>
     const limits = errors.filter((m) => m.includes("refused at a limit"));
     expect(limits).toHaveLength(1);
     expect(limits[0]).toContain("not registered");
-    expect(limits[0]).toContain("too_many_actions");
+    expect(limits[0]).toContain("memory_budget");
     expect(warned.filter((m) => m.includes("refused at a limit"))).toEqual([]);
   }, 15_000);
 });

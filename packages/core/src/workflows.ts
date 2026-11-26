@@ -8,7 +8,7 @@
  */
 
 import { createServerError, FloError, IncompleteResponseError } from "./errors.js";
-import { AnswerReader } from "./kv_body.js";
+import { AnswerReader, decodeRunHistoryAnswer, encodeRunHistoryBody } from "./kv_body.js";
 import {
   OpCode,
   type RawResponse,
@@ -19,8 +19,8 @@ import {
   type WorkflowCancelOptions,
   type WorkflowStatusOptions,
   type WorkflowStatusResult,
-  type WorkflowHistoryOptions,
-  type WorkflowHistoryEvent,
+  type RunHistoryOptions,
+  type RunHistoryPage,
   type WorkflowListRunsOptions,
   type WorkflowListRunEntry,
   type WorkflowListRunsResult,
@@ -231,136 +231,31 @@ export class WorkflowOperations {
       throw createServerError(resp.status, resp.data);
     }
 
-    // Server returns binary wire format:
-    // [run_id_len:u16][run_id][workflow_len:u16][workflow]
-    // [version_len:u16][version][status:u8]
-    // [current_step_len:u16][current_step][input_len:u32][input]
-    // [created_at:i64][has_started:u8][started_at?:i64]
-    // [has_completed:u8][completed_at?:i64]
-    // [has_wait_signal:u8][wait_signal_len:u16][wait_signal]?
-    const data = resp.data;
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    let pos = 0;
-
-    const statusNames = [
-      "pending",
-      "running",
-      "waiting",
-      "completed",
-      "failed",
-      "cancelled",
-      "timed_out",
-    ];
-
-    const readU16 = () => {
-      const v = view.getUint16(pos, true);
-      pos += 2;
-      return v;
-    };
-    const readStr = (len: number) => {
-      const s = textDecoder.decode(data.subarray(pos, pos + len));
-      pos += len;
-      return s;
-    };
-
-    const runIdLen = readU16();
-    const parsedRunId = readStr(runIdLen);
-
-    const workflowLen = readU16();
-    const workflow = readStr(workflowLen);
-
-    const versionLen = readU16();
-    const version = readStr(versionLen);
-
-    const statusByte = data[pos++]!;
-    const statusStr = statusNames[statusByte] ?? `unknown(${statusByte})`;
-
-    const stepLen = readU16();
-    const currentStep = readStr(stepLen);
-
-    const inputLen = view.getUint32(pos, true);
-    pos += 4;
-    const input = data.slice(pos, pos + inputLen);
-    pos += inputLen;
-
-    const createdAt = view.getBigInt64(pos, true);
-    pos += 8;
-
-    let startedAt: bigint | undefined;
-    const hasStarted = data[pos++];
-    if (hasStarted === 1) {
-      startedAt = view.getBigInt64(pos, true);
-      pos += 8;
-    }
-
-    let completedAt: bigint | undefined;
-    const hasCompleted = data[pos++];
-    if (hasCompleted === 1) {
-      completedAt = view.getBigInt64(pos, true);
-      pos += 8;
-    }
-
-    let waitSignal: string | undefined;
-    const hasWaitSignal = data[pos++];
-    if (hasWaitSignal === 1) {
-      const wsLen = readU16();
-      waitSignal = readStr(wsLen);
-    }
-
-    const result: WorkflowStatusResult = {
-      run_id: parsedRunId,
-      workflow,
-      version,
-      status: statusStr,
-      current_step: currentStep,
-      input,
-      created_at: createdAt,
-    };
-    if (startedAt !== undefined) result.started_at = startedAt;
-    if (completedAt !== undefined) result.completed_at = completedAt;
-    if (waitSignal !== undefined) result.wait_signal = waitSignal;
-
-    return result;
+    return decodeWorkflowStatusAnswer(resp.data);
   }
 
   /**
-   * Get the execution history of a workflow run.
+   * A page of a workflow run's history: what happened to it, in order.
+   * Pass the page's `cursor` to get the next; stop when `hasMore` is false.
+   * The run's whole output is its `workflow_output` event. A read may wait
+   * up to 5 s while the run's latest events reach its history.
    *
    * @param runId - Run ID
-   * @param opts - Options (namespace, limit)
+   * @param opts - Options (namespace, limit, cursor, newestFirst)
    */
-  async history(
-    runId: string,
-    opts?: WorkflowHistoryOptions
-  ): Promise<WorkflowHistoryEvent[]> {
+  async history(runId: string, opts?: RunHistoryOptions): Promise<RunHistoryPage> {
     const namespace = this.sender.getNamespace(opts?.namespace);
-
-    // Value: [limit:u32] (little-endian)
-    const limit = opts?.limit ?? 100;
-    const value = new Uint8Array(4);
-    const view = new DataView(value.buffer);
-    view.setUint32(0, limit, true);
-
     const resp = await this.sender.sendRequest(
       OpCode.WorkflowHistory,
       namespace,
       textEncoder.encode(runId),
-      value,
+      encodeRunHistoryBody(opts),
       new Uint8Array(0)
     );
-
-    if (resp.status === StatusCode.NotFound) {
-      throw createServerError(resp.status, resp.data);
-    }
-
     if (resp.status !== StatusCode.OK) {
       throw createServerError(resp.status, resp.data);
     }
-
-    // Server returns binary wire format:
-    // [count:u32]([type_len:u16][type][detail_len:u16][detail][timestamp:i64])*
-    // [has_more:u8][cursor_len:u16]
-    return parseWireHistory(resp.data);
+    return decodeRunHistoryAnswer(resp.data);
   }
 
   /**
@@ -732,36 +627,36 @@ export function decodeDefinitionsAnswer(data: Uint8Array): WorkflowListDefinitio
   return { definitions, hasMore, cursor: hasMore ? cursor : null };
 }
 
+/** workflow.status's status values, by their wire number. */
+const WORKFLOW_STATUSES = ["pending", "running", "waiting", "completed", "failed", "cancelled", "timed_out"];
+
 /**
- * Parse binary wire format for workflow history events.
- *
- * Wire format: [count:u32]([type_len:u16][type][detail_len:u16][detail][timestamp:i64])*
- *              [has_more:u8][cursor_len:u16]
+ * workflow.status's answer: [run_id_len:u16][run_id][workflow_len:u16][workflow]
+ * [version_len:u16][version][status:u8][current_step_len:u16][current_step]
+ * [input_len:u32][input][created_at:i64][has_started:u8][started_at?:i64]
+ * [has_completed:u8][completed_at?:i64][has_wait_signal:u8]([wait_signal_len:u16][wait_signal])?
+ * [has_output:u8]([output_len:u32][output][output_truncated:u8])?
  */
-function parseWireHistory(data: Uint8Array): WorkflowHistoryEvent[] {
-  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  const count = view.getUint32(0, true);
-  const results: WorkflowHistoryEvent[] = [];
-  let pos = 4;
-
-  for (let i = 0; i < count; i++) {
-    const typeLen = view.getUint16(pos, true);
-    pos += 2;
-    const type = textDecoder.decode(data.subarray(pos, pos + typeLen));
-    pos += typeLen;
-
-    const detailLen = view.getUint16(pos, true);
-    pos += 2;
-    const detail = textDecoder.decode(data.subarray(pos, pos + detailLen));
-    pos += detailLen;
-
-    const timestamp = Number(view.getBigInt64(pos, true));
-    pos += 8;
-
-    results.push({ type, detail, timestamp });
+export function decodeWorkflowStatusAnswer(data: Uint8Array): WorkflowStatusResult {
+  const r = new AnswerReader(data);
+  const run_id = r.string16();
+  const workflow = r.string16();
+  const version = r.string16();
+  const code = r.u8();
+  const status = WORKFLOW_STATUSES[code] ?? `unknown(${code})`;
+  const current_step = r.string16();
+  const input = r.bytes32();
+  const created_at = r.i64();
+  const result: WorkflowStatusResult = { run_id, workflow, version, status, current_step, input, created_at, output_truncated: false };
+  if (r.present()) result.started_at = r.i64();
+  if (r.present()) result.completed_at = r.i64();
+  if (r.present()) result.wait_signal = r.string16();
+  if (r.present()) {
+    result.output = r.bytes32();
+    result.output_truncated = r.bool();
   }
-
-  return results;
+  r.end();
+  return result;
 }
 
 /**

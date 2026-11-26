@@ -359,7 +359,9 @@ describe.skipIf(!endpoint)("live", () => {
         expect(await client.workflow.start("orders", { id: runId }, { runId })).toBe(runId);
         const status = await client.workflow.status(runId);
         expect(status).toMatchObject({ run_id: runId, workflow: "orders" });
-        expect((await client.workflow.history(runId)).length).toBeGreaterThan(0);
+        const page = await client.workflow.history(runId);
+        expect(page.events.length).toBeGreaterThan(0);
+        expect([page.hasMore, page.cursor]).toEqual([false, null]);
         const listed = await client.workflow.listRuns({ workflowName: "orders", search: runId });
         expect(listed.runs.map((r) => r.run_id)).toContain(runId);
         await client.workflow.signal(runId, "nudge", encoder.encode("{}"));
@@ -368,6 +370,57 @@ describe.skipIf(!endpoint)("live", () => {
         const err = await client.workflow.start("other", {}, { runId }).catch((e: unknown) => e);
         expect(err, `second start of ${runId}`).toBeInstanceOf(ConflictError);
       }
+    }, 30000);
+
+    it("keeps an ended run's input and output in its history, the status showing a preview", async () => {
+      const { client } = await liveClient();
+      await client.workflow.create(
+        "echo-input",
+        `kind: Workflow\nname: echo-input\nversion: "1.0.0"\noutput: "$.input"\n\nstart:\n  wait_for_signal:\n    type: go\n  transitions:\n    success: flo.Completed\n`
+      );
+      const input = { note: "x".repeat(400) };
+      const runId = await client.workflow.start("echo-input", input);
+      const live = await client.workflow.status(runId);
+      expect(JSON.parse(decoder.decode(live.input))).toEqual(input);
+      expect([live.output, live.output_truncated]).toEqual([undefined, false]);
+      await client.workflow.signal(runId, "go", encoder.encode("{}"));
+      const deadline = Date.now() + 15000;
+      let status = await client.workflow.status(runId);
+      while (status.status !== "completed") {
+        expect(Date.now(), `run still ${status.status}`).toBeLessThan(deadline);
+        await new Promise((r) => setTimeout(r, 20));
+        status = await client.workflow.status(runId);
+      }
+      expect(status.input).toEqual(new Uint8Array(0));
+      expect(status.output_truncated).toBe(true);
+      expect(status.output!.length).toBe(256);
+
+      const all = await client.workflow.history(runId, { limit: 1000 });
+      expect([all.hasMore, all.cursor]).toEqual([false, null]);
+      const types = all.events.map((e) => e.type);
+      expect(types.slice(-2)).toEqual(["workflow_completed", "workflow_output"]);
+      const whole = all.events[all.events.length - 1]!.detail;
+      expect(JSON.parse(decoder.decode(whole))).toEqual(input);
+      expect(status.output).toEqual(whole.subarray(0, 256));
+
+      // One event a page, oldest first, then newest first: the same events.
+      const forward: string[] = [];
+      let cursor: bigint | null = null;
+      for (let pages = 0; ; pages++) {
+        expect(pages).toBeLessThan(types.length);
+        const p = await client.workflow.history(runId, { limit: 1, cursor });
+        expect(p.events).toHaveLength(1);
+        forward.push(p.events[0]!.type);
+        if (!p.hasMore) {
+          expect(p.cursor).toBeNull();
+          break;
+        }
+        cursor = p.cursor;
+      }
+      expect(forward).toEqual(types);
+      const newest = await client.workflow.history(runId, { limit: 2, newestFirst: true });
+      expect(newest.events.map((e) => e.type)).toEqual(["workflow_output", "workflow_completed"]);
+      expect(newest.hasMore).toBe(true);
     }, 30000);
   });
 
@@ -917,6 +970,38 @@ describe.skipIf(!endpoint)("live", () => {
     expect(t3).toMatchObject({ runId: second.runId, deliveries: 3, attempt: 2 });
     await client.worker.complete("w1", t3, encoder.encode("done"));
     expect((await client.action.status(second.runId)).status).toBe("completed");
+  }, 30000);
+
+  it("keeps an action run's whole result in its history, the status showing a preview", async () => {
+    const { client } = await liveClient();
+    await client.action.register("long", ActionType.User, { timeoutMs: 60000 });
+    const { runId } = await client.action.invoke("long", encoder.encode("in"));
+    const { task } = await client.worker.awaitTask("w1", ["long"], { blockMs: 5000 });
+    expect(task?.runId).toBe(runId);
+    const result = encoder.encode("r".repeat(300));
+    await client.worker.complete("w1", task!, result, { outcome: "long-one" });
+
+    const status = await client.action.status(runId);
+    expect(status).toMatchObject({ status: "completed", outputTruncated: true, errorTruncated: false, outcome: "long-one" });
+    expect(status.output).toEqual(result.subarray(0, 256));
+
+    const page = await client.action.history(runId);
+    expect([page.hasMore, page.cursor]).toEqual([false, null]);
+    const types = page.events.map((e) => e.type);
+    expect(types.slice(0, 2)).toEqual(["action_invoked", "action_delivered"]);
+    expect(page.events[0]!.detail).toEqual(encoder.encode("in"));
+    const settled = page.events.filter((e) => e.type === "action_settled");
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.detail).toEqual(result);
+    expect(settled[0]!.extra).toBe("long-one");
+    for (const e of page.events) expect(e.timestampMs).toBeGreaterThan(0n);
+
+    const first = await client.action.history(runId, { limit: 1 });
+    expect(first.events.map((e) => e.type)).toEqual(["action_invoked"]);
+    expect(first.hasMore).toBe(true);
+    const rest = await client.action.history(runId, { cursor: first.cursor });
+    expect(rest.events.map((e) => e.type)).toEqual(types.slice(1));
+    expect(rest.hasMore).toBe(false);
   }, 30000);
 
   it("shows an action's definition, its runs by status and the latency of completed ones", async () => {
